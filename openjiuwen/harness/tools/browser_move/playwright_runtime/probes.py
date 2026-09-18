@@ -585,7 +585,7 @@ async (page) => {{
         return 'calendar_date';
       }}
       const sortAncestor = /(sort|order|sort-list|sort-tabs)/.test(ancestor) || /\u6392\u5e8f/.test(ancestor);
-      const sortLabel = /(?:^|\s)(sales?|volume|price|latest|newest|relevance|comprehensive)(?:\s|$)/.test(own) ||
+      const sortLabel = /(?:^|\\s)(sales?|volume|price|latest|newest|relevance|comprehensive)(?:\\s|$)/.test(own) ||
         /(\u9500\u91cf|\u4ef7\u683c|\u6700\u65b0|\u7efc\u5408|\u8bc4\u5206)/.test(own);
       if ((role === 'tab' || /(sort-item|sort-option|sort-tab)/.test(own)) && (sortAncestor || sortLabel)) return 'sort_tab';
       const ratingAncestor = /(rating|score|star|rating-filter)/.test(ancestor) || /\u8bc4\u5206|\u661f\u7ea7/.test(ancestor);
