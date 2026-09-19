@@ -419,7 +419,12 @@ async def test_observe_member_status_emits_after_the_debounce(fast_debounce):
 
     marker = await asyncio.wait_for(queue.get(), timeout=1)
     assert marker.payload["event_type"] == "team.idle"
-    # The timer left no dangling reference behind.
+    # Receiving the queued event can precede the task's done callback.
+    timer = agent.stream_controller._idle_marker_task
+    if timer is not None:
+        await asyncio.wait_for(asyncio.shield(timer), timeout=1)
+        await asyncio.sleep(0)  # Let the task's done callback clear the field.
+    # The timer eventually leaves no dangling reference behind.
     assert agent.stream_controller._idle_marker_task is None
 
     await agent.observe_member_status("dev-1", MemberStatus.READY)

@@ -3,6 +3,8 @@
 
 """Unit tests for graph_memory states"""
 
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +24,23 @@ from openjiuwen.core.memory.graph.graph_memory.states import (
     nested_clear_dataclass,
     persist_to_db,
 )
+
+
+def test_graph_mem_prompting_initializes_language_registry_in_fresh_process():
+    """Schema generation must not require an unrelated prompt import first."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from openjiuwen.core.memory.graph.graph_memory.states import GraphMemPrompting; "
+            "assert GraphMemPrompting().language == 'cn'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 class TestNestedClearDataclass:
