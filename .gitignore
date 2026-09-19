@@ -223,6 +223,7 @@ __marimo__/
 
 *_tracer.json
 **/logs/
+artifacts/test-runs/
 tests/**/report/
 records/*.jsonl
 
