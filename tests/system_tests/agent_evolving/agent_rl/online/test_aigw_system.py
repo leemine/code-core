@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Callable
 
 import pytest
@@ -13,6 +15,19 @@ from tests.system_tests.agent_evolving.agent_rl.online.system_harness import Onl
 
 @pytest.fixture
 def online_rl_system(tmp_path):
+    adapter = (
+        Path(
+            os.environ.get(
+                "AIGW_REPO",
+                str(Path(__file__).resolve().parents[6] / "AgentBox-Platform/AgentBox-Platform/AgentInfra/Adapter"),
+            )
+        )
+        .expanduser()
+        .resolve()
+    )
+    binary = Path(os.environ.get("AIGW_BIN", str(adapter / "output/aigw/aigw")))
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        pytest.skip(f"requires executable AIGW binary: {binary}; build the Adapter or set AIGW_BIN")
     with OnlineRLSystem(tmp_path) as system:
         yield system
 

@@ -1,53 +1,71 @@
+import asyncio
 import os
 import textwrap
 from typing import Literal
 from unittest.mock import patch
+
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.workflow import BranchComponent
-from openjiuwen.core.workflow import BranchRouter
-from openjiuwen.core.workflow import NumberCondition
-from openjiuwen.core.workflow import IntentDetectionCompConfig, IntentDetectionComponent
-from openjiuwen.core.workflow import LLMCompConfig, LLMComponent
+from openjiuwen.core.foundation.tool import RestfulApi, RestfulApiCard
+from openjiuwen.core.graph.visualization.drawable import Drawable
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.workflow import (
+    BranchComponent,
+    BranchRouter,
+    ComponentAbility,
+    IntentDetectionCompConfig,
+    IntentDetectionComponent,
+    LLMCompConfig,
+    LLMComponent,
+    LoopComponent,
+    LoopGroup,
+    LoopSetVariableComponent,
+    NumberCondition,
+    ToolComponent,
+    ToolComponentConfig,
+    Workflow,
+)
 from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
 from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
-from openjiuwen.core.workflow import LoopGroup, LoopComponent
-from openjiuwen.core.workflow import LoopSetVariableComponent
-from openjiuwen.core.workflow import ToolComponent, ToolComponentConfig
-from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
-from openjiuwen.core.session import BaseSession
-from openjiuwen.core.foundation.tool import RestfulApi, RestfulApiCard
-from openjiuwen.core.workflow import Workflow
-from openjiuwen.core.workflow import ComponentAbility
-from openjiuwen.core.graph.visualization.drawable import Drawable
 from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
-from openjiuwen.core.runner import Runner
-from tests.unit_tests.core.workflow.mock_nodes import AddTenNode, MockEndNode, MockStartNode, CommonNode, \
-    StreamCompNode, CollectCompNode, Node1
-
+from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
+from tests.unit_tests.core.workflow.mock_nodes import (
+    AddTenNode,
+    CollectCompNode,
+    CommonNode,
+    MockEndNode,
+    MockStartNode,
+    Node1,
+    StreamCompNode,
+)
 
 WORKFLOW_DRAWABLE = "WORKFLOW_DRAWABLE"
+
+
+@pytest.fixture(autouse=True)
+def _workflow_event_loop():
+    """Legacy synchronous workflow setup expects a current event loop on Python 3.13."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        yield
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
 def test_visualize_simple_workflow():
     # flow: start -> a -> end
     flow = Workflow()
-    flow.set_start_comp("start", MockStartNode("start"),
-                        inputs_schema={
-                            "a": "${a}",
-                            "b": "${b}",
-                            "c": 1,
-                            "d": [1, 2, 3]})
-    flow.add_workflow_comp("a", Node1("a"),
-                           inputs_schema={
-                               "aa": "${start.a}",
-                               "ac": "${start.c}"})
-    flow.set_end_comp("end", MockEndNode("end"),
-                      inputs_schema={
-                          "result": "${a.aa}"})
+    flow.set_start_comp(
+        "start", MockStartNode("start"), inputs_schema={"a": "${a}", "b": "${b}", "c": 1, "d": [1, 2, 3]}
+    )
+    flow.add_workflow_comp("a", Node1("a"), inputs_schema={"aa": "${start.a}", "ac": "${start.c}"})
+    flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result": "${a.aa}"})
     flow.add_connection("start", "a")
     flow.add_connection("a", "end")
     mermaid_script = textwrap.dedent("""
@@ -69,11 +87,21 @@ def test_visualize_simple_stream_workflow():
     # flow: start -> a ---> b -> end
     flow = Workflow()
     flow.set_start_comp("start", MockStartNode("start"), inputs_schema={"a": "${a}"})
-    flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"},
-                           comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
-    flow.add_workflow_comp("b", CollectCompNode("b"), inputs_schema={"value": "${a.value}"},
-                           stream_inputs_schema={"value1": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
-                           wait_for_all=True)
+    flow.add_workflow_comp(
+        "a",
+        StreamCompNode("a"),
+        inputs_schema={"value": "${start.a}"},
+        comp_ability=[ComponentAbility.STREAM],
+        wait_for_all=True,
+    )
+    flow.add_workflow_comp(
+        "b",
+        CollectCompNode("b"),
+        inputs_schema={"value": "${a.value}"},
+        stream_inputs_schema={"value1": "${a.value}"},
+        comp_ability=[ComponentAbility.COLLECT],
+        wait_for_all=True,
+    )
     flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result1": "${b.value}"})
     flow.add_connection("start", "a")
     flow.add_stream_connection("a", "b")
@@ -93,13 +121,13 @@ def test_visualize_simple_stream_workflow():
         """).lstrip()
     assert flow.draw("jiuwen workflow") == mermaid_script
 
+
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
 def test_visualize_workflow_with_branch_comp():
     # flow: start -> sw[a,b] -> end
     flow = Workflow()
     flow.set_start_comp("start", MockStartNode("start"))
-    flow.set_end_comp("end", MockEndNode("end"),
-                      inputs_schema={"a": "${a.result}", "b": "${b.result}"})
+    flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"a": "${a.result}", "b": "${b.result}"})
 
     sw = BranchComponent()
     sw.add_branch("${a} <= 10", ["b"], "1")
@@ -107,11 +135,9 @@ def test_visualize_workflow_with_branch_comp():
 
     flow.add_workflow_comp("sw", sw)
 
-    flow.add_workflow_comp("a", CommonNode("a"),
-                           inputs_schema={"result": "${a}"})
+    flow.add_workflow_comp("a", CommonNode("a"), inputs_schema={"result": "${a}"})
 
-    flow.add_workflow_comp("b", AddTenNode("b"),
-                           inputs_schema={"source": "${a}"})
+    flow.add_workflow_comp("b", AddTenNode("b"), inputs_schema={"source": "${a}"})
 
     flow.add_connection("start", "sw")
     flow.add_connection("a", "end")
@@ -142,11 +168,9 @@ def test_visualize_workflow_with_branch_router():
     flow: start -> condition[a,b] -> end
     """
     flow = Workflow()
-    flow.set_start_comp("start", MockStartNode("start"),
-                        inputs_schema={"a": "${a}",
-                                       "b": "${b}",
-                                       "c": 1,
-                                       "d": [1, 2, 3]})
+    flow.set_start_comp(
+        "start", MockStartNode("start"), inputs_schema={"a": "${a}", "b": "${b}", "c": 1, "d": [1, 2, 3]}
+    )
 
     router = BranchRouter()
     router.add_branch("${start.a} is not None", "a")
@@ -181,11 +205,9 @@ def test_visualize_workflow_with_condition():
     start -> condition[a,b] -> end
     """
     flow = Workflow()
-    flow.set_start_comp("start", MockStartNode("start"),
-                        inputs_schema={"a": "${a}",
-                                       "b": "${b}",
-                                       "c": 1,
-                                       "d": [1, 2, 3]})
+    flow.set_start_comp(
+        "start", MockStartNode("start"), inputs_schema={"a": "${a}", "b": "${b}", "c": 1, "d": [1, 2, 3]}
+    )
 
     # Literal is for visualization
     def router(session: BaseSession) -> Literal["a", "b"]:
@@ -225,37 +247,21 @@ def test_visualize_workflow_with_condition():
 def test_visualize_sub_workflow():
     # flow: start -> a -> (sub_start -> sub_a -> sub_end) -> end
     sub_flow = Workflow()
-    sub_flow.set_start_comp("sub_start", MockStartNode("start"),
-                            inputs_schema={
-                                "a": "${a}",
-                                "b": "${b}",
-                                "c": 1,
-                                "d": [1, 2, 3]})
-    sub_flow.add_workflow_comp("sub_a", Node1("a"),
-                               inputs_schema={
-                                   "aa": "${start.a}",
-                                   "ac": "${start.c}"})
-    sub_flow.set_end_comp("sub_end", MockEndNode("end"),
-                          inputs_schema={
-                              "result": "${a.aa}"})
+    sub_flow.set_start_comp(
+        "sub_start", MockStartNode("start"), inputs_schema={"a": "${a}", "b": "${b}", "c": 1, "d": [1, 2, 3]}
+    )
+    sub_flow.add_workflow_comp("sub_a", Node1("a"), inputs_schema={"aa": "${start.a}", "ac": "${start.c}"})
+    sub_flow.set_end_comp("sub_end", MockEndNode("end"), inputs_schema={"result": "${a.aa}"})
     sub_flow.add_connection("sub_start", "sub_a")
     sub_flow.add_connection("sub_a", "sub_end")
 
     flow = Workflow()
-    flow.set_start_comp("start", MockStartNode("start"),
-                        inputs_schema={
-                            "a": "${a}",
-                            "b": "${b}",
-                            "c": 1,
-                            "d": [1, 2, 3]})
-    flow.add_workflow_comp("a", Node1("a"),
-                           inputs_schema={
-                               "aa": "${start.a}",
-                               "ac": "${start.c}"})
+    flow.set_start_comp(
+        "start", MockStartNode("start"), inputs_schema={"a": "${a}", "b": "${b}", "c": 1, "d": [1, 2, 3]}
+    )
+    flow.add_workflow_comp("a", Node1("a"), inputs_schema={"aa": "${start.a}", "ac": "${start.c}"})
     flow.add_workflow_comp("sub_flow", SubWorkflowComponent(sub_flow))
-    flow.set_end_comp("end", MockEndNode("end"),
-                      inputs_schema={
-                          "result": "${a.aa}"})
+    flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result": "${a.aa}"})
     flow.add_connection("start", "a")
     flow.add_connection("a", "sub_flow")
     flow.add_connection("sub_flow", "end")
@@ -304,57 +310,32 @@ def test_visualize_sub_workflow():
 def test_visualize_multi_layer_sub_workflow():
     # flow: start -> a -> (sub_start -> sub_a -> (sub_sub_start -> sub_sub_a -> sub_sub_end) -> sub_end) -> end
     sub_sub_flow = Workflow()
-    sub_sub_flow.set_start_comp("sub_sub_start", MockStartNode("start"),
-                            inputs_schema={
-                                "a": "${a}",
-                                "b": "${b}",
-                                "c": 1,
-                                "d": [1, 2, 3]})
-    sub_sub_flow.add_workflow_comp("sub_sub_a", Node1("a"),
-                               inputs_schema={
-                                   "aa": "${start.a}",
-                                   "ac": "${start.c}"})
-    sub_sub_flow.set_end_comp("sub_sub_end", MockEndNode("end"),
-                          inputs_schema={
-                              "result": "${a.aa}"})
+    sub_sub_flow.set_start_comp(
+        "sub_sub_start", MockStartNode("start"), inputs_schema={"a": "${a}", "b": "${b}", "c": 1, "d": [1, 2, 3]}
+    )
+    sub_sub_flow.add_workflow_comp("sub_sub_a", Node1("a"), inputs_schema={"aa": "${start.a}", "ac": "${start.c}"})
+    sub_sub_flow.set_end_comp("sub_sub_end", MockEndNode("end"), inputs_schema={"result": "${a.aa}"})
     sub_sub_flow.add_connection("sub_sub_start", "sub_sub_a")
     sub_sub_flow.add_connection("sub_sub_a", "sub_sub_end")
 
-
     sub_flow = Workflow()
-    sub_flow.set_start_comp("sub_start", MockStartNode("start"),
-                            inputs_schema={
-                                "a": "${a}",
-                                "b": "${b}",
-                                "c": 1,
-                                "d": [1, 2, 3]})
-    sub_flow.add_workflow_comp("sub_a", Node1("a"),
-                               inputs_schema={
-                                   "aa": "${start.a}",
-                                   "ac": "${start.c}"})
+    sub_flow.set_start_comp(
+        "sub_start", MockStartNode("start"), inputs_schema={"a": "${a}", "b": "${b}", "c": 1, "d": [1, 2, 3]}
+    )
+    sub_flow.add_workflow_comp("sub_a", Node1("a"), inputs_schema={"aa": "${start.a}", "ac": "${start.c}"})
     sub_flow.add_workflow_comp("sub_sub_flow", SubWorkflowComponent(sub_sub_flow))
-    sub_flow.set_end_comp("sub_end", MockEndNode("end"),
-                          inputs_schema={
-                              "result": "${a.aa}"})
+    sub_flow.set_end_comp("sub_end", MockEndNode("end"), inputs_schema={"result": "${a.aa}"})
     sub_flow.add_connection("sub_start", "sub_a")
     sub_flow.add_connection("sub_a", "sub_sub_flow")
     sub_flow.add_connection("sub_sub_flow", "sub_end")
 
     flow = Workflow()
-    flow.set_start_comp("start", MockStartNode("start"),
-                        inputs_schema={
-                            "a": "${a}",
-                            "b": "${b}",
-                            "c": 1,
-                            "d": [1, 2, 3]})
-    flow.add_workflow_comp("a", Node1("a"),
-                           inputs_schema={
-                               "aa": "${start.a}",
-                               "ac": "${start.c}"})
+    flow.set_start_comp(
+        "start", MockStartNode("start"), inputs_schema={"a": "${a}", "b": "${b}", "c": 1, "d": [1, 2, 3]}
+    )
+    flow.add_workflow_comp("a", Node1("a"), inputs_schema={"aa": "${start.a}", "ac": "${start.c}"})
     flow.add_workflow_comp("sub_flow", SubWorkflowComponent(sub_flow))
-    flow.set_end_comp("end", MockEndNode("end"),
-                      inputs_schema={
-                          "result": "${a.aa}"})
+    flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result": "${a.aa}"})
     flow.add_connection("start", "a")
     flow.add_connection("a", "sub_flow")
     flow.add_connection("sub_flow", "end")
@@ -444,8 +425,7 @@ def test_visualize_workflow_with_advanced_loop():
     # create  loop: (1->2->3)
     loop_group = LoopGroup()
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.index}"})
-    loop_group.add_workflow_comp("2", AddTenNode("2"),
-                                 inputs_schema={"source": "${l.intermediate_loop_var.user_var}"})
+    loop_group.add_workflow_comp("2", AddTenNode("2"), inputs_schema={"source": "${l.intermediate_loop_var.user_var}"})
     set_variable_component = LoopSetVariableComponent({"${l.intermediate_loop_var.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
     loop_group.start_nodes(["1"])
@@ -454,13 +434,16 @@ def test_visualize_workflow_with_advanced_loop():
     loop_group.add_connection("2", "3")
     output_callback = OutputCallback({"results": "${1.result}", "user_var": "${l.intermediate_loop_var.user_var}"})
     intermediate_callback = IntermediateLoopVarCallback({"user_var": "${input_number}"}, "intermediate_loop_var")
-    loop = AdvancedLoopComponent(loop_group, NumberCondition("${loop_number}"),
-                                 callbacks=[output_callback, intermediate_callback])
+    loop = AdvancedLoopComponent(
+        loop_group, NumberCondition("${loop_number}"), callbacks=[output_callback, intermediate_callback]
+    )
     flow.add_workflow_comp("l", loop, inputs_schema={"input_number": "${input_number}"})
-    flow.add_workflow_comp("b", CommonNode("b"),
-                           inputs_schema={"array_result": "${l.results}", "user_var": "${l.user_var}"})
-    flow.set_end_comp("e", MockEndNode("e"),
-                      inputs_schema={"array_result": "${b.array_result}", "user_var": "${b.user_var}"})
+    flow.add_workflow_comp(
+        "b", CommonNode("b"), inputs_schema={"array_result": "${l.results}", "user_var": "${l.user_var}"}
+    )
+    flow.set_end_comp(
+        "e", MockEndNode("e"), inputs_schema={"array_result": "${b.array_result}", "user_var": "${b.user_var}"}
+    )
     # s->a->(1->2->3)->b->e
     flow.add_connection("s", "a")
     flow.add_connection("a", "l")
@@ -517,13 +500,13 @@ def test_visualize_workflow_with_advanced_loop():
 def test_visualize_workflow_with_loop():
     flow = Workflow()
     flow.set_start_comp("s", MockStartNode("s"), inputs_schema={"a": "${input_number}"})
-    flow.add_workflow_comp("a", CommonNode("a"),
-                           inputs_schema={"array": "${input_array}"})
+    flow.add_workflow_comp("a", CommonNode("a"), inputs_schema={"array": "${input_array}"})
 
     # create  loop: (1->2->3)
     loop_group = LoopGroup()
-    loop_group.add_workflow_comp("1", AddTenNode("1", {"check": "${s.a}"}),
-                                 inputs_schema={"source": "${l.item}", "check": "${s.a}"})
+    loop_group.add_workflow_comp(
+        "1", AddTenNode("1", {"check": "${s.a}"}), inputs_schema={"source": "${l.item}", "check": "${s.a}"}
+    )
     loop_group.add_workflow_comp("2", AddTenNode("2"), inputs_schema={"source": "${l.user_var}"})
     set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
@@ -534,18 +517,28 @@ def test_visualize_workflow_with_loop():
     loop_group.add_connection("2", "3")
     loop_group.add_connection("3", "4")
 
-    loop_component = LoopComponent(loop_group, {"results": "${1.result}", "user_var": "${l.user_var}",
-                                                "index_collect": "${4.index}"})
+    loop_component = LoopComponent(
+        loop_group, {"results": "${1.result}", "user_var": "${l.user_var}", "index_collect": "${4.index}"}
+    )
 
-    flow.add_workflow_comp("l", loop_component, inputs_schema={"loop_type": "array",
-                                                               "loop_array": {"item": "${a.array}"},
-                                                               "intermediate_var": {"user_var": "${s.a}"}})
+    flow.add_workflow_comp(
+        "l",
+        loop_component,
+        inputs_schema={
+            "loop_type": "array",
+            "loop_array": {"item": "${a.array}"},
+            "intermediate_var": {"user_var": "${s.a}"},
+        },
+    )
 
-    flow.add_workflow_comp("b", CommonNode("b"),
-                           inputs_schema={"array_result": "${l.results}", "user_var": "${l.user_var}"})
-    flow.set_end_comp("e", MockEndNode("e"),
-                      inputs_schema={"array_result": "${b.array_result}", "user_var": "${b.user_var}",
-                                     "index": "${l.index_collect}"})
+    flow.add_workflow_comp(
+        "b", CommonNode("b"), inputs_schema={"array_result": "${l.results}", "user_var": "${l.user_var}"}
+    )
+    flow.set_end_comp(
+        "e",
+        MockEndNode("e"),
+        inputs_schema={"array_result": "${b.array_result}", "user_var": "${b.user_var}", "index": "${l.index_collect}"},
+    )
 
     # s->a->(1->2->3)->b->e
     flow.add_connection("s", "a")
@@ -605,13 +598,13 @@ def test_visualize_workflow_with_loop():
 def test_visualize_workflow_with_loop_unset_end_nodes():
     flow = Workflow()
     flow.set_start_comp("s", MockStartNode("s"), inputs_schema={"a": "${input_number}"})
-    flow.add_workflow_comp("a", CommonNode("a"),
-                           inputs_schema={"array": "${input_array}"})
+    flow.add_workflow_comp("a", CommonNode("a"), inputs_schema={"array": "${input_array}"})
 
     # create  loop: (1->2->3)
     loop_group = LoopGroup()
-    loop_group.add_workflow_comp("1", AddTenNode("1", {"check": "${s.a}"}),
-                                 inputs_schema={"source": "${l.item}", "check": "${s.a}"})
+    loop_group.add_workflow_comp(
+        "1", AddTenNode("1", {"check": "${s.a}"}), inputs_schema={"source": "${l.item}", "check": "${s.a}"}
+    )
     loop_group.add_workflow_comp("2", AddTenNode("2"), inputs_schema={"source": "${l.user_var}"})
     set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
@@ -621,18 +614,28 @@ def test_visualize_workflow_with_loop_unset_end_nodes():
     loop_group.add_connection("2", "3")
     loop_group.add_connection("3", "4")
     loop_group.end_nodes("4")
-    loop_component = LoopComponent(loop_group, {"results": "${1.result}", "user_var": "${l.user_var}",
-                                                "index_collect": "${4.index}"})
+    loop_component = LoopComponent(
+        loop_group, {"results": "${1.result}", "user_var": "${l.user_var}", "index_collect": "${4.index}"}
+    )
 
-    flow.add_workflow_comp("l", loop_component, inputs_schema={"loop_type": "array",
-                                                               "loop_array": {"item": "${a.array}"},
-                                                               "intermediate_var": {"user_var": "${s.a}"}})
+    flow.add_workflow_comp(
+        "l",
+        loop_component,
+        inputs_schema={
+            "loop_type": "array",
+            "loop_array": {"item": "${a.array}"},
+            "intermediate_var": {"user_var": "${s.a}"},
+        },
+    )
 
-    flow.add_workflow_comp("b", CommonNode("b"),
-                           inputs_schema={"array_result": "${l.results}", "user_var": "${l.user_var}"})
-    flow.set_end_comp("e", MockEndNode("e"),
-                      inputs_schema={"array_result": "${b.array_result}", "user_var": "${b.user_var}",
-                                     "index": "${l.index_collect}"})
+    flow.add_workflow_comp(
+        "b", CommonNode("b"), inputs_schema={"array_result": "${l.results}", "user_var": "${l.user_var}"}
+    )
+    flow.set_end_comp(
+        "e",
+        MockEndNode("e"),
+        inputs_schema={"array_result": "${b.array_result}", "user_var": "${b.user_var}", "index": "${l.index_collect}"},
+    )
 
     # s->a->(1->2->3)->b->e
     flow.add_connection("s", "a")
@@ -722,7 +725,6 @@ def test_drawable_exception():
             drawable.to_mermaid(expand_subgraph=invalid_expand_subgraph)
         assert cm.value.code == StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID.code
 
-
     # to mermaid failed, enable_animation is not boolean
     invalid_enable_animations = ["", "true", "xxx", 1, 0, {}, {"a": "b"}, [], [1, 2]]
     for invalid_enable_animation in invalid_enable_animations:
@@ -760,11 +762,21 @@ def test_visualize_simple_stream_workflow_animation():
     # flow: start -> a ---> b -> end
     flow = Workflow()
     flow.set_start_comp("start", MockStartNode("start"), inputs_schema={"a": "${a}"})
-    flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"},
-                           comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
-    flow.add_workflow_comp("b", CollectCompNode("b"), inputs_schema={"value": "${a.value}"},
-                           stream_inputs_schema={"value1": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
-                           wait_for_all=True)
+    flow.add_workflow_comp(
+        "a",
+        StreamCompNode("a"),
+        inputs_schema={"value": "${start.a}"},
+        comp_ability=[ComponentAbility.STREAM],
+        wait_for_all=True,
+    )
+    flow.add_workflow_comp(
+        "b",
+        CollectCompNode("b"),
+        inputs_schema={"value": "${a.value}"},
+        stream_inputs_schema={"value1": "${a.value}"},
+        comp_ability=[ComponentAbility.COLLECT],
+        wait_for_all=True,
+    )
     flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result1": "${b.value}"})
     flow.add_connection("start", "a")
     flow.add_stream_connection("a", "b")
@@ -794,8 +806,7 @@ def test_visualize_simple_workflow_intent():
     flow = Workflow()
     flow.set_start_comp("start", MockStartNode("start"), inputs_schema={"a": "${a}"})
     config = IntentDetectionCompConfig(
-        user_prompt="请判断用户意图，识别是否为天气查询请求",
-        category_name_list=["查询某地天气"]
+        user_prompt="请判断用户意图，识别是否为天气查询请求", category_name_list=["查询某地天气"]
     )
 
     intent = IntentDetectionComponent(config)
@@ -816,7 +827,7 @@ def test_visualize_simple_workflow_intent():
         output_config={
             "location": {"type": "string", "description": "地点（英文）", "required": True},
             "date": {"type": "string", "description": "日期（YYYY-MM-DD）", "required": True},
-            "query": {"type": "string", "description": "改写后的query", "required": True}
+            "query": {"type": "string", "description": "改写后的query", "required": True},
         },
     )
     llm = LLMComponent(config)
