@@ -51,7 +51,7 @@ jobs:
         with:
           version: '0.12.5'
       - name: Install full Python environment
-        run: uv sync --locked --group test --extra cli --extra pulsar --extra sandbox --extra online-rl --extra observability --python 3.13
+        run: uv sync --locked --group test --extra cli --extra pulsar --extra sandbox --extra online-rl --extra observability --extra chromadb --extra pgvector --python 3.13
       - name: Verify full-run accounting
         run: python3 -m unittest tools.tests.test_full_shards -v
       - name: Run full Python regression
