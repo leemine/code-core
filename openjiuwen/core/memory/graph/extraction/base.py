@@ -23,6 +23,12 @@ class MultilingualBaseModel(BaseModel):
     @classmethod
     def multilingual_model_json_schema(cls, language: str = "cn", strict: bool = False, **kwargs) -> dict[str, Any]:
         """Get JSON schema"""
+        if language not in MULTILINGUAL_DESCRIPTION:
+            # Language modules register descriptions when the prompt package
+            # is imported. Schema generation must not depend on another user
+            # having imported that package first.
+            from .prompts import entity_extraction  # noqa: F401
+
         desc_lookup = MULTILINGUAL_DESCRIPTION[language]
         result = super().model_json_schema(**kwargs)
         # Recursively replace multilingual description
