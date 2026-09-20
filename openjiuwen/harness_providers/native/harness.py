@@ -61,6 +61,7 @@ from openjiuwen.harness_providers.base import (
 )
 from openjiuwen.harness_providers.inputs import harness_input_text
 from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
+from openjiuwen.harness_providers.native.host import NativeHostHooks, claim_agent, release_agent
 from openjiuwen.harness_providers.native.mapping import NATIVE_CHUNK_KEY, snapshot_chunk, tool_payload
 
 ADAPTER_VERSION = "0.1.0"
@@ -194,6 +195,7 @@ class DeepAgentHarness(SerializedTurnHarness):
         event_buffer_capacity: int = 1024,
         preserve_output_chunks: bool = False,
         observe_tools: bool = True,
+        host_hooks: NativeHostHooks | None = None,
     ) -> None:
         """Bind the agent construction recipe; the agent is built on ``start``.
 
@@ -210,8 +212,12 @@ class DeepAgentHarness(SerializedTurnHarness):
                 extension data for an opt-in legacy output projection.
             observe_tools: Install the default tool observation rail. Set False
                 only when the agent factory already supplies a tool stream rail.
+            host_hooks: In-process host session/input ports. The harness owns
+                their lifecycle; live objects never enter JSON configuration.
         """
         super().__init__(event_buffer_capacity=event_buffer_capacity)
+        self._host_hooks = host_hooks or NativeHostHooks()
+        self._ownership_token = object()
         self._preserve_output_chunks = preserve_output_chunks
         self._observe_tools = observe_tools
         self._agent_factory = agent_factory
@@ -224,7 +230,7 @@ class DeepAgentHarness(SerializedTurnHarness):
     @property
     def agent(self) -> DeepAgent | None:
         """Return the live DeepAgent of the active cycle."""
-        return self._agent
+        return self._agent if self._cycle_started else None
 
     # ------------------------------------------------------------------
     # Provider hooks
@@ -248,6 +254,12 @@ class DeepAgentHarness(SerializedTurnHarness):
                 agent = await agent
             if not isinstance(agent, DeepAgent):
                 raise TypeError("agent_factory must return a DeepAgent")
+            if getattr(agent, "_interaction_started", False) is True:
+                raise HarnessProtocolError("agent_factory must return an unstarted DeepAgent")
+            # Claim ownership before initialization so base startup rollback can
+            # stop partially initialized resources without touching a live agent.
+            claim_agent(agent, self._ownership_token)
+            self._agent = agent
             if self._observe_tools:
                 agent.add_rail(_ObservationRail())
             if context.system_prompt:
@@ -258,9 +270,20 @@ class DeepAgentHarness(SerializedTurnHarness):
             # task scheduler tasks are spawned and inherit this context.
             await agent.ensure_initialized()
             session_id = self._session_id_override or f"{context.host_session_id}:{context.agent_id}"
-            session = create_agent_session(session_id=session_id, card=agent.card)
+            if self._host_hooks.create_session is None:
+                session = create_agent_session(session_id=session_id, card=agent.card)
+            else:
+                session = await self._host_hooks.create_session(context, agent)
+                self._agent_session = session
+                if session.get_session_id() != session_id:
+                    raise HarnessProtocolError("host session does not match the configured Native session id")
+            self._agent_session = session
             await session.pre_run(inputs={})
+            if self._host_hooks.before_start is not None:
+                await self._host_hooks.before_start(agent, session)
             await agent.start(session=session)
+            if getattr(agent, "_interaction_started", True) is not True:
+                raise HarnessProtocolError("DeepAgent interaction did not become ready")
             if self._agent_template is not None:
                 build_context = BuildContext(
                     language=self._language or "cn",
@@ -282,16 +305,22 @@ class DeepAgentHarness(SerializedTurnHarness):
         session = self._agent_session
         self._agent = None
         self._agent_session = None
-        if agent is not None:
-            try:
-                await agent.stop()
-            except Exception:
-                logger.exception("[deepagent] stop failed during teardown")
-        if session is not None:
-            try:
-                await session.post_run()
-            except Exception:
-                logger.exception("[deepagent] session post_run failed during teardown")
+        stopped = False
+        try:
+            if agent is not None:
+                try:
+                    await agent.stop()
+                    stopped = True
+                except Exception:
+                    logger.exception("[deepagent] stop failed during teardown")
+            if session is not None:
+                try:
+                    await session.post_run()
+                except Exception:
+                    logger.exception("[deepagent] session post_run failed during teardown")
+        finally:
+            if agent is not None and stopped:
+                release_agent(agent, self._ownership_token)
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
@@ -300,9 +329,10 @@ class DeepAgentHarness(SerializedTurnHarness):
         if agent is None:
             raise HarnessProtocolError("DeepAgent disappeared during an active cycle")
         query: Any = _turn_query(turn.content)
+        resuming = False
         try:
             while True:
-                await self._run_round(agent, turn, state, query)
+                await self._run_round(agent, turn, state, query, resuming=resuming)
                 if turn.abort_requested or not state.pending_interrupts or state.error is not None:
                     break
                 resume_input = await self._resolve_interrupts(turn, state)
@@ -310,6 +340,7 @@ class DeepAgentHarness(SerializedTurnHarness):
                     break
                 state.pending_interrupts.clear()
                 query = resume_input
+                resuming = True
         except Exception as exc:
             if not turn.abort_requested:
                 logger.exception("[deepagent] turn %s failed", turn.turn_id)
@@ -320,12 +351,16 @@ class DeepAgentHarness(SerializedTurnHarness):
                 )
         return self._build_result(turn, state, timing)
 
-    async def _run_round(self, agent: DeepAgent, turn: PendingTurn, state: _TurnState, query: Any) -> None:
+    async def _run_round(
+        self, agent: DeepAgent, turn: PendingTurn, state: _TurnState, query: Any, *, resuming: bool = False
+    ) -> None:
         stream = await agent.attach_output()
         if stream is None:
             raise HarnessProtocolError("DeepAgent output stream already has a consumer")
         try:
-            await agent.send_input(SendInputRequest(request_id=turn.turn_id, inputs={"query": query}))
+            request = SendInputRequest(request_id=turn.turn_id, inputs={"query": query})
+            if not await self._dispatch_input(agent, request, turn.content, resuming=resuming):
+                return
             async for chunk in stream:
                 await self._consume_chunk(turn, state, chunk)
         finally:
@@ -521,13 +556,27 @@ class DeepAgentHarness(SerializedTurnHarness):
         agent = self._agent
         if agent is None:
             raise HarnessProtocolError("DeepAgent disappeared during an active cycle")
-        await agent.send_input(
+        await self._dispatch_input(
+            agent,
             SendInputRequest(
                 request_id=f"steer-{uuid.uuid4().hex}",
                 inputs={"query": harness_input_text(content)},
                 mode=InputDispatchMode.STEER,
-            )
+            ),
+            content,
         )
+
+    async def _dispatch_input(
+        self, agent: DeepAgent, request: SendInputRequest, content: HarnessInput, *, resuming: bool = False
+    ) -> bool:
+        hook = self._host_hooks.dispatch_input
+        if hook is not None:
+            drain = await hook(agent, request, content, resuming)
+            if not isinstance(drain, bool):
+                raise TypeError("Native dispatch hook must return a bool")
+            return drain
+        await agent.send_input(request)
+        return True
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
         _ = turn, mode

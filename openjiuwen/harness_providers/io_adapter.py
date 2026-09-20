@@ -489,8 +489,16 @@ class HarnessIOAdapter:
         return None
 
     def _interaction_chunk(self, request: HarnessInteractionRequest) -> OutputSchema:
-        if isinstance(request, UserInputRequest):
-            value: dict[str, Any] = {
+        if (
+            isinstance(request, UserInputRequest)
+            and self._native_projection is not None
+            and "value" in request.provider_data
+        ):
+            # Preserve the Native card shape, but only when the authoritative
+            # request handler asks. Observation snapshots never create prompts.
+            value = json_value_to_builtin(request.provider_data["value"])
+        elif isinstance(request, UserInputRequest):
+            value = {
                 "kind": "user_input",
                 "prompt": request.prompt,
                 "choices": list(request.choices),
