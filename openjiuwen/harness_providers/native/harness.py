@@ -61,6 +61,8 @@ from openjiuwen.harness_providers.base import (
 )
 from openjiuwen.harness_providers.inputs import harness_input_text
 from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
+from openjiuwen.harness_providers.native.host import NativeHostHooks, claim_agent, release_agent
+from openjiuwen.harness_providers.native.mapping import NATIVE_CHUNK_KEY, snapshot_chunk, tool_payload
 
 ADAPTER_VERSION = "0.1.0"
 PROVIDER_NAME = "deepagent"
@@ -191,6 +193,9 @@ class DeepAgentHarness(SerializedTurnHarness):
         session_id: str | None = None,
         language: str | None = None,
         event_buffer_capacity: int = 1024,
+        preserve_output_chunks: bool = False,
+        observe_tools: bool = True,
+        host_hooks: NativeHostHooks | None = None,
     ) -> None:
         """Bind the agent construction recipe; the agent is built on ``start``.
 
@@ -203,8 +208,18 @@ class DeepAgentHarness(SerializedTurnHarness):
                 session id joined with the agent id.
             language: Language used when resolving the template.
             event_buffer_capacity: Bounded observation buffer capacity.
+            preserve_output_chunks: Carry JSON-safe original chunks in Native
+                extension data for an opt-in legacy output projection.
+            observe_tools: Install the default tool observation rail. Set False
+                only when the agent factory already supplies a tool stream rail.
+            host_hooks: In-process host session/input ports. The harness owns
+                their lifecycle; live objects never enter JSON configuration.
         """
         super().__init__(event_buffer_capacity=event_buffer_capacity)
+        self._host_hooks = host_hooks or NativeHostHooks()
+        self._ownership_token = object()
+        self._preserve_output_chunks = preserve_output_chunks
+        self._observe_tools = observe_tools
         self._agent_factory = agent_factory
         self._agent_template = agent_template
         self._session_id_override = session_id
@@ -215,7 +230,7 @@ class DeepAgentHarness(SerializedTurnHarness):
     @property
     def agent(self) -> DeepAgent | None:
         """Return the live DeepAgent of the active cycle."""
-        return self._agent
+        return self._agent if self._cycle_started else None
 
     # ------------------------------------------------------------------
     # Provider hooks
@@ -239,7 +254,14 @@ class DeepAgentHarness(SerializedTurnHarness):
                 agent = await agent
             if not isinstance(agent, DeepAgent):
                 raise TypeError("agent_factory must return a DeepAgent")
-            agent.add_rail(_ObservationRail())
+            if getattr(agent, "_interaction_started", False) is True:
+                raise HarnessProtocolError("agent_factory must return an unstarted DeepAgent")
+            # Claim ownership before initialization so base startup rollback can
+            # stop partially initialized resources without touching a live agent.
+            claim_agent(agent, self._ownership_token)
+            self._agent = agent
+            if self._observe_tools:
+                agent.add_rail(_ObservationRail())
             if context.system_prompt:
                 _append_context_prompt(agent, context.system_prompt, self._language)
             # The interaction loop never initializes the agent on its own: the
@@ -248,9 +270,20 @@ class DeepAgentHarness(SerializedTurnHarness):
             # task scheduler tasks are spawned and inherit this context.
             await agent.ensure_initialized()
             session_id = self._session_id_override or f"{context.host_session_id}:{context.agent_id}"
-            session = create_agent_session(session_id=session_id, card=agent.card)
+            if self._host_hooks.create_session is None:
+                session = create_agent_session(session_id=session_id, card=agent.card)
+            else:
+                session = await self._host_hooks.create_session(context, agent)
+                self._agent_session = session
+                if session.get_session_id() != session_id:
+                    raise HarnessProtocolError("host session does not match the configured Native session id")
+            self._agent_session = session
             await session.pre_run(inputs={})
+            if self._host_hooks.before_start is not None:
+                await self._host_hooks.before_start(agent, session)
             await agent.start(session=session)
+            if getattr(agent, "_interaction_started", True) is not True:
+                raise HarnessProtocolError("DeepAgent interaction did not become ready")
             if self._agent_template is not None:
                 build_context = BuildContext(
                     language=self._language or "cn",
@@ -272,16 +305,22 @@ class DeepAgentHarness(SerializedTurnHarness):
         session = self._agent_session
         self._agent = None
         self._agent_session = None
-        if agent is not None:
-            try:
-                await agent.stop()
-            except Exception:
-                logger.exception("[deepagent] stop failed during teardown")
-        if session is not None:
-            try:
-                await session.post_run()
-            except Exception:
-                logger.exception("[deepagent] session post_run failed during teardown")
+        stopped = False
+        try:
+            if agent is not None:
+                try:
+                    await agent.stop()
+                    stopped = True
+                except Exception:
+                    logger.exception("[deepagent] stop failed during teardown")
+            if session is not None:
+                try:
+                    await session.post_run()
+                except Exception:
+                    logger.exception("[deepagent] session post_run failed during teardown")
+        finally:
+            if agent is not None and stopped:
+                release_agent(agent, self._ownership_token)
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
@@ -290,16 +329,18 @@ class DeepAgentHarness(SerializedTurnHarness):
         if agent is None:
             raise HarnessProtocolError("DeepAgent disappeared during an active cycle")
         query: Any = _turn_query(turn.content)
+        resuming = False
         try:
             while True:
-                await self._run_round(agent, turn, state, query)
+                await self._run_round(agent, turn, state, query, resuming=resuming)
                 if turn.abort_requested or not state.pending_interrupts or state.error is not None:
                     break
                 resume_input = await self._resolve_interrupts(turn, state)
-                if resume_input is None:
+                if resume_input is None or turn.abort_requested:
                     break
                 state.pending_interrupts.clear()
                 query = resume_input
+                resuming = True
         except Exception as exc:
             if not turn.abort_requested:
                 logger.exception("[deepagent] turn %s failed", turn.turn_id)
@@ -310,12 +351,18 @@ class DeepAgentHarness(SerializedTurnHarness):
                 )
         return self._build_result(turn, state, timing)
 
-    async def _run_round(self, agent: DeepAgent, turn: PendingTurn, state: _TurnState, query: Any) -> None:
+    async def _run_round(
+        self, agent: DeepAgent, turn: PendingTurn, state: _TurnState, query: Any, *, resuming: bool = False
+    ) -> None:
         stream = await agent.attach_output()
         if stream is None:
             raise HarnessProtocolError("DeepAgent output stream already has a consumer")
         try:
-            await agent.send_input(SendInputRequest(request_id=turn.turn_id, inputs={"query": query}))
+            if turn.abort_requested:
+                return
+            request = SendInputRequest(request_id=turn.turn_id, inputs={"query": query})
+            if not await self._dispatch_input(agent, request, turn.content, resuming=resuming):
+                return
             async for chunk in stream:
                 await self._consume_chunk(turn, state, chunk)
         finally:
@@ -327,23 +374,61 @@ class DeepAgentHarness(SerializedTurnHarness):
         if isinstance(chunk, Mapping):
             chunk_type = chunk.get("type", chunk_type)
             payload = chunk.get("payload", payload)
+        extension = {}
+        if self._preserve_output_chunks and chunk_type != INTERACTION:
+            extension[NATIVE_CHUNK_KEY] = snapshot_chunk(chunk)
         if chunk_type == "llm_output":
             text = _payload_text(payload)
-            if text:
+            if text or extension:
                 state.answer_parts.append(text)
                 state.emitted_output = True
-                await self._emit(_delta(turn.turn_id, OutputChannel.ANSWER, text), turn=turn)
+                await self._emit(_delta(turn.turn_id, OutputChannel.ANSWER, text, extension), turn=turn)
             return
         if chunk_type == "llm_reasoning":
             text = _payload_text(payload)
-            if text:
+            if text or extension:
                 state.reasoning_parts.append(text)
-                await self._emit(_delta(turn.turn_id, OutputChannel.REASONING, text), turn=turn)
+                await self._emit(_delta(turn.turn_id, OutputChannel.REASONING, text, extension), turn=turn)
             return
-        if chunk_type == _TOOL_CALL_CHUNK and isinstance(payload, Mapping):
+        if chunk_type in {_TOOL_CALL_CHUNK, _TOOL_RESULT_CHUNK} and isinstance(payload, Mapping):
+            await self._consume_tool_chunk(turn, state, chunk_type, payload, extension)
+            return
+        if chunk_type == "answer" and isinstance(payload, Mapping):
+            output = payload.get("output")
+            state.final_output = output if isinstance(output, str) else json.dumps(to_json_safe(output))
+            state.result_type = str(payload.get("result_type") or "answer")
+            if extension:
+                await self._emit_chunk_extension(turn, chunk_type, payload, extension)
+            return
+        if chunk_type == INTERACTION:
+            interrupt_id, value = _interaction_payload(payload)
+            if interrupt_id:
+                state.pending_interrupts[interrupt_id] = value
+            return
+        if chunk_type == "execution.error" and isinstance(payload, Mapping):
+            state.error = TurnError(
+                message=str(payload.get("message") or "DeepAgent execution error"),
+                code=str(payload.get("code") or "execution_error"),
+                category="sdk_error",
+            )
+            if extension:
+                await self._emit_chunk_extension(turn, chunk_type, payload, extension)
+            return
+        await self._emit_chunk_extension(turn, chunk_type, payload, extension)
+
+    async def _consume_tool_chunk(
+        self,
+        turn: PendingTurn,
+        state: _TurnState,
+        chunk_type: str,
+        payload: Mapping[str, Any],
+        extension: dict[str, Any],
+    ) -> None:
+        if chunk_type == _TOOL_CALL_CHUNK:
+            payload = tool_payload(chunk_type, payload)
             call_id = str(payload.get("tool_call_id") or uuid.uuid4().hex)
-            name = str(payload.get("tool_name") or "unknown")
-            arguments = to_json_safe(payload.get("tool_args"))
+            name = str(payload.get("tool_name") or payload.get("name") or "unknown")
+            arguments = to_json_safe(payload.get("tool_args", payload.get("arguments")))
             state.tool_blocks.append(
                 ContentBlock(
                     block_id=f"{turn.turn_id}:tool:{call_id}",
@@ -356,19 +441,20 @@ class DeepAgentHarness(SerializedTurnHarness):
                 ItemLifecycleEvent(
                     kind=ItemEventKind.STARTED,
                     item_type="tool",
-                    data=freeze_json_object({"name": name, "arguments": arguments}),
+                    data=freeze_json_object({"name": name, "arguments": arguments, **extension}),
                 ),
                 turn=turn,
                 item_id=call_id,
             )
             return
-        if chunk_type == _TOOL_RESULT_CHUNK and isinstance(payload, Mapping):
+        if chunk_type == _TOOL_RESULT_CHUNK:
+            payload = tool_payload(chunk_type, payload)
             call_id = str(payload.get("tool_call_id") or uuid.uuid4().hex)
-            name = str(payload.get("tool_name") or "unknown")
-            result = to_json_safe(payload.get("tool_result"))
+            name = str(payload.get("tool_name") or payload.get("name") or "unknown")
+            result = to_json_safe(payload.get("raw_output", payload.get("tool_result", payload.get("result"))))
             rendered_result = payload.get("rendered_result")
             block_data: dict[str, Any] = {"call_id": call_id}
-            item_data: dict[str, Any] = {"tool_name": name, "result": result}
+            item_data: dict[str, Any] = {"tool_name": name, "result": result, **extension}
             if isinstance(rendered_result, str):
                 block_data["rendered_result"] = rendered_result
                 item_data["rendered_result"] = rendered_result
@@ -396,29 +482,16 @@ class DeepAgentHarness(SerializedTurnHarness):
                 item_id=call_id,
             )
             return
-        if chunk_type == "answer" and isinstance(payload, Mapping):
-            output = payload.get("output")
-            state.final_output = output if isinstance(output, str) else json.dumps(to_json_safe(output))
-            state.result_type = str(payload.get("result_type") or "answer")
-            return
-        if chunk_type == INTERACTION:
-            interrupt_id, value = _interaction_payload(payload)
-            if interrupt_id:
-                state.pending_interrupts[interrupt_id] = value
-            return
-        if chunk_type == "execution.error" and isinstance(payload, Mapping):
-            state.error = TurnError(
-                message=str(payload.get("message") or "DeepAgent execution error"),
-                code=str(payload.get("code") or "execution_error"),
-                category="sdk_error",
-            )
-            return
+
+    async def _emit_chunk_extension(
+        self, turn: PendingTurn, chunk_type: Any, payload: Any, extension: dict[str, Any]
+    ) -> None:
         await self._emit(
             ProviderEvent(
                 provider=PROVIDER_NAME,
                 event_type=str(chunk_type or "chunk"),
                 schema_version="1",
-                payload=freeze_json_object(to_json_object(payload)),
+                payload=freeze_json_object({**to_json_object(payload), **extension}),
             ),
             turn=turn,
         )
@@ -485,13 +558,27 @@ class DeepAgentHarness(SerializedTurnHarness):
         agent = self._agent
         if agent is None:
             raise HarnessProtocolError("DeepAgent disappeared during an active cycle")
-        await agent.send_input(
+        await self._dispatch_input(
+            agent,
             SendInputRequest(
                 request_id=f"steer-{uuid.uuid4().hex}",
                 inputs={"query": harness_input_text(content)},
                 mode=InputDispatchMode.STEER,
-            )
+            ),
+            content,
         )
+
+    async def _dispatch_input(
+        self, agent: DeepAgent, request: SendInputRequest, content: HarnessInput, *, resuming: bool = False
+    ) -> bool:
+        hook = self._host_hooks.dispatch_input
+        if hook is not None:
+            drain = await hook(agent, request, content, resuming)
+            if not isinstance(drain, bool):
+                raise TypeError("Native dispatch hook must return a bool")
+            return drain
+        await agent.send_input(request)
+        return True
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
         _ = turn, mode
@@ -539,13 +626,14 @@ def _payload_text(payload: Any) -> str:
     return payload if isinstance(payload, str) else ""
 
 
-def _delta(turn_id: str, channel: OutputChannel, text: str) -> OutputEvent:
+def _delta(turn_id: str, channel: OutputChannel, text: str, data: dict[str, Any]) -> OutputEvent:
     return OutputEvent(
         output_id=f"deepagent-output:{turn_id}:{channel.value}",
         kind=OutputKind.TEXT,
         content=text,
         operation=OutputOperation.DELTA,
         channel=channel,
+        data=data,
     )
 
 

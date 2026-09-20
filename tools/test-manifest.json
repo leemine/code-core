@@ -22,6 +22,7 @@
     "pr-stable": {
       "suites": [
         "code-core.python.execution-construction",
+        "code-core.python.native-output",
         "code-core.python.agent-builder",
         "code-core.python.dev-tools",
         "code-core.python.harness-protocol",
@@ -125,6 +126,57 @@
         "addopts=",
         "-o",
         "asyncio_mode=auto",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
+    },
+    {
+      "id": "code-core.python.native-output",
+      "owner": "harness-providers",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 120,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/harness_providers/test_native_host.py",
+          "tests/unit_tests/harness_providers/test_native_output_preservation.py",
+          "tests/unit_tests/harness_providers/test_native_rendered_result.py",
+          "tests/unit_tests/harness_providers/test_io_adapter.py",
+          "tests/unit_tests/harness_providers/test_base.py",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 60
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/harness_providers/test_native_host.py",
+        "tests/unit_tests/harness_providers/test_native_output_preservation.py",
+        "tests/unit_tests/harness_providers/test_native_rendered_result.py",
+        "tests/unit_tests/harness_providers/test_io_adapter.py",
+        "tests/unit_tests/harness_providers/test_base.py",
+        "-q",
+        "-o",
+        "addopts=",
         "-p",
         "no:cacheprovider",
         "--timeout=30",

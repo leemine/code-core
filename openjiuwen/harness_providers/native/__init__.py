@@ -10,6 +10,7 @@ from openjiuwen.harness_providers.native.harness import (
     AgentFactory,
     DeepAgentHarness,
 )
+from openjiuwen.harness_providers.native.host import NativeHostHooks
 from openjiuwen.harness_providers.native.provider import NativeHarnessProvider
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "DeepAgentHarness",
     "INTERACTIVE_INPUT_METADATA_KIND",
     "NativeHarnessProvider",
+    "NativeHostHooks",
     "PROVIDER_NAME",
 ]
