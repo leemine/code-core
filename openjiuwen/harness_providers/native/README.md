@@ -35,6 +35,11 @@ They are host integration choices, not JSON provider configuration fields.
   through the same single consumer. Its event observer still receives the
   standard event envelope and terminal result. The original chunk index is
   preserved, not replaced with protocol sequence numbers.
+- Hosts that serve multiple requests on one session may consume
+  `io.output_envelopes()` to receive each projected chunk with its protocol
+  `turn_id` and a terminal marker (`FINISHED`, `FAILED`, or `ABORTED`) in order.
+  Legacy `io.outputs()` still yields only `OutputSchema` chunks. Both methods
+  read the same single-consumer queue; a host must choose one for that session.
 - Interaction chunks are never mirrored. The existing request/response handler
   remains authoritative, avoiding duplicate questions or approvals.
 - Snapshots are JSON-safe observations, not retained Python object identities.

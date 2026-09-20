@@ -53,6 +53,8 @@ from openjiuwen.harness_protocol import (
     ToolApprovalDecision,
     ToolApprovalRequest,
     ToolApprovalResponse,
+    TurnEventKind,
+    TurnLifecycleEvent,
     UnsupportedHarnessCapabilityError,
     UserInputRequest,
     UserInputResponse,
@@ -67,22 +69,36 @@ INTERACTIVE_INPUT_KIND = "interactive_input"
 _END: Any = object()
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProjectedOutput:
+    """One projected chunk or terminal marker, tagged with its protocol Turn."""
+
+    turn_id: str | None
+    chunk: OutputSchema | None = None
+    terminal: TurnEventKind | None = None
+
+
 class _OutputIterator:
     """Wrap an asyncio queue as a single-consumer async iterator."""
 
-    __slots__ = ("_queue",)
+    __slots__ = ("_queue", "_with_turns")
 
-    def __init__(self, queue: asyncio.Queue[Any]) -> None:
+    def __init__(self, queue: asyncio.Queue[Any], *, with_turns: bool = False) -> None:
         self._queue = queue
+        self._with_turns = with_turns
 
     def __aiter__(self) -> "_OutputIterator":
         return self
 
     async def __anext__(self) -> Any:
-        item = await self._queue.get()
-        if item is _END:
-            raise StopAsyncIteration
-        return item
+        while True:
+            item = await self._queue.get()
+            if item is _END:
+                raise StopAsyncIteration
+            if self._with_turns:
+                return item
+            if item.chunk is not None:
+                return item.chunk
 
 
 @dataclasses.dataclass(slots=True)
@@ -247,6 +263,15 @@ class HarnessIOAdapter:
         """Return the queue-backed single-consumer output iterator."""
         return _OutputIterator(self._output_queue)
 
+    def output_envelopes(self) -> AsyncIterator[ProjectedOutput]:
+        """Read chunks and terminal markers in event order from the same queue.
+
+        Use this instead of ``outputs()`` when the host owns concurrent
+        requests or keeps a session alive after one request stream ends.
+        Both methods consume the same queue and must never be used together.
+        """
+        return _OutputIterator(self._output_queue, with_turns=True)
+
     # ------------------------------------------------------------------
     # Inputs
     # ------------------------------------------------------------------
@@ -355,7 +380,9 @@ class HarnessIOAdapter:
         loop = asyncio.get_running_loop()
         pending = _PendingInteraction(request=request, future=loop.create_future())
         self._pending[request.request_id] = pending
-        await self._output_queue.put(self._interaction_chunk(request))
+        await self._output_queue.put(
+            ProjectedOutput(turn_id=request.turn_id, chunk=self._interaction_chunk(request))
+        )
         try:
             return await pending.future
         finally:
@@ -416,7 +443,20 @@ class HarnessIOAdapter:
                     elif isinstance(payload, ItemLifecycleEvent):
                         chunk = self._project_item(envelope.item_id, payload)
                 if chunk is not None:
-                    await self._output_queue.put(chunk)
+                    await self._output_queue.put(
+                        ProjectedOutput(turn_id=envelope.turn_id, chunk=chunk)
+                    )
+                if (
+                    isinstance(payload, TurnLifecycleEvent)
+                    and payload.kind in {
+                        TurnEventKind.FINISHED,
+                        TurnEventKind.FAILED,
+                        TurnEventKind.ABORTED,
+                    }
+                ):
+                    await self._output_queue.put(
+                        ProjectedOutput(turn_id=envelope.turn_id, terminal=payload.kind)
+                    )
         finally:
             await cursor.aclose()
 
@@ -577,5 +617,6 @@ __all__ = [
     "HarnessIOAdapter",
     "INTERACTIVE_INPUT_KIND",
     "ProviderInteractionHandler",
+    "ProjectedOutput",
     "to_harness_input",
 ]

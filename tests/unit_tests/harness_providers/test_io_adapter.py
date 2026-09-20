@@ -35,6 +35,10 @@ from openjiuwen.harness_protocol import (
     SendReceipt,
     ToolApprovalDecision,
     ToolApprovalRequest,
+    TurnEventKind,
+    TurnLifecycleEvent,
+    TurnResult,
+    TurnStatus,
     UnsupportedHarnessCapabilityError,
     UserInputRequest,
 )
@@ -126,7 +130,7 @@ class _FakeHarness:
     async def export_checkpoint(self) -> None:
         return None
 
-    async def emit(self, payload: Any, *, item_id: str | None = None) -> None:
+    async def emit(self, payload: Any, *, item_id: str | None = None, turn_id: str = "turn-1") -> None:
         self.sequence += 1
         await self.cursor.put(
             HarnessEvent(
@@ -135,7 +139,7 @@ class _FakeHarness:
                 event=payload,
                 host_session_id="host",
                 agent_id="agent",
-                turn_id="turn-1",
+                turn_id=turn_id,
                 item_id=item_id,
             )
         )
@@ -185,6 +189,56 @@ async def test_outputs_and_tool_items_project_to_deepagent_chunks() -> None:
     started = harness.contexts[0]
     assert HostCapability.USER_INPUT in started.host_capabilities
     assert started.interactions is adapter
+
+
+@pytest.mark.asyncio
+async def test_output_envelopes_keep_turn_identity_and_terminal_order() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness)
+    await adapter.start(_context())
+    await harness.emit(
+        OutputEvent(output_id="a", kind=OutputKind.TEXT, content="first"),
+        turn_id="turn-a",
+    )
+    await harness.emit(
+        TurnLifecycleEvent(kind=TurnEventKind.FINISHED, result=TurnResult(status=TurnStatus.COMPLETED)),
+        turn_id="turn-a",
+    )
+    await harness.emit(
+        OutputEvent(output_id="b", kind=OutputKind.TEXT, content="second"),
+        turn_id="turn-b",
+    )
+    await harness.emit(
+        TurnLifecycleEvent(kind=TurnEventKind.FINISHED, result=TurnResult(status=TurnStatus.COMPLETED)),
+        turn_id="turn-b",
+    )
+    await adapter.stop()
+    envelopes = [item async for item in adapter.output_envelopes()]
+    assert [(item.turn_id, item.chunk.type if item.chunk else None, item.terminal) for item in envelopes] == [
+        ("turn-a", "llm_output", None),
+        ("turn-a", None, TurnEventKind.FINISHED),
+        ("turn-b", "llm_output", None),
+        ("turn-b", None, TurnEventKind.FINISHED),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interaction_envelope_uses_request_turn_identity() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness)
+    await adapter.start(_context())
+    request = UserInputRequest(
+        request_id="ask-a", prompt="Continue?", turn_id="turn-a"
+    )
+    pending = asyncio.create_task(adapter.handle(request))
+    envelope = await asyncio.wait_for(anext(adapter.output_envelopes()), 1)
+    assert envelope.turn_id == "turn-a"
+    assert envelope.chunk.type == INTERACTION
+    reply = InteractiveInput()
+    reply.update("ask-a", "yes")
+    await adapter.send(reply)
+    await pending
+    await adapter.stop()
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ from typing import Any
 
 __all__ = [
     "HarnessIOAdapter",
+    "ProjectedOutput",
     "HarnessProviderName",
     "PROVIDER_NAMES",
     "build_harness_context",
@@ -27,10 +28,10 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     """Lazily import the public surface on demand."""
-    if name == "HarnessIOAdapter":
-        from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter
+    if name in {"HarnessIOAdapter", "ProjectedOutput"}:
+        from openjiuwen.harness_providers import io_adapter
 
-        return HarnessIOAdapter
+        return getattr(io_adapter, name)
     if name in {"HarnessProviderName", "PROVIDER_NAMES", "build_harness_context", "create_harness", "resolve_provider"}:
         from openjiuwen.harness_providers import factory
 
