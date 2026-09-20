@@ -212,3 +212,9 @@ Harness 在获得或改变可恢复 provider 状态后，通过 `context.checkpo
 - `S_05_member-spawn-and-stream.md`：成员 spawn 和 stream；本次不修改该链路。
 - `S_14_monitor-and-observability.md`：events 的 telemetry 消费者可接入该观测体系。
 - `S_08_team-tools-contract.md`：ToolGateway/MCP 暴露的 team tools 仍受其角色和权限约束。
+
+## Provider-neutral construction and bindings (R1-01)
+
+`AgentExecutionSpec` in construction.py is an immutable, secret-repr-safe construction snapshot (provider_id, config_revision, requested_mode, provider_config). `harness.engine.resolve_execution_spec` selects explicit > project > default without merging vendor configuration or silently choosing Native. `ExecutionBinding.create` records authorized subject/session/absolute workspace and a content fingerprint. `create_harness_engine` validates that fingerprint then constructs an unstarted existing HarnessProtocol. Optional SDK imports and startup remain inside each provider.
+
+The existing manifest factory delegates provider lookup to the same registry in harness_providers/construction.py; its API and Native assembly remain compatible. Explicit requested_mode is rejected at configuration compilation until mode adapters are implemented; it is never silently discarded. OpenCode registration, runtime routing, mode control, new events and durable bindings are not delivered by this construction slice. The host owns authorization, lifecycle, persistence and event consumption.

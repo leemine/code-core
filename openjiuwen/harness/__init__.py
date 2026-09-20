@@ -7,21 +7,25 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
-    from openjiuwen.harness.task_loop.task_loop_event_executor import (
-        TaskLoopEventExecutor,
-    )
-    from openjiuwen.harness.task_loop.task_loop_event_handler import (
-        TaskLoopEventHandler,
-    )
     from openjiuwen.harness.factory import create_deep_agent
     from openjiuwen.harness.schema.config import (
         AudioModelConfig,
         DeepAgentConfig,
         VisionModelConfig,
     )
+    from openjiuwen.harness.task_loop.task_loop_event_executor import (
+        TaskLoopEventExecutor,
+    )
+    from openjiuwen.harness.task_loop.task_loop_event_handler import (
+        TaskLoopEventHandler,
+    )
     from openjiuwen.harness.workspace.workspace import Workspace
 
 __all__ = [
+    "ExecutionBinding",
+    "HarnessEngine",
+    "create_harness_engine",
+    "resolve_execution_spec",
     "DeepAgent",
     "TaskLoopEventHandler",
     "TaskLoopEventExecutor",
@@ -35,6 +39,10 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     """Lazily import heavy modules on demand."""
+    if name in {"ExecutionBinding", "HarnessEngine", "create_harness_engine", "resolve_execution_spec"}:
+        from openjiuwen.harness import engine
+
+        return getattr(engine, name)
     if name == "DeepAgent":
         from openjiuwen.harness.deep_agent import (
             DeepAgent,

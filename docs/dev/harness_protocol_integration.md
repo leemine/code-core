@@ -951,3 +951,9 @@ harness = create_harness(
 同名默认 skip，replace 会整体替换已有 skill；stop 不删除已复制的文件。名称按 front matter.name
 （缺省目录名）匹配，支持已有目录名与声明名不同的情况。enabled_skills 非空时筛选待复制技能。
 团队本地 Claude/Codex 成员也可在 ExternalCliAgentSpec 中填写 skills 和 skill_conflict。
+
+## Provider-neutral construction and bindings (R1-01)
+
+`AgentExecutionSpec` in construction.py is an immutable, secret-repr-safe construction snapshot (provider_id, config_revision, requested_mode, provider_config). `harness.engine.resolve_execution_spec` selects explicit > project > default without merging vendor configuration or silently choosing Native. `ExecutionBinding.create` records authorized subject/session/absolute workspace and a content fingerprint. `create_harness_engine` validates that fingerprint then constructs an unstarted existing HarnessProtocol. Optional SDK imports and startup remain inside each provider.
+
+The existing manifest factory delegates provider lookup to the same registry in harness_providers/construction.py; its API and Native assembly remain compatible. Explicit requested_mode is rejected at configuration compilation until mode adapters are implemented; it is never silently discarded. OpenCode registration, runtime routing, mode control, new events and durable bindings are not delivered by this construction slice. The host owns authorization, lifecycle, persistence and event consumption.

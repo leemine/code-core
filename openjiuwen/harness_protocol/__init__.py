@@ -10,6 +10,7 @@ from openjiuwen.harness_protocol.checkpoints import (
     HarnessCheckpoint,
     HarnessCheckpointSink,
 )
+from openjiuwen.harness_protocol.construction import AgentExecutionSpec
 from openjiuwen.harness_protocol.errors import (
     CheckpointConflictError,
     HarnessError,
@@ -77,10 +78,10 @@ from openjiuwen.harness_protocol.models import (
     PROTOCOL_VERSION,
     AbortMode,
     DeliveryMode,
+    HarnessCapability,
     HarnessCard,
     HarnessContext,
     HarnessInput,
-    HarnessCapability,
     HarnessTelemetry,
     HostCapability,
     JsonObject,
@@ -115,15 +116,16 @@ from openjiuwen.harness_protocol.serialization import (
 from openjiuwen.harness_protocol.state import HarnessState
 from openjiuwen.harness_protocol.stream import HarnessEventCursor
 from openjiuwen.harness_protocol.tools import (
-    ToolGateway,
     McpServerConfig,
     McpTransport,
     ToolDefinition,
     ToolExecutionResult,
+    ToolGateway,
     ToolInvocation,
 )
 
 __all__ = [
+    "AgentExecutionSpec",
     "PROTOCOL_VERSION",
     "AbortMode",
     "AfterToolContext",
