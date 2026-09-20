@@ -108,6 +108,9 @@ class HarnessIOAdapter:
             ``__interaction__`` chunks resolved by ``{"approved": bool}``.
         stop_on_unsupported_force_abort: Stop the whole cycle when the host asks
             for an immediate abort the provider cannot deliver.
+        preserve_native_chunks: Restore Native JSON output snapshots instead of
+            generic projections. Requires a Native harness configured with
+            preserve_output_chunks=True; interaction routing is unchanged.
         provider_interaction_handler: Optional coroutine answering provider
             extension requests. When set the adapter declares
             ``HostCapability.PROVIDER_INTERACTION``; otherwise every
@@ -119,10 +122,18 @@ class HarnessIOAdapter:
         harness: HarnessProtocol,
         *,
         event_observer: EventObserver | None = None,
+        preserve_native_chunks: bool = False,
         auto_approve_tools: bool = True,
         stop_on_unsupported_force_abort: bool = False,
         provider_interaction_handler: ProviderInteractionHandler | None = None,
     ) -> None:
+        self._native_projection = None
+        if preserve_native_chunks:
+            if harness.card.name != "deepagent":
+                raise ValueError("preserve_native_chunks requires a Native DeepAgent harness")
+            from openjiuwen.harness_providers.native.mapping import restore_chunk
+
+            self._native_projection = restore_chunk
         self._harness = harness
         self._event_observer = event_observer
         self._auto_approve_tools = auto_approve_tools
@@ -398,12 +409,12 @@ class HarnessIOAdapter:
                 if observer is not None:
                     await observer(envelope)
                 payload = envelope.event
-                if isinstance(payload, OutputEvent):
-                    chunk = self._project_output(payload)
-                elif isinstance(payload, ItemLifecycleEvent):
-                    chunk = self._project_item(envelope.item_id, payload)
-                else:
-                    chunk = None
+                chunk = self._native_projection(payload) if self._native_projection is not None else None
+                if chunk is None:
+                    if isinstance(payload, OutputEvent):
+                        chunk = self._project_output(payload)
+                    elif isinstance(payload, ItemLifecycleEvent):
+                        chunk = self._project_item(envelope.item_id, payload)
                 if chunk is not None:
                     await self._output_queue.put(chunk)
         finally:
@@ -420,7 +431,7 @@ class HarnessIOAdapter:
             emitted = text
             self._output_text[output.output_id] = text
         elif text.startswith(previous):
-            emitted = text[len(previous):]
+            emitted = text[len(previous) :]
             self._output_text[output.output_id] = text
         else:
             # OutputSchema has append-only semantics.  The protocol event stays
