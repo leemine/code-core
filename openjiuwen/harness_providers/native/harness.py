@@ -336,7 +336,7 @@ class DeepAgentHarness(SerializedTurnHarness):
                 if turn.abort_requested or not state.pending_interrupts or state.error is not None:
                     break
                 resume_input = await self._resolve_interrupts(turn, state)
-                if resume_input is None:
+                if resume_input is None or turn.abort_requested:
                     break
                 state.pending_interrupts.clear()
                 query = resume_input
@@ -358,6 +358,8 @@ class DeepAgentHarness(SerializedTurnHarness):
         if stream is None:
             raise HarnessProtocolError("DeepAgent output stream already has a consumer")
         try:
+            if turn.abort_requested:
+                return
             request = SendInputRequest(request_id=turn.turn_id, inputs={"query": query})
             if not await self._dispatch_input(agent, request, turn.content, resuming=resuming):
                 return

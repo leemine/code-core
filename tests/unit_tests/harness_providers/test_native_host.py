@@ -196,3 +196,36 @@ async def test_cancelled_start_releases_owned_session():
     agent.stop.assert_awaited_once()
     session.post_run.assert_awaited_once()
     assert harness.agent is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_acquiring_output_never_sends_input():
+    import asyncio
+    from openjiuwen.harness_protocol import AbortMode
+
+    agent, session = _parts()
+    entered, release = asyncio.Event(), asyncio.Event()
+    stream = _Stream([])
+
+    async def attach():
+        entered.set()
+        await release.wait()
+        return stream
+
+    agent.attach_output = AsyncMock(side_effect=attach)
+    agent.cancel_round = AsyncMock()
+    harness = DeepAgentHarness(
+        lambda context: agent, session_id="session", host_hooks=NativeHostHooks(AsyncMock(return_value=session))
+    )
+    await harness.start(_context())
+    receipt = await harness.send(HarnessInput(content="hi"))
+    try:
+        await entered.wait()
+        await harness.abort(mode=AbortMode.FORCE)
+        release.set()
+        events = [event async for event in harness.turn_events(receipt.turn_id)]
+        agent.send_input.assert_not_awaited()
+        assert events[-1].event.kind is TurnEventKind.ABORTED
+    finally:
+        release.set()
+        await harness.stop()
