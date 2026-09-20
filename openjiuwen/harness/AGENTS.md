@@ -11,7 +11,7 @@ session）之上，为编码场景提供**深度代理**：模型调用、工具
 
 ## 公开入口（public API）
 
-公开符号仅限 `__init__.py` 导出。`__all__` 是**完整集合**（8 个符号），导出使用懒加载
+公开符号仅限 `__init__.py` 导出。`__all__` 是**完整集合**，导出使用懒加载
 `__getattr__`——重模块按需 import，避免启动即拉全量。
 
 | 入口 | 用途 |
@@ -167,3 +167,5 @@ footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上�
 涉及 `docs/features/F_*` / `docs/specs/S_*` 文档更新的特性改动，**特性代码、测试代码、文档拆
 成三个连续提交**（`feat(harness)` → `test(harness)` → `docs(harness)`），细则见上文「设计文档
 归档与双向同步」约束 #1。
+
+统一执行构建新增懒加载入口 ExecutionBinding、HarnessEngine、create_harness_engine、resolve_execution_spec，位于 engine/；它们不改变 Native 的 create_deep_agent 装配路径，也不接管 Provider 状态机。

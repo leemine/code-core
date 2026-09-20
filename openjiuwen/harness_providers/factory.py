@@ -13,7 +13,7 @@ factory maps it onto one of the built-in providers selected by name.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Mapping
 
 from openjiuwen.harness.resources.extension_loader import find_agent_template_manifest, load_agent_template_package
 from openjiuwen.harness.resources.extension_resolver import render_agent_template_system_prompt
@@ -24,43 +24,18 @@ from openjiuwen.harness_protocol import (
     HarnessContext,
     HarnessInteractionHandler,
     HarnessProtocol,
-    HarnessProvider,
     HostCapability,
     McpServerConfig,
     McpTransport,
     ResumePolicy,
 )
+from openjiuwen.harness_providers.construction import (
+    PROVIDER_NAMES,
+    HarnessProviderName,
+    resolve_provider,
+)
 
-HarnessProviderName = Literal["native", "native_v2", "claudecode", "codex", "dsh"]
-PROVIDER_NAMES: tuple[HarnessProviderName, ...] = ("native", "native_v2", "claudecode", "codex", "dsh")
-# Manifest sections only the in-process DeepAgent can materialize.
 _DEEP_AGENT_ONLY_SECTIONS = ("tools", "rails", "subagents")
-
-
-def resolve_provider(provider: str) -> HarnessProvider:
-    """Return the provider SPI implementation registered under ``provider``."""
-
-    if provider == "native":
-        from openjiuwen.harness_providers.native import NativeHarnessProvider
-
-        return NativeHarnessProvider()
-    if provider == "native_v2":
-        from openjiuwen.agent_teams.harness.protocol_adapter import NativeV2HarnessProvider
-
-        return NativeV2HarnessProvider()
-    if provider == "claudecode":
-        from openjiuwen.harness_providers.claudecode import ClaudeCodeHarnessProvider
-
-        return ClaudeCodeHarnessProvider()
-    if provider == "codex":
-        from openjiuwen.harness_providers.codex import CodexHarnessProvider
-
-        return CodexHarnessProvider()
-    if provider == "dsh":
-        from openjiuwen.harness_providers.dsh import DshHarnessProvider
-
-        return DshHarnessProvider()
-    raise ValueError(f"unknown harness provider {provider!r}; expected one of {', '.join(PROVIDER_NAMES)}")
 
 
 def load_manifest(manifest: AgentTemplateSpec | str | Path) -> AgentTemplateSpec:

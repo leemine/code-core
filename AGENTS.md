@@ -80,3 +80,9 @@ Pass `COMMITS=N` to check recent commits instead.
 - Git workflow: `.claude/rules/git-workflow.md`
 - Deep operational guides: `.claude/skills/`
 - Permissions and env vars: `.claude/settings.json`
+## Unified execution boundaries
+
+- Shared execution belongs in harness, contracts in harness_protocol, and provider adaptation in harness_providers. No dependency on swarm or Projects.
+- Keep one SerializedTurnHarness state machine and observation stream; Team retains Task/Review/message scheduling. Mode, Step and child-agent shared semantics belong in the protocol; provider namespaces hold only private supplements.
+- New construction preserves legacy factories and lazy optional SDK imports. Bind configuration to authorized subject/session/workspace; no silent provider fallback or reuse across scopes.
+- Verify affected old and new contracts before merging core; downstream swarm updates both its declaration and lock only after the core commit is available remotely.
