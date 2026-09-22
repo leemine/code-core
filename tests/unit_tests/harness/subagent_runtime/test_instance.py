@@ -57,6 +57,7 @@ class MockAgent:
     cleanup_calls: int = 0
     received_generator_exit: bool = False
     observed_subjects: list[object] = field(default_factory=list)
+    received_inputs: list[dict[str, str]] = field(default_factory=list)
     card: SimpleNamespace = field(default_factory=lambda: SimpleNamespace(id="sub-card"))
 
     def prepare_task_resources(self) -> None:
@@ -74,7 +75,7 @@ class MockAgent:
         session: MockSession,
     ) -> AsyncIterator[dict[str, object]]:
         _ = session
-        _ = inputs
+        self.received_inputs.append(dict(inputs))
         self.stream_calls += 1
         self.observed_subjects.append(current_execution_subject())
         self.active_streams += 1

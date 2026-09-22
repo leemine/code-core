@@ -12,9 +12,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import AgentError, ExecutionError, build_error
-from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
+from openjiuwen.core.common.exception.errors import AgentError, build_error
 from openjiuwen.harness.execution_subject import ExecutionSubject, execution_subject_scope
+from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.models import SubagentStatusKind, UserInputOp
 from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionManager
 from tests.unit_tests.harness.subagent_runtime.test_instance import MockAgent
@@ -46,7 +46,7 @@ class MockSubAgent:
 
 @dataclass
 class MockParentAgent:
-    subagent: MockSubAgent | None = None
+    subagent: object | None = None
     create_error: BaseException | None = None
     create_calls: list[tuple[str, str, list[str] | None]] = field(default_factory=list)
 
@@ -55,7 +55,7 @@ class MockParentAgent:
         subagent_type: str,
         subsession_id: str,
         browser_capabilities: list[str] | None = None,
-    ) -> MockSubAgent:
+    ) -> object:
         self.create_calls.append((subagent_type, subsession_id, browser_capabilities))
         if self.create_error is not None:
             raise self.create_error
@@ -84,7 +84,7 @@ def _patch_create_session(*sessions: MockSession):
         return MockSession()
 
     return patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.create_agent_session",
+        "openjiuwen.harness.subagent_runtime.native_execution.create_agent_session",
         side_effect=_factory,
     )
 
@@ -157,7 +157,8 @@ async def test_create_subagent_failure_leaves_table_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_pre_run_failure_surfaces_as_errored_on_first_turn() -> None:
-    parent = MockParentAgent(subagent=MockSubAgent())
+    subagent = MockAgent()
+    parent = MockParentAgent(subagent=subagent)
     manager = _manager(parent=parent)
 
     with _patch_create_session(MockSession(pre_run_error=RuntimeError("pre_run failed"))):
@@ -168,7 +169,6 @@ async def test_pre_run_failure_surfaces_as_errored_on_first_turn() -> None:
             display_name="Explorer",
             role="researcher",
         )
-        instance._agent = MockAgent()
         await instance.enqueue(UserInputOp(query="hello", task_id="t1"))
         await asyncio.sleep(0.05)
 
@@ -277,7 +277,7 @@ async def test_restore_requires_checkpointer_history() -> None:
     manager = _manager()
 
     with patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.CheckpointerFactory.get_checkpointer",
+        "openjiuwen.harness.subagent_runtime.native_execution.CheckpointerFactory.get_checkpointer",
     ) as get_checkpointer:
         checkpointer = AsyncMock()
         checkpointer.session_exists = AsyncMock(return_value=False)
@@ -298,7 +298,7 @@ async def test_restore_rebuilds_from_checkpointer() -> None:
     manager = _manager()
 
     with _patch_create_session(), patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.CheckpointerFactory.get_checkpointer",
+        "openjiuwen.harness.subagent_runtime.native_execution.CheckpointerFactory.get_checkpointer",
     ) as get_checkpointer:
         checkpointer = AsyncMock()
         checkpointer.session_exists = AsyncMock(return_value=True)
@@ -327,7 +327,7 @@ async def test_session_factory_creates_new_session_per_turn() -> None:
         return session
 
     with patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.create_agent_session",
+        "openjiuwen.harness.subagent_runtime.native_execution.create_agent_session",
         side_effect=_factory,
     ):
         instance = await manager.create(
@@ -337,7 +337,6 @@ async def test_session_factory_creates_new_session_per_turn() -> None:
             display_name="Explorer",
             role="researcher",
         )
-        instance._agent = MockAgent()
         await instance.enqueue(UserInputOp(query="first", task_id="t1"))
         await instance.enqueue(UserInputOp(query="second", task_id="t2"))
         await asyncio.sleep(0.05)
@@ -352,17 +351,18 @@ async def test_session_factory_creates_new_session_per_turn() -> None:
 async def test_kv_cache_lifecycle_called_when_affinity_enabled() -> None:
     from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 
-    parent = MockParentAgent()
+    subagent = MockAgent()
+    parent = MockParentAgent(subagent=subagent)
     parent.deep_config = SimpleNamespace(
         kv_cache_affinity_config=KVCacheAffinityConfig(enable_kv_cache_affinity=True),
     )
     manager = _manager(parent=parent)
 
     with _patch_create_session(), patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_subagent_lifecycle.prepare_subagent",
+        "openjiuwen.harness.subagent_runtime.native_execution.kv_cache_subagent_lifecycle.prepare_subagent",
         new=AsyncMock(),
     ) as prepare_mock, patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_subagent_lifecycle.finish_subagent",
+        "openjiuwen.harness.subagent_runtime.native_execution.kv_cache_subagent_lifecycle.finish_subagent",
         new=AsyncMock(),
     ) as finish_mock:
         instance = await manager.create(
@@ -372,11 +372,16 @@ async def test_kv_cache_lifecycle_called_when_affinity_enabled() -> None:
             display_name="Browser",
             role="automation",
         )
-        instance._agent = MockAgent()
         await instance.enqueue(UserInputOp(query="hello", task_id="t1"))
         await asyncio.sleep(0.05)
 
     prepare_mock.assert_awaited_once()
     finish_mock.assert_awaited_once()
     assert finish_mock.await_args.kwargs["succeeded"] is True
-    assert instance._include_parent_session_id is True
+    assert subagent.received_inputs == [
+        {
+            "query": "hello",
+            "conversation_id": "parent_sub_browser_agent",
+            "parent_session_id": "parent",
+        }
+    ]

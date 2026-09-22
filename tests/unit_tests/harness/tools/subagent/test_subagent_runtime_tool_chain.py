@@ -119,7 +119,7 @@ async def test_six_tool_lifecycle_chain_uses_real_control() -> None:
         "openjiuwen.harness.subagent_runtime.control.WAIT_TIMEOUT_MS_MIN",
         100,
     ), patch(
-        "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+        "openjiuwen.harness.subagent_runtime.native_execution.CheckpointerFactory.get_checkpointer",
     ) as get_checkpointer:
         checkpointer = AsyncMock()
         checkpointer.session_exists = AsyncMock(return_value=True)

@@ -5,10 +5,10 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -23,7 +23,8 @@ from openjiuwen.harness.subagent_runtime.models import SubagentRecord, SubagentS
 from openjiuwen.harness.subagent_runtime.persistence import merge_subagent_bucket, read_subagent_bucket
 from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control, release_subagent_control
 from tests.unit_tests.harness.subagent_runtime.test_instance import MockAgent
-from tests.unit_tests.harness.subagent_runtime.test_session_manager import MockParentAgent, MockSession as ManagerSession
+from tests.unit_tests.harness.subagent_runtime.test_session_manager import MockParentAgent
+from tests.unit_tests.harness.subagent_runtime.test_session_manager import MockSession as ManagerSession
 
 
 @dataclass
@@ -70,7 +71,7 @@ def _patch_create_session(session: ManagerSession | None = None):
         return session or ManagerSession()
 
     return patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.create_agent_session",
+        "openjiuwen.harness.subagent_runtime.native_execution.create_agent_session",
         side_effect=_factory,
     )
 
@@ -423,6 +424,25 @@ async def test_cancel_all_closes_running_subagents() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_all_stops_activity_emitter_task() -> None:
+    session = Session(session_id="parent")
+    session.write_stream = AsyncMock()
+    control = SubagentControl(
+        ControlParentAgent(),
+        "parent",
+        parent_session=session,
+    )
+    emitter = control._activity_emitter
+    assert emitter is not None
+    assert emitter._drain_task is not None
+
+    await control.cancel_all(reason="parent_ended")
+
+    assert control._activity_emitter is None
+    assert emitter._drain_task is None
+
+
+@pytest.mark.asyncio
 async def test_duplicate_sticky_spawn_rejected() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent())
     async with _patched_control(parent=parent) as control:
@@ -655,7 +675,7 @@ async def test_resume_restores_closed_instance() -> None:
         await control.close(spawned.subagent_id)
 
         with patch(
-            "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+            "openjiuwen.harness.subagent_runtime.native_execution.CheckpointerFactory.get_checkpointer",
         ) as get_checkpointer:
             checkpointer = AsyncMock()
             checkpointer.session_exists = AsyncMock(return_value=True)
@@ -684,7 +704,7 @@ async def test_resume_normalizes_quiescent_pending_init_on_live_instance() -> No
         await control.close(spawned.subagent_id)
 
         with patch(
-            "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+            "openjiuwen.harness.subagent_runtime.native_execution.CheckpointerFactory.get_checkpointer",
         ) as get_checkpointer:
             checkpointer = AsyncMock()
             checkpointer.session_exists = AsyncMock(return_value=True)
@@ -961,7 +981,7 @@ async def test_resume_no_checkpointer_history_raises_not_found() -> None:
         await control.close(spawned.subagent_id)
 
         with patch(
-            "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+            "openjiuwen.harness.subagent_runtime.native_execution.CheckpointerFactory.get_checkpointer",
         ) as get_checkpointer:
             checkpointer = AsyncMock()
             checkpointer.session_exists = AsyncMock(return_value=False)
