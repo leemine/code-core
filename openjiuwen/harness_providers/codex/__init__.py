@@ -3,8 +3,9 @@
 
 """Codex (OpenAI Codex Python SDK) implementation of the harness protocol."""
 
-from openjiuwen.harness_providers.codex.config import CodexHarnessConfig, CodexModelConfig
+from openjiuwen.harness_providers.codex.config import CodexHarnessConfig, CodexModelConfig, CodexNativePluginConfig
 from openjiuwen.harness_providers.codex.harness import ADAPTER_VERSION, CodexHarness
+from openjiuwen.harness_providers.codex.native_plugins import native_plugin_content_digest
 from openjiuwen.harness_providers.codex.provider import CodexHarnessProvider
 
 __all__ = [
@@ -13,4 +14,6 @@ __all__ = [
     "CodexHarnessConfig",
     "CodexHarnessProvider",
     "CodexModelConfig",
+    "CodexNativePluginConfig",
+    "native_plugin_content_digest",
 ]

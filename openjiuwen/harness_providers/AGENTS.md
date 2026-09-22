@@ -99,6 +99,12 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    `skill_conflict` defaults to skip; replace stages a complete bundle before
    renaming the existing directory. Never remove copied skills at stop.
    Manifests carrying `tools` / `rails` / `subagents` are still rejected.
+10. **Codex native plugins stay provider-native and host-authorized.** A non-null
+   `CodexHarnessConfig.native_plugins` is an immutable allow-list over a prepared,
+   isolated `CODEX_HOME`; the provider verifies source, version, package digest,
+   C1 components, native loader inventory, MCP startup and namespace conflicts.
+   It never installs or updates plugins. Hooks/commands/agents/apps remain outside
+   C1, and plugin controls cannot be supplied through arbitrary config overrides.
 
 ## Change requirements
 

@@ -50,10 +50,65 @@ from openjiuwen.harness_providers.codex.failure_classifier import (
 from openjiuwen.harness_providers.codex.harness import USER_INPUT_METHOD, _answers_from_response
 from openjiuwen.harness_providers.codex.options import (
     USER_INPUT_FEATURE_OVERRIDE,
+    build_thread_options,
     codex_mcp_config_overrides,
     codex_model_config_overrides,
 )
 from tests.test_logger import logger
+
+
+@pytest.mark.parametrize("model", [None, CodexModelConfig(model="m"), CodexModelConfig(provider="external")])
+@pytest.mark.parametrize("bypass", [False, True])
+def test_model_selection_does_not_grant_permissions(monkeypatch, model, bypass) -> None:
+    sdk, _ = _install_fake_sdk(monkeypatch)
+    config = CodexHarnessConfig(
+        bypass_approvals_and_sandbox=bypass,
+        thread_config={"sandbox_mode": "read-only", "approval_policy": "untrusted"},
+    )
+    options = build_thread_options(sdk=sdk, config=config, model=model, cwd="/work", system_prompt="")
+    assert options["config"] == dict(config.thread_config)
+    if bypass:
+        assert options["approval_mode"] == sdk.ApprovalMode.deny_all
+        assert options["sandbox"] == sdk.Sandbox.full_access
+    else:
+        assert "approval_mode" not in options
+        assert "sandbox" not in options
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability", [HostCapability.TOOL_APPROVAL, HostCapability.USER_INPUT])
+@pytest.mark.parametrize("layout", ["missing_client", "missing_sync", "missing_handler", "ignored_setter"])
+async def test_incompatible_approval_hook_fails_before_thread_and_closes_client(monkeypatch, capability, layout):
+    from openjiuwen.harness_providers.base import ProviderStartupError
+
+    sdk, state = _install_fake_sdk(monkeypatch)
+    original_init = sdk.AsyncCodex.__init__
+
+    class IgnoredHandler:
+        @property
+        def _approval_handler(self):
+            return None
+
+        @_approval_handler.setter
+        def _approval_handler(self, value):
+            pass
+
+    def incompatible_init(client, config=None):
+        original_init(client, config)
+        if layout == "missing_client":
+            del client._client
+        elif layout == "missing_sync":
+            client._client = SimpleNamespace()
+        else:
+            client._client._sync = IgnoredHandler() if layout == "ignored_setter" else SimpleNamespace()
+
+    monkeypatch.setattr(sdk.AsyncCodex, "__init__", incompatible_init)
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    with pytest.raises(ProviderStartupError) as error:
+        await harness.start(_context(host_capabilities=frozenset({capability}), interactions=object()))
+    assert "approval handler" in str(error.value.__cause__)
+    assert state.clients[0].closed
+    assert not state.thread_calls
 
 
 class _Status(Enum):
@@ -134,8 +189,30 @@ class _FakeCodex:
         self.state = state
         self.config = config
         self.closed = False
-        self._client = SimpleNamespace(_sync=SimpleNamespace(_approval_handler=None))
+        self._client = SimpleNamespace(
+            _sync=SimpleNamespace(
+                _approval_handler=None, _proc=None, config=config, start=lambda: None,
+                _start_reader_thread=lambda: None, _start_stderr_drain_thread=lambda: None,
+            ),
+            request=self._request,
+        )
         state.clients.append(self)
+
+    async def _ensure_initialized(self):
+        pass
+
+    async def _request(self, method, params, *, response_model):
+        if method == "config/read":
+            return response_model.model_validate({"config": getattr(self.state, "security_config", {})})
+        self.state.thread_calls.append((method.split("/")[-1], params))
+        thread_id = params.get("threadId", self.state.next_thread_id)
+        effective = {
+            "approvalPolicy": params["approvalPolicy"], "approvalsReviewer": params["approvalsReviewer"],
+            "sandbox": {"type": "readOnly" if params.get("sandbox", "read-only") == "read-only" else "workspaceWrite"},
+            "thread": {"id": thread_id}, "model": _thread_model(params),
+            "activePermissionProfile": {"id": params["permissionProfile"]} if "permissionProfile" in params else None,
+        }
+        return response_model.model_validate(effective)
 
     async def thread_start(self, **options: Any) -> _FakeThread:
         self.state.thread_calls.append(("start", options))
@@ -167,6 +244,13 @@ def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, _Fak
     sdk.AsyncCodex = AsyncCodex
     sdk.ApprovalMode = SimpleNamespace(deny_all="deny_all", auto_review="auto_review")
     sdk.Sandbox = SimpleNamespace(full_access="full_access")
+    sdk.client = SimpleNamespace(
+        _resolve_codex_bin=lambda config: "/fake/codex",
+        _installed_codex_path_dirs=lambda: (),
+        _prepend_path_dirs=lambda env, paths: None,
+    )
+    sdk.generated = SimpleNamespace(v2_all=SimpleNamespace(ThreadStartResponse=object, ThreadResumeResponse=object))
+    sdk.AsyncThread = lambda client, thread_id: _FakeThread(state, thread_id)
     monkeypatch.setitem(sys.modules, "openai_codex", sdk)
     monkeypatch.setattr("openjiuwen.harness_providers.codex.options.load_codex_sdk", lambda: sdk)
     monkeypatch.setattr("openjiuwen.harness_providers.codex.harness.load_codex_sdk", lambda: sdk)
@@ -289,7 +373,8 @@ async def test_full_turn_maps_notifications_to_protocol_events(monkeypatch: pyte
     kind, options = state.thread_calls[0]
     assert kind == "start"
     assert options["developer_instructions"] == "You are a coder."
-    assert options["approval_mode"] == "deny_all"
+    assert "approval_mode" not in options
+    assert "sandbox" not in options
     codex_config = state.configs[0].kwargs
     assert codex_config["env"]["OPENJIUWEN_CODEX_API_KEY"] == "k"
     assert 'model_provider="p"' in codex_config["config_overrides"]
@@ -557,7 +642,10 @@ class _RatificationHandler:
 
 
 @pytest.mark.asyncio
-async def test_auth_failure_activates_fallback_after_host_ratification(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("host_approvals", [False, True, "profile"])
+async def test_auth_failure_activates_fallback_after_host_ratification(
+    monkeypatch: pytest.MonkeyPatch, host_approvals: bool | str,
+) -> None:
     sdk, state = _install_fake_sdk(monkeypatch)
 
     async def _fail(handle: _FakeHandle) -> Any:
@@ -570,7 +658,14 @@ async def test_auth_failure_activates_fallback_after_host_ratification(monkeypat
     state.scripts.append([_complete])
     handler = _RatificationHandler(InteractionResponseStatus.COMPLETED)
     harness = CodexHarness(_fallback_config())
-    await harness.start(_context(interactions=handler, host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION})))
+    if host_approvals == "profile":
+        state.security_config = {
+            "default_permissions": "test", "permissions": {"test": {"filesystem": {":minimal": "read"}}},
+        }
+    capabilities = {HostCapability.PROVIDER_INTERACTION}
+    if host_approvals:
+        capabilities.add(HostCapability.TOOL_APPROVAL)
+    await harness.start(_context(interactions=handler, host_capabilities=frozenset(capabilities)))
     receipt = await harness.send(HarnessInput(content="hi"))
     events = await _turn(harness, receipt.turn_id)
     assert _terminal(events).kind is TurnEventKind.FINISHED
@@ -588,11 +683,20 @@ async def test_auth_failure_activates_fallback_after_host_ratification(monkeypat
         if isinstance(event.event, ProviderEvent) and event.event.event_type == "session/model_changed"
     ]
     assert [event.payload.get("model") for event in model_events] == ["fallback-model"]
+    if host_approvals:
+        assert all(options["approvalPolicy"] == "untrusted" for _, options in state.thread_calls)
+        assert all(options["approvalsReviewer"] == "user" for _, options in state.thread_calls)
+    if host_approvals == "profile":
+        assert all(options["permissionProfile"] == "test" and "sandbox" not in options
+                   for _, options in state.thread_calls)
     await harness.stop()
 
 
 @pytest.mark.asyncio
-async def test_declined_fallback_ratification_restores_the_native_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("host_approvals", [False, True, "profile"])
+async def test_declined_fallback_ratification_restores_the_native_thread(
+    monkeypatch: pytest.MonkeyPatch, host_approvals: bool | str,
+) -> None:
     sdk, state = _install_fake_sdk(monkeypatch)
 
     async def _fail(handle: _FakeHandle) -> Any:
@@ -601,7 +705,14 @@ async def test_declined_fallback_ratification_restores_the_native_thread(monkeyp
     state.scripts.append([_fail])
     handler = _RatificationHandler(InteractionResponseStatus.DECLINED)
     harness = CodexHarness(_fallback_config())
-    await harness.start(_context(interactions=handler, host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION})))
+    if host_approvals == "profile":
+        state.security_config = {
+            "default_permissions": "test", "permissions": {"test": {"filesystem": {":minimal": "read"}}},
+        }
+    capabilities = {HostCapability.PROVIDER_INTERACTION}
+    if host_approvals:
+        capabilities.add(HostCapability.TOOL_APPROVAL)
+    await harness.start(_context(interactions=handler, host_capabilities=frozenset(capabilities)))
     receipt = await harness.send(HarnessInput(content="hi"))
     events = await _turn(harness, receipt.turn_id)
     terminal = _terminal(events)
@@ -626,6 +737,12 @@ async def test_declined_fallback_ratification_restores_the_native_thread(monkeyp
         if isinstance(event.event, ProviderEvent) and event.event.event_type == "session/model_changed"
     ]
     assert [event.payload.get("model") for event in model_events] == ["native-model"]
+    if host_approvals:
+        assert all(options["approvalPolicy"] == "untrusted" for _, options in state.thread_calls)
+        assert all(options["approvalsReviewer"] == "user" for _, options in state.thread_calls)
+    if host_approvals == "profile":
+        assert all(options["permissionProfile"] == "test" and "sandbox" not in options
+                   for _, options in state.thread_calls)
     await harness.stop()
 
 

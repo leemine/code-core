@@ -14,6 +14,8 @@ from typing import Any, Mapping
 from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness_protocol import HarnessError, McpServerConfig, McpTransport, UnsupportedHarnessCapabilityError
 from openjiuwen.harness_providers.codex.config import CodexHarnessConfig, CodexModelConfig
+from openjiuwen.harness_providers.codex.native_plugins import native_plugin_overrides
+from openjiuwen.harness_providers.codex.source_policy import restricted_startup_overrides
 
 logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
 
@@ -158,6 +160,9 @@ def build_codex_config(
             default_tools_approval_mode=config.mcp_default_tools_approval_mode,
         )
     overrides += config.config_overrides
+    overrides += native_plugin_overrides(config.native_plugins)
+    if config.startup_source_roots is not None:
+        overrides += restricted_startup_overrides(cwd, allow_native_plugins=config.native_plugins is not None)
     return sdk.CodexConfig(
         codex_bin=config.codex_bin,
         config_overrides=overrides,
@@ -188,14 +193,9 @@ def build_thread_options(
             options["model"] = model.model
         if model.provider:
             options["model_provider"] = model.provider
-    # An external model targets a non-OpenAI endpoint. Codex's auto-review
-    # approval reviewer uses a built-in ``codex-auto-review`` model that cannot
-    # be redirected to an external provider, so any auto-review call against an
-    # external endpoint is guaranteed to fail. Bypass the reviewer whenever an
-    # external model is configured: ``deny_all`` never asks for approval and
-    # ``full_access`` lets tool calls run under the host's own policy.
-    bypass = config.bypass_approvals_and_sandbox or model is not None
-    if bypass:
+    # Model selection must not change permissions. Only an explicit host
+    # configuration may disable approvals and the sandbox, including fallback.
+    if config.bypass_approvals_and_sandbox:
         options["approval_mode"] = sdk.ApprovalMode.deny_all
         options["sandbox"] = sdk.Sandbox.full_access
     return options

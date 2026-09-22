@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/`） |
-| 最近一次修订日期 | 2026-09-17 |
+| 最近一次修订日期 | 2026-09-21 |
 | 关联 feature | F_03_harness-providers-and-manifest-factory.md |
 
 ## 范围 / 边界
@@ -72,6 +72,67 @@
    `ValueError`。`build_harness_context` 对三方 provider 渲染 prompt sections 与 MCP，对 `native`
    只放 `extra_system_prompt`。
 
+10. **Codex 权限不随模型隐式提升**：只有显式 `bypass_approvals_and_sandbox=True` 才设置
+    `deny_all + full_access`；选择模型、外部端点或认证 fallback 本身不关闭 sandbox。
+    宿主声明 TOOL_APPROVAL / USER_INPUT 时，SDK 审批钩子必须存在且成功保留；不兼容时在
+    thread start/resume 之前失败，并关闭新建 client。TOOL_APPROVAL 要求交互 handler 且禁止 bypass；
+    start/resume/fallback 显式协商 `untrusted + user + read-only/workspace-write`，并核对服务器回显。
+    配置模型与权限开关分离，权限开关只接受 bool。命令、补丁和原生 MCP 工具审批走既有
+    ToolApprovalRequest；未知 MCP elicitation 拒绝，审批超时取消宿主等待。
+
+11. **Codex 进程隔离必须实际生效**：`inherit_process_env=False` 使用 sdk_compat 的实例级启动接缝，
+    只传递选定 env（及 SDK 捆绑 PATH），不修改宿主 os.environ 或 SDK 全局。锁版本为 0.144.4；
+    缺少所需私有布局即失败关闭。此适配需随 SDK 升级重新实测。
+
+12. **Codex cwd 不构成读取隔离**：锁定 0.144.4 的 legacy readOnly/workspaceWrite 均允许
+    cwd 外读取；untrusted 下受信任 cat 不触发宿主工具审批。写入限制与读取授权是不同边界。
+    TOOL_APPROVAL 只处理 CLI 实际发出的审批请求，不承诺所有文件读取都会经过宿主。
+    Linux helper 不能在 `/tmp` 下的 CODEX_HOME 创建；该场景的 sandbox retry 拒绝不等于正常读取隔离。
+
+13. **Codex 宿主审批路径保留命名权限配置**：先通过 config/read 获取有效服务端配置。
+    存在 default_permissions 时只发送 permissionProfile，不发送 legacy sandbox；二者配置冲突、
+    未知 profile 或线程级 profile 定义均失败关闭。使用原始响应确认 activePermissionProfile.id、
+    untrusted/user 和受限 sandbox；锁 SDK 生成响应类型丢失 profile 字段，不能据其证明读取范围。
+    选中 profile、继承链与 cwd 的配置指纹写入 Provider 私有 checkpoint；start/resume/fallback/回退
+    复用同一建连接缝，指纹变化在 thread 请求前拒绝。带指纹的 checkpoint 不允许移除 TOOL_APPROVAL；
+    历史无指纹 checkpoint 按当前配置首次绑定。不承诺运行中动态配置/文件系统竞态或其他读取渠道隔离。
+    无命名 profile 时保留受限 legacy 行为及其全盘只读边界；旧显式 bypass 的非宿主审批调用保留。
+
+14. **Codex 输入加载与工具读取分界**：锁定 0.144.4 的 AGENTS 自动注入、原生 SkillInput/
+    LocalImageInput 读取不继承命令可读根；project_doc_max_bytes=0 可抑制 AGENTS 自动注入。
+    模型 view_image 已实测受命名可读根限制，但当前 core 的 HarnessInput 仍只序列化文本，
+    不等于原生附件接线。portable SkillSource 在 CLI 启动前由宿主复制；stdio MCP 启动也不受
+    命令 profile 文件 ACL 约束。MCP prompt 的工具允许/拒绝有效，显式 approve 不调用宿主审批；
+    TOOL_APPROVAL 不承诺拦截配置加载、服务启动或所有 MCP 调用。来源授权与进程隔离由宿主负责。
+
+15. **显式受限启动来源准入**：CodexHarnessConfig.startup_source_roots 为 None 时保留旧行为；
+    非空绝对目录数组启用准入，授权依据由可信宿主提供，不能将用户输入的目录视作授权。
+    要求 TOOL_APPROVAL、关闭 env 继承和 bypass、显式分离的 HOME/CODEX_HOME/cwd、命名权限；
+    cwd 必须在来源根内。Skills 显式来源和已知自动发现目录在读取内容/复制前做真实路径与树检查。
+    stdio/in-process、远端或无认证 MCP，ambient 插件、hooks、未知配置/特性在该模式拒绝；B1 只例外准入
+    宿主按 Session 管理的 loopback HTTP MCP：必须显式端口、仅 Bearer Authorization、required=true 且工具审批为 prompt，
+    有效配置回读必须保持精确 server 名称集合、认证头和限制，并只接受锁定 0.144.4 回报的
+    enabled=true、environment_id=local、tool_timeout_sec=null 惰性默认；环境 AGENTS、login shell 和已识别自动来源特性强制关闭，
+    config/read 只接受核验过的有效配置及锁版本精确空默认项。未提供受管原生插件快照时同时关闭
+    features.plugins，阻止后台插件市场同步；显式 `native_plugins` 快照只准入其固定插件树，并保持
+    remote_plugin=false。
+16. **Codex 原生插件由 CLI 装载、宿主快照失败关闭**：`native_plugins=None` 保留旧 CLI 所有权；显式数组要求
+    `inherit_process_env=false` 和隔离的绝对 `CODEX_HOME`。C1 首期只接受部署预置的本地 marketplace 来源；每个快照固定 `<name>@<marketplace>`、原生来源、版本、
+    包内容 SHA-256、启用状态、必需 Skills/MCP 组件与 MCP server 名称。Provider 在 CLI 启动前核验安装缓存、
+    manifest、摘要、C2 组件和名称冲突，随后通过 plugin/list、plugin/read 与 mcpServerStatus/list 回读原生装载结果；
+    显式启用的缺包、版本/来源/摘要/组件/鉴权或 MCP 启动异常均使 Session 启动失败。hooks、commands、agents、apps
+    不在 C1；`config_overrides` 不得改写插件控制。插件指纹进入 checkpoint，包内容变化使当前 Turn 失败并关闭
+    Provider；启停变化只由新 Session 的宿主 Binding 快照生效。harness 不安装、更新或删除插件。
+    启动覆盖仅将规范化 cwd 临时设为 untrusted，并回读确认唯一 projects 项，避免可写 profile 自动持久化祖先仓库信任；
+    用户文件/线程/覆盖中的 projects 表仍拒绝，不新增信任授权。内置 Skill 缓存须由宿主单独登记，不自动授权整个 home。
+    来源范围指纹随原 checkpoint 保存，恢复时改变范围或开关在复制前拒绝；连接/fallback/每轮前复检。
+    新增不准入来源使该轮失败并关闭 client。Skill 安装仍早于 SDK 加载，旧 Team 显式 approve/bypass 不改。
+    这是来源准入与受限启动，非 OS 文件 ACL；同 UID 修改、检查使用竞态、硬链接及全部进程隔离不由此保证。
+17. **受管产品 MCP 不扩大协议或工具所有权**：产品宿主仍拥有原工具目录、主体/父 Session/工作空间路由和授权；
+    Codex Provider 只消费 HarnessContext 的 MCP 配置并走原生工具审批。临时 URL/token 不进入稳定来源范围身份，
+    server 名称进入来源指纹；CLI 有效配置丢失认证、出现额外 server、改变 required/prompt 或改成非 loopback 时启动失败。
+    Provider 不复制产品工具、不启动通用 MCP 注册中心，也不把 Team operator 权限用于 Single。
+
 ## 接口契约
 
 ```python
@@ -99,7 +160,7 @@ class HarnessIOAdapter:
 provider 配置模型：`ClaudeCodeHarnessConfig`（`cwd` / `add_dirs` / `env` / `inherit_process_env` /
 `cli_path` / `model` / `fallback_model` / `session_id` / `permission_mode` / `system_prompt_mode` /
 `include_partial_messages` / `max_turns` / `settings` / `event_buffer_capacity`）、
-`CodexHarnessConfig`（`cwd` / `env` / `inherit_process_env` / `codex_bin` / `model` / `fallback_model` /
+`CodexHarnessConfig`（`cwd` / `env` / `inherit_process_env` / `codex_bin` / `model` / `fallback_model` / `native_plugins` /
 `config_overrides` / `thread_config` / `bypass_approvals_and_sandbox` / `turn_idle_timeout_s` /
 `turn_idle_retries` / `max_will_retry_count` / `mcp_*` / `client_*` / `experimental_raw_events` /
 `event_buffer_capacity`）、`DshHarnessConfig`（镜像 `DeepSeekHarnessConfig` + `launch_args_override` /

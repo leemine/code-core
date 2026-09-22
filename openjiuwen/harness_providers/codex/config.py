@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass, field, fields
 from types import MappingProxyType
 from typing import Literal, Mapping
 
 from openjiuwen.harness_protocol import JsonObject
+from openjiuwen.harness_providers.codex.native_plugins import CodexNativePluginConfig
 from openjiuwen.harness_providers.skills import SkillSource, normalize_skills
 
 _DEFAULT_TURN_IDLE_TIMEOUT_S = 180.0
@@ -65,10 +67,15 @@ class CodexHarnessConfig:
     cwd: str | None = None
     env: Mapping[str, str] = field(default_factory=dict, repr=False)
     inherit_process_env: bool = True
+    # None preserves legacy startup; an explicit root list enables source admission.
+    startup_source_roots: tuple[str, ...] | None = None
     codex_bin: str | None = None
     model: CodexModelConfig | None = None
     fallback_model: CodexModelConfig | None = None
     config_overrides: tuple[str, ...] = ()
+    # None preserves the legacy CLI-owned plugin surface. An explicit tuple
+    # enables host-managed, fail-closed native plugin admission.
+    native_plugins: tuple[CodexNativePluginConfig, ...] | None = field(default=None, repr=False)
     thread_config: Mapping[str, object] = field(default_factory=lambda: {"model_reasoning_summary": _REASONING_SUMMARY})
     bypass_approvals_and_sandbox: bool = False
     turn_idle_timeout_s: float = _DEFAULT_TURN_IDLE_TIMEOUT_S
@@ -85,6 +92,16 @@ class CodexHarnessConfig:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
+        roots = self.startup_source_roots
+        if roots is not None:
+            if not isinstance(roots, (list, tuple)) or not roots or any(
+                not isinstance(root, str) or not root for root in roots
+            ):
+                raise TypeError("Codex startup_source_roots must be a non-empty array of paths or null")
+            object.__setattr__(self, "startup_source_roots", tuple(roots))
+        for name in ("inherit_process_env", "bypass_approvals_and_sandbox"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"Codex {name} must be a boolean")
         if self.system_prompt_mode not in ("append", "replace"):
             raise ValueError("system_prompt_mode must be 'append' or 'replace'")
         for name in ("cwd", "codex_bin", "client_name", "client_title"):
@@ -99,8 +116,39 @@ class CodexHarnessConfig:
             value = getattr(self, name)
             if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
                 raise TypeError(f"Codex {name} must be an array of strings")
+        plugins = self.native_plugins
+        if plugins is not None:
+            if not isinstance(plugins, (list, tuple)) or any(
+                not isinstance(plugin, CodexNativePluginConfig) for plugin in plugins
+            ):
+                raise TypeError("Codex native_plugins must be an array of CodexNativePluginConfig values or null")
+            if self.inherit_process_env:
+                raise ValueError("managed Codex native plugins require inherit_process_env=false")
+            for override in self.config_overrides:
+                try:
+                    values = tomllib.loads(override)
+                except tomllib.TOMLDecodeError as exc:
+                    raise ValueError("managed Codex config_overrides must contain valid TOML") from exc
+                features = values.get("features")
+                if (
+                    "plugins" in values
+                    or "marketplaces" in values
+                    or "mcp_servers" in values
+                    or isinstance(features, Mapping)
+                    and ({"plugins", "remote_plugin"} & set(features))
+                ):
+                    raise ValueError("managed Codex native plugin controls cannot be set through config_overrides")
+            object.__setattr__(self, "native_plugins", tuple(plugins))
         if not isinstance(self.thread_config, Mapping):
             raise TypeError("Codex thread_config must be an object")
+        if plugins is not None:
+            thread_features = self.thread_config.get("features")
+            if (
+                {"plugins", "marketplaces", "mcp_servers"} & set(self.thread_config)
+                or isinstance(thread_features, Mapping)
+                and ({"plugins", "remote_plugin"} & set(thread_features))
+            ):
+                raise ValueError("managed Codex native plugin controls cannot be set through thread_config")
         if isinstance(self.turn_idle_timeout_s, bool) or not isinstance(self.turn_idle_timeout_s, (int, float)):
             raise TypeError("Codex turn_idle_timeout_s must be numeric")
         if self.turn_idle_timeout_s <= 0:
@@ -137,6 +185,13 @@ class CodexHarnessConfig:
         for name in ("model", "fallback_model"):
             if name in values:
                 values[name] = CodexModelConfig.from_mapping(values[name])  # type: ignore[arg-type]
+        if "native_plugins" in values and values["native_plugins"] is not None:
+            raw_plugins = values["native_plugins"]
+            if not isinstance(raw_plugins, (list, tuple)):
+                raise TypeError("Codex native_plugins must be an array or null")
+            values["native_plugins"] = tuple(
+                CodexNativePluginConfig.from_mapping(plugin) for plugin in raw_plugins  # type: ignore[arg-type]
+            )
         for name in ("env", "thread_config"):
             if name in values and values[name] is not None:
                 if not isinstance(values[name], Mapping):
@@ -150,4 +205,4 @@ class CodexHarnessConfig:
         return cls(**values)  # type: ignore[arg-type]
 
 
-__all__ = ["CodexHarnessConfig", "CodexModelConfig"]
+__all__ = ["CodexHarnessConfig", "CodexModelConfig", "CodexNativePluginConfig"]
