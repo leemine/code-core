@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-09-16 |
-| 关联 feature | `F_04_tool-result-llm-rendering.md` |
+| 最近一次修订日期 | 2026-09-22 |
+| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_provider-neutral-subagent-execution.md` |
 
 ## 范围 / 边界
 
@@ -66,7 +66,9 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
      `SESSION_SPAWN_TASK_TYPE = "session_spawn_task"`（见 `S_03` 不变量 9）。
    - subagent：`SubagentSpawnTool` / `SubagentWaitTool` / `SubagentListTool` /
      `SubagentSendInputTool` / `SubagentCloseTool` / `SubagentResumeTool`
-     （`tools/subagent/subagent_tools.py`），消费 `subagent_runtime` —— `S_10`。
+     （`tools/subagent/subagent_tools.py`），消费 `subagent_runtime` —— `S_10`。六个工具可由组合根
+     固定注入同一个 `SubagentExecutionFactory`；工具参数不接受 Provider 覆盖，同一父 Session
+     不能更换 factory。未注入时保持原 Native DeepAgent 构造路径。
    - worktree：`WorktreeManager` / `WorktreeConfig` / `WorktreeLifecyclePolicy` +
      `EnterWorktreeTool` / `ExitWorktreeTool`（`tools/worktree/`）。
    - shell：`BashTool` / `PowerShellTool` / `CodeTool`（`tools/shell/` + `code.py`）。
@@ -170,6 +172,9 @@ class SubagentListTool(Tool): ...
 class SubagentSendInputTool(Tool): ...
 class SubagentCloseTool(Tool): ...
 class SubagentResumeTool(Tool): ...
+def build_subagent_tools(parent_agent: Any, *,
+                         execution_factory: SubagentExecutionFactory | None = None,
+                         ...) -> list[Tool]: ...
 
 class EnterPlanModeTool(Tool): ...
 class ExitPlanModeTool(Tool): ...

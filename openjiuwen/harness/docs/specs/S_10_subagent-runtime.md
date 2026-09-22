@@ -5,9 +5,9 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/subagent_runtime/`（18 文件） |
-| 最近一次修订日期 | 2026-09-17 |
-| 关联 feature | N/A |
+| 关联模块 | `openjiuwen/harness/subagent_runtime/` |
+| 最近一次修订日期 | 2026-09-22 |
+| 关联 feature | `F_05_provider-neutral-subagent-execution.md` |
 
 ## 范围 / 边界
 
@@ -29,6 +29,8 @@ persistence。`subagent_runtime/` 18 文件承载 `enable_subagent_runtime=True`
 - `subagent_runtime/{activity,transcript}.py`：`ActivityProjector` / `TranscriptEmitter` +
   快照 / 分页投影（`DEFAULT_SNAPSHOT_PAGE_SIZE`）。
 - `subagent_runtime/session_manager.py`：`SubagentSessionManager`。
+- `subagent_runtime/ports.py`：父执行上下文、子构造、Turn 执行/结果与恢复端口。
+- `subagent_runtime/native_execution.py`：旧 DeepAgent + Session 执行链的默认 Native 适配。
 - `subagent_runtime/ids.py`：`build_subagent_id` / `new_task_id`。
 - `subagent_runtime/errors.py`：`build_subagent_runtime_error` /
   `raise_subagent_capacity_invalid` / `raise_subagent_not_found`。
@@ -62,11 +64,26 @@ persistence。`subagent_runtime/` 18 文件承载 `enable_subagent_runtime=True`
    `raise_subagent_capacity_invalid`；`build_subagent_runtime_error` 是错误构造唯一入口。
 8. **子代理生命周期挂钩 DeepAgent 会话**：`DeepAgent.abort` 调
    `_release_session_subagent_controls`；`_cancel_session_deep_tasks` 收尾
-   （`S_02` 不变量 11）。`cancel_all(reason="parent_ended")` 是父会话结束时的批量清理。
+   （`S_02` 不变量 11）。`cancel_all(reason="parent_ended")` 是父会话结束时的批量清理；它在子执行
+   关闭和状态持久化后还必须关闭并清空 `ActivityEmitter`，不能给已释放父 Session 留后台 drain task。
 9. **输出投影两路**：`ActivityProjector`（活动事件：reasoning / boundary / tool）与
    `TranscriptEmitter` / `TranscriptProjector`（turn 转录）；`resolve_presentation` 把它们
    折成宿主可渲染形态。`SUBAGENT_*_EVENT_TYPE` 常量是事件类型契约。工具结果的展示文本按
    `summary` → `rendered_result`（模型可见文本，`S_05` 不变量 11）→ 兼容字段 `result` 取值。
+10. **运行时只依赖子执行端口**：`SubagentSessionManager` 用不可变
+    `ParentExecutionContext` 与 `SubagentBuildRequest` 调用 `SubagentExecutionFactory.create()`；
+    `SubagentInstance` 只调用返回的 `SubagentExecution.run_turn()` / `close()`，不得再直接调用
+    DeepAgent 的 `stream`、Session 的 `pre_run` 或 Native finalize 钩子。默认
+    `NativeSubagentExecutionFactory` 适配原 `create_subagent`、每 Turn Session、KV cache、任务资源
+    和流聚合，保持 Native→Native 行为。
+11. **父子 Provider 不在工具参数中选择**：构造端口由父执行组合根固定并按父 Session 缓存；
+    `SubagentBuildRequest` 不含 provider/engine 覆盖字段。运行时不读取漂移的全局默认，也不建设
+    Native/External 混合中间链路。子执行拥有独立 `ExecutionSubject` 与 session id，父 subject、
+    parent session id 和宿主 Session 只经 `ParentExecutionContext` 传入，权限不得扩大。
+12. **结果与恢复由端口裁决**：一次 Turn 只以 `SubagentTurnResult` 结算；原始流块仍可经
+    `on_chunk` 投影活动/转录，但 `SubagentInstance` 不从 Provider 私有块重新推断终态。
+    `SubagentExecutionFactory.can_restore()` 是恢复能力检查的唯一执行端口；registry/状态/历史仍由
+    `SubagentControl` 权威管理，Provider 不复制该状态机。
 
 ## 接口契约
 
@@ -108,6 +125,42 @@ class SubagentStatusKind(str, Enum):
     ERRORED = "errored"
     CLOSED = "closed"
     NOT_FOUND = "not_found"
+
+@dataclass(frozen=True, slots=True)
+class ParentExecutionContext:
+    parent_session_id: str
+    parent_subject_id: str
+    parent_session: Any | None = None
+
+@dataclass(frozen=True, slots=True)
+class SubagentBuildRequest:
+    subagent_id: str
+    subagent_type: str
+    display_name: str
+    role: str
+    browser_capabilities: tuple[str, ...] | None = None
+
+@dataclass(frozen=True, slots=True)
+class SubagentTurnRequest:
+    task_id: str
+    query: str
+
+@dataclass(frozen=True, slots=True)
+class SubagentTurnResult:
+    output: str
+    reasoning: str = ""
+    is_error: bool = False
+    error_code: str | None = None
+
+class SubagentExecution(Protocol):
+    async def run_turn(self, request: SubagentTurnRequest, *, on_chunk, on_result) -> None: ...
+    async def close(self, reason: str) -> None: ...
+
+class SubagentExecutionFactory(Protocol):
+    async def create(self, request: SubagentBuildRequest,
+                     context: ParentExecutionContext) -> SubagentExecution: ...
+    async def can_restore(self, request: SubagentBuildRequest,
+                          context: ParentExecutionContext) -> bool: ...
 ```
 
 错误 / 返回语义：
@@ -117,6 +170,8 @@ class SubagentStatusKind(str, Enum):
 - `get_status` 未知 id → `SubagentStatus(NOT_FOUND)`。
 - `close` 返回关闭后的 `SubagentStatus`；幂等。
 - `send_input` 目标非运行中 → 抛（`UserInputOp` 校验）。
+- 组合根对同一父 Session 更换构造端口 → 构造前失败，不创建混合 Provider 子执行。
+- `can_restore()` 返回 false → `raise_subagent_not_found`；不得绕过端口改读另一 Provider 的快照。
 
 ## 数据结构
 
