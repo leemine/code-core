@@ -8,13 +8,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.kv_cache.kv_cache_metadata import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
-from openjiuwen.core.session.agent import create_agent_session
-from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.harness.execution_subject import current_execution_subject
-from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
-from openjiuwen.harness.kv_cache.kv_cache_subagent_lifecycle import affinity_enabled
 from openjiuwen.harness.subagent_runtime.activity import ActivityProjector
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.errors import (
@@ -27,23 +21,16 @@ from openjiuwen.harness.subagent_runtime.models import (
     SubagentStatus,
     UserInputOp,
 )
+from openjiuwen.harness.subagent_runtime.native_execution import (
+    NativeSubagentExecutionFactory,
+)
+from openjiuwen.harness.subagent_runtime.ports import (
+    ParentExecutionContext,
+    SubagentBuildRequest,
+    SubagentExecutionFactory,
+    SubagentTurnResult,
+)
 from openjiuwen.harness.subagent_runtime.transcript import TranscriptProjector
-
-
-async def _close_session_quietly(session: Any) -> None:
-    close_stream = getattr(session, "close_stream", None)
-    if not callable(close_stream):
-        return
-    try:
-        result = close_stream()
-        if asyncio.iscoroutine(result):
-            await result
-    except Exception as exc:
-        logger.debug(
-            "Failed to close subagent session stream quietly: %s",
-            exc,
-            exc_info=True,
-        )
 
 
 class SubagentSessionManager:
@@ -56,14 +43,18 @@ class SubagentSessionManager:
         running_semaphore: asyncio.Semaphore,
         *,
         parent_session: Any | None = None,
+        execution_factory: SubagentExecutionFactory | None = None,
         status_change_handler: Callable[[str, SubagentStatus], Awaitable[None]] | None = None,
         activity_handler: Callable[[SubagentActivity], None] | None = None,
         transcript_handler: Callable[[SubagentMessage], Awaitable[None]] | None = None,
     ) -> None:
-        self._parent_agent = parent_agent
         self._config = config
         self._running_semaphore = running_semaphore
         self._parent_session = parent_session
+        self._execution_factory = execution_factory or NativeSubagentExecutionFactory(
+            parent_agent,
+            parent_session_getter=lambda: self._parent_session,
+        )
         self._status_change_handler = status_change_handler
         self._activity_handler = activity_handler
         self._transcript_handler = transcript_handler
@@ -71,33 +62,22 @@ class SubagentSessionManager:
         self._projectors: dict[str, ActivityProjector] = {}
         self._transcript_projectors: dict[str, TranscriptProjector] = {}
 
-    def _build_turn_hooks(
-        self,
-        subagent_type: str,
-        subagent_id: str,
-        parent_session_id: str,
-    ) -> tuple[
-        Callable[[Any], Awaitable[None]] | None,
-        Callable[[Any, bool], Awaitable[None]] | None,
-    ]:
-        parent = self._parent_agent
-        if not affinity_enabled(parent):
-            return None, None
+    @property
+    def execution_factory(self) -> SubagentExecutionFactory:
+        return self._execution_factory
 
-        async def on_turn_start(session: Any) -> None:
-            await kv_cache_subagent_lifecycle.prepare_subagent(
-                session,
-                subagent_type=subagent_type,
-            )
+    def set_parent_session(self, session: Any | None) -> None:
+        self._parent_session = session
 
-        async def on_turn_finished(session: Any, succeeded: bool) -> None:
-            await kv_cache_subagent_lifecycle.finish_subagent(
-                session,
-                subagent_type=subagent_type,
-                succeeded=succeeded,
-            )
-
-        return on_turn_start, on_turn_finished
+    def _parent_context(self, parent_session_id: str) -> ParentExecutionContext:
+        parent_subject = current_execution_subject()
+        return ParentExecutionContext(
+            parent_session_id=parent_session_id,
+            parent_subject_id=(
+                parent_subject.subject_id if parent_subject is not None else "main"
+            ),
+            parent_session=self._parent_session,
+        )
 
     async def create(
         self,
@@ -109,37 +89,21 @@ class SubagentSessionManager:
         role: str,
         browser_capabilities: list[str] | None = None,
     ) -> SubagentInstance:
-        subagent = self._parent_agent.create_subagent(
-            subagent_type,
-            subagent_id,
-            browser_capabilities,
+        request = SubagentBuildRequest(
+            subagent_id=subagent_id,
+            subagent_type=subagent_type,
+            display_name=display_name,
+            role=role,
+            browser_capabilities=(
+                tuple(browser_capabilities)
+                if browser_capabilities is not None
+                else None
+            ),
         )
-
-        envs: dict[str, Any] = {}
-        if affinity_enabled(self._parent_agent):
-            envs[KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV] = parent_session_id
-
-        card = subagent.card
-        parent_subject = current_execution_subject()
-        parent_subject_id = parent_subject.subject_id if parent_subject is not None else "main"
-
-        def session_factory() -> Any:
-            return create_agent_session(
-                session_id=subagent_id,
-                card=card,
-                envs=envs,
-                parent_session_id=parent_session_id,
-                kv_cache_runtime=(
-                    self._parent_session.get_kv_cache_runtime()
-                    if self._parent_session is not None
-                    else None
-                ),
-            )
-
-        on_turn_start, on_turn_finished = self._build_turn_hooks(
-            subagent_type,
-            subagent_id,
-            parent_session_id,
+        context = self._parent_context(parent_session_id)
+        execution = await self._execution_factory.create(
+            request,
+            context,
         )
 
         async def on_status_changed(status: SubagentStatus) -> None:
@@ -161,13 +125,13 @@ class SubagentSessionManager:
             message = transcript_projector.begin_turn(op.task_id, op.query)
             await self._transcript_handler(message)
 
-        async def on_turn_stream_end(op: UserInputOp, aggregator: Any) -> None:
+        async def on_turn_stream_end(op: UserInputOp, result: SubagentTurnResult) -> None:
             if self._activity_handler is not None:
                 for activity in projector.flush_pending(op.task_id):
                     self._activity_handler(activity)
             if self._transcript_handler is None:
                 return
-            message = transcript_projector.end_turn(op.task_id, aggregator)
+            message = transcript_projector.end_turn(op.task_id, result)
             await self._transcript_handler(message)
 
         async def on_chunk(chunk: Any) -> None:
@@ -189,14 +153,10 @@ class SubagentSessionManager:
             display_name=display_name,
             role=role,
             parent_session_id=parent_session_id,
-            parent_subject_id=parent_subject_id,
-            agent=subagent,
-            session_factory=session_factory,
+            parent_subject_id=context.parent_subject_id,
+            execution=execution,
             running_semaphore=self._running_semaphore,
             turn_timeout_s=self._config.turn_timeout_s,
-            include_parent_session_id=affinity_enabled(self._parent_agent),
-            on_turn_start=on_turn_start,
-            on_turn_finished=on_turn_finished,
             on_status_changed=on_status_changed,
             on_chunk=on_chunk if (self._activity_handler is not None or self._transcript_handler is not None) else None,
             on_turn_stream_start=on_turn_stream_start if self._transcript_handler else None,
@@ -246,13 +206,26 @@ class SubagentSessionManager:
         role: str,
         browser_capabilities: list[str] | None = None,
     ) -> SubagentInstance:
-        """Rebuild a subagent instance; conversation history is restored in session.pre_run()."""
+        """Rebuild a subagent instance through the bound provider factory."""
         existing = self.find(subagent_id)
         if existing is not None and not existing.is_closed():
             return existing
 
-        checkpointer = CheckpointerFactory.get_checkpointer()
-        if not await checkpointer.session_exists(subagent_id):
+        request = SubagentBuildRequest(
+            subagent_id=subagent_id,
+            subagent_type=subagent_type,
+            display_name=display_name,
+            role=role,
+            browser_capabilities=(
+                tuple(browser_capabilities)
+                if browser_capabilities is not None
+                else None
+            ),
+        )
+        if not await self._execution_factory.can_restore(
+            request,
+            self._parent_context(parent_session_id),
+        ):
             raise_subagent_not_found(subagent_id)
 
         return await self.create(

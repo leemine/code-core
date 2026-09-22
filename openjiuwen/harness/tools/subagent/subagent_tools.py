@@ -4,20 +4,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, AsyncIterator, Collection, List, Optional
+from typing import Any, AsyncIterator, Collection, List, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
+from openjiuwen.harness.subagent_runtime.ports import SubagentExecutionFactory
+from openjiuwen.harness.subagent_runtime.status_events import map_status_to_view
 from openjiuwen.harness.tools.base_tool import ToolOutput, render_fields
 from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
-from openjiuwen.harness.subagent_runtime.status_events import map_status_to_view
-
-if TYPE_CHECKING:
-    from openjiuwen.harness.deep_agent import DeepAgent
-
 
 _SUBAGENT_ROW_KEYS = (
     "subagent_id",
@@ -112,13 +109,15 @@ class SubagentSpawnTool(Tool):
     def __init__(
         self,
         card: ToolCard,
-        parent_agent: "DeepAgent",
+        parent_agent: Any,
         language: str = "cn",
         allowed_subagent_types: Collection[str] | None = None,
+        execution_factory: SubagentExecutionFactory | None = None,
     ) -> None:
         super().__init__(card)
         self._parent_agent = parent_agent
         self._language = language
+        self._execution_factory = execution_factory
         self.set_allowed_subagent_types(allowed_subagent_types)
 
     def set_allowed_subagent_types(
@@ -158,7 +157,11 @@ class SubagentSpawnTool(Tool):
                 ),
             )
 
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control = get_subagent_control(
+            self._parent_agent,
+            kwargs.get("session"),
+            execution_factory=self._execution_factory,
+        )
         browser_capabilities = _parse_browser_capabilities(payload, normalized_type)
         result = await control.spawn(
             normalized_type,
@@ -192,16 +195,22 @@ class SubagentWaitTool(Tool):
     def __init__(
         self,
         card: ToolCard,
-        parent_agent: "DeepAgent",
+        parent_agent: Any,
         language: str = "cn",
+        execution_factory: SubagentExecutionFactory | None = None,
     ) -> None:
         super().__init__(card)
         self._parent_agent = parent_agent
         self._language = language
+        self._execution_factory = execution_factory
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         payload = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control = get_subagent_control(
+            self._parent_agent,
+            kwargs.get("session"),
+            execution_factory=self._execution_factory,
+        )
 
         subagent_ids = _parse_subagent_ids(payload)
         if not subagent_ids:
@@ -255,16 +264,22 @@ class SubagentListTool(Tool):
     def __init__(
         self,
         card: ToolCard,
-        parent_agent: "DeepAgent",
+        parent_agent: Any,
         language: str = "cn",
+        execution_factory: SubagentExecutionFactory | None = None,
     ) -> None:
         super().__init__(card)
         self._parent_agent = parent_agent
         self._language = language
+        self._execution_factory = execution_factory
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         _ = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control = get_subagent_control(
+            self._parent_agent,
+            kwargs.get("session"),
+            execution_factory=self._execution_factory,
+        )
         return ToolOutput(
             success=True,
             data=control.describe_list(),
@@ -292,16 +307,22 @@ class SubagentSendInputTool(Tool):
     def __init__(
         self,
         card: ToolCard,
-        parent_agent: "DeepAgent",
+        parent_agent: Any,
         language: str = "cn",
+        execution_factory: SubagentExecutionFactory | None = None,
     ) -> None:
         super().__init__(card)
         self._parent_agent = parent_agent
         self._language = language
+        self._execution_factory = execution_factory
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         payload = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control = get_subagent_control(
+            self._parent_agent,
+            kwargs.get("session"),
+            execution_factory=self._execution_factory,
+        )
 
         subagent_id = payload.get("subagent_id")
         query = payload.get("query")
@@ -354,16 +375,22 @@ class SubagentCloseTool(Tool):
     def __init__(
         self,
         card: ToolCard,
-        parent_agent: "DeepAgent",
+        parent_agent: Any,
         language: str = "cn",
+        execution_factory: SubagentExecutionFactory | None = None,
     ) -> None:
         super().__init__(card)
         self._parent_agent = parent_agent
         self._language = language
+        self._execution_factory = execution_factory
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         payload = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control = get_subagent_control(
+            self._parent_agent,
+            kwargs.get("session"),
+            execution_factory=self._execution_factory,
+        )
 
         subagent_id = payload.get("subagent_id")
         if not subagent_id or not isinstance(subagent_id, str):
@@ -397,16 +424,22 @@ class SubagentResumeTool(Tool):
     def __init__(
         self,
         card: ToolCard,
-        parent_agent: "DeepAgent",
+        parent_agent: Any,
         language: str = "cn",
+        execution_factory: SubagentExecutionFactory | None = None,
     ) -> None:
         super().__init__(card)
         self._parent_agent = parent_agent
         self._language = language
+        self._execution_factory = execution_factory
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         payload = _require_dict_inputs(inputs)
-        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+        control = get_subagent_control(
+            self._parent_agent,
+            kwargs.get("session"),
+            execution_factory=self._execution_factory,
+        )
 
         subagent_id = payload.get("subagent_id")
         if not subagent_id or not isinstance(subagent_id, str):
@@ -438,12 +471,13 @@ class SubagentResumeTool(Tool):
 
 
 def build_subagent_tools(
-    parent_agent: "DeepAgent",
+    parent_agent: Any,
     *,
     language: str = "cn",
     available_agents: str = "",
     agent_id: Optional[str] = None,
     allowed_subagent_types: Collection[str] | None = None,
+    execution_factory: SubagentExecutionFactory | None = None,
 ) -> List[Tool]:
     """Build runtime subagent tools (spawn, wait, list, send_input, close, resume)."""
     format_args = {"available_agents": available_agents}
@@ -491,12 +525,38 @@ def build_subagent_tools(
             parent_agent,
             language=language,
             allowed_subagent_types=allowed_subagent_types,
+            execution_factory=execution_factory,
         ),
-        SubagentWaitTool(wait_card, parent_agent, language=language),
-        SubagentListTool(list_card, parent_agent, language=language),
-        SubagentSendInputTool(send_input_card, parent_agent, language=language),
-        SubagentCloseTool(close_card, parent_agent, language=language),
-        SubagentResumeTool(resume_card, parent_agent, language=language),
+        SubagentWaitTool(
+            wait_card,
+            parent_agent,
+            language=language,
+            execution_factory=execution_factory,
+        ),
+        SubagentListTool(
+            list_card,
+            parent_agent,
+            language=language,
+            execution_factory=execution_factory,
+        ),
+        SubagentSendInputTool(
+            send_input_card,
+            parent_agent,
+            language=language,
+            execution_factory=execution_factory,
+        ),
+        SubagentCloseTool(
+            close_card,
+            parent_agent,
+            language=language,
+            execution_factory=execution_factory,
+        ),
+        SubagentResumeTool(
+            resume_card,
+            parent_agent,
+            language=language,
+            execution_factory=execution_factory,
+        ),
     ]
 
 

@@ -1,40 +1,61 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Resolve SubagentControl instances scoped to a parent DeepAgent session."""
+"""Resolve SubagentControl instances scoped to a parent execution session."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.subagent_runtime.control import SubagentControl
-
-if TYPE_CHECKING:
-    from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.subagent_runtime.ports import SubagentExecutionFactory
 
 _CONTROL_ATTR = "_subagent_controls"
 
 
-def get_subagent_control(parent_agent: "DeepAgent", session: Any) -> SubagentControl:
+def get_subagent_control(
+    parent_agent: Any,
+    session: Any,
+    *,
+    execution_factory: SubagentExecutionFactory | None = None,
+) -> SubagentControl:
     """Return or create the SubagentControl for a parent session."""
-    if not isinstance(session, Session):
+    get_session_id = getattr(session, "get_session_id", None)
+    if not callable(get_session_id):
         raise build_error(
             StatusCode.TOOL_SESSION_TOOL_INVOKED,
             reason="subagent tools require a valid session in kwargs",
         )
-    parent_session_id = session.get_session_id()
+    parent_session_id = str(get_session_id() or "")
+    if not parent_session_id:
+        raise build_error(
+            StatusCode.TOOL_SESSION_TOOL_INVOKED,
+            reason="subagent tools require a non-empty parent session id",
+        )
     controls = getattr(parent_agent, _CONTROL_ATTR, None)
     if controls is None:
         controls = {}
         setattr(parent_agent, _CONTROL_ATTR, controls)
     control = controls.get(parent_session_id)
     if control is None:
-        control = SubagentControl(parent_agent, parent_session_id, parent_session=session)
+        control = SubagentControl(
+            parent_agent,
+            parent_session_id,
+            parent_session=session,
+            execution_factory=execution_factory,
+        )
         control.hydrate()
         controls[parent_session_id] = control
     else:
+        if (
+            execution_factory is not None
+            and control.execution_factory is not execution_factory
+        ):
+            raise build_error(
+                StatusCode.TOOL_SESSION_TOOL_INVOKED,
+                reason="subagent execution factory cannot change within a parent session",
+            )
         control.set_parent_session(session)
     control.merge_persisted_records()
     return control

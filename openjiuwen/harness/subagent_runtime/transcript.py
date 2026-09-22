@@ -10,6 +10,7 @@ from typing import Any
 
 from openjiuwen.harness.subagent_runtime.activity import _parse_chunk, _pick_str, _tool_info
 from openjiuwen.harness.subagent_runtime.models import SubagentMessage
+from openjiuwen.harness.subagent_runtime.ports import SubagentTurnResult
 from openjiuwen.harness.subagent_runtime.stream_output import TurnOutputAggregator
 
 
@@ -71,24 +72,32 @@ class TranscriptProjector:
     def end_turn(
         self,
         task_id: str,
-        aggregator: TurnOutputAggregator,
+        result: SubagentTurnResult | TurnOutputAggregator,
     ) -> SubagentMessage:
+        if isinstance(result, SubagentTurnResult):
+            reasoning_text = result.reasoning
+            output = result.output
+            is_error = result.is_error
+        else:
+            reasoning_text = result.reasoning_text()
+            output = result.output()
+            is_error = result.is_error()
         reasoning = self._take_phase_reasoning()
         if reasoning is None and not self._saw_reasoning:
-            reasoning = (aggregator.reasoning_text() or "").strip() or None
-        if aggregator.is_error():
+            reasoning = (reasoning_text or "").strip() or None
+        if is_error:
             return self._make(
                 task_id=task_id,
                 role="assistant",
                 event_type="chat.error",
-                content=aggregator.output() or "subagent error",
+                content=output or "subagent error",
                 reasoning_content=reasoning,
             )
         return self._make(
             task_id=task_id,
             role="assistant",
             event_type="chat.final",
-            content=aggregator.output(),
+            content=output,
             reasoning_content=reasoning,
         )
 

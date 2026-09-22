@@ -5,17 +5,12 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.execution_subject import ExecutionSubject, execution_subject_scope
-from openjiuwen.harness.subagent_lifecycle import (
-    cleanup_subagent_task_resources,
-    prepare_subagent_task_resources,
-)
 from openjiuwen.harness.subagent_runtime.models import (
     ShutdownOp,
     SubagentOp,
@@ -23,24 +18,13 @@ from openjiuwen.harness.subagent_runtime.models import (
     SubagentStatusKind,
     UserInputOp,
 )
+from openjiuwen.harness.subagent_runtime.native_execution import NativeSubagentExecution
+from openjiuwen.harness.subagent_runtime.ports import (
+    SubagentExecution,
+    SubagentTurnRequest,
+    SubagentTurnResult,
+)
 from openjiuwen.harness.subagent_runtime.status import StatusChannel, StatusReceiver
-from openjiuwen.harness.subagent_runtime.stream_output import TurnOutputAggregator
-
-
-async def _close_session_quietly(session: Any) -> None:
-    close_stream = getattr(session, "close_stream", None)
-    if not callable(close_stream):
-        return
-    try:
-        result = close_stream()
-        if asyncio.iscoroutine(result):
-            await result
-    except Exception as exc:
-        logger.debug(
-            "Failed to close subagent session stream quietly: %s",
-            exc,
-            exc_info=True,
-        )
 
 
 class SubagentInstance:
@@ -55,8 +39,9 @@ class SubagentInstance:
         role: str,
         parent_session_id: str,
         parent_subject_id: str = "main",
-        agent: Any,
-        session_factory: Callable[[], Any],
+        execution: SubagentExecution | None = None,
+        agent: Any | None = None,
+        session_factory: Callable[[], Any] | None = None,
         running_semaphore: asyncio.Semaphore,
         on_chunk: Callable[[Any], Awaitable[None]] | None = None,
         turn_timeout_s: float | None = None,
@@ -65,7 +50,7 @@ class SubagentInstance:
         on_turn_finished: Callable[[Any, bool], Awaitable[None]] | None = None,
         on_status_changed: Callable[[SubagentStatus], Awaitable[None]] | None = None,
         on_turn_stream_start: Callable[[UserInputOp], Awaitable[None]] | None = None,
-        on_turn_stream_end: Callable[[UserInputOp, TurnOutputAggregator], Awaitable[None]] | None = None,
+        on_turn_stream_end: Callable[[UserInputOp, SubagentTurnResult], Awaitable[None]] | None = None,
     ) -> None:
         self.subagent_id = subagent_id
         self.subagent_type = subagent_type
@@ -85,13 +70,24 @@ class SubagentInstance:
         self.last_task_id: str | None = None
         self.current_task_id: str | None = None
 
-        self._agent = agent
-        self._session_factory = session_factory
+        if execution is None:
+            if agent is None or session_factory is None:
+                raise TypeError("execution or legacy agent/session_factory is required")
+            execution = NativeSubagentExecution(
+                agent=agent,
+                session_factory=session_factory,
+                subagent_id=subagent_id,
+                parent_session_id=parent_session_id,
+                include_parent_session_id=include_parent_session_id,
+                on_turn_start=on_turn_start,
+                on_turn_finished=on_turn_finished,
+            )
+        self._execution = execution
+        # Compatibility-only inspection hook for callers that historically
+        # observed the Native child. Runtime behavior goes through _execution.
+        self._agent = getattr(execution, "_agent", agent)
         self._on_chunk = on_chunk
         self._turn_timeout_s = turn_timeout_s
-        self._include_parent_session_id = include_parent_session_id
-        self._on_turn_start = on_turn_start
-        self._on_turn_finished = on_turn_finished
         self._on_status_changed = on_status_changed
         self._on_turn_stream_start = on_turn_stream_start
         self._on_turn_stream_end = on_turn_stream_end
@@ -237,55 +233,46 @@ class SubagentInstance:
             run.cancel()
         raise exc
 
-    def _build_stream_inputs(self, op: UserInputOp) -> dict[str, str]:
-        inputs: dict[str, str] = {
-            "query": op.query,
-            "conversation_id": self.subagent_id,
-        }
-        if self._include_parent_session_id:
-            inputs["parent_session_id"] = self.parent_session_id
-        return inputs
-
     async def _run_one_turn(self, op: UserInputOp) -> None:
-        session = self._session_factory()
-        aggregator = TurnOutputAggregator()
-        succeeded = False
         owner_root = self._register_observability_owner()
         try:
             with execution_subject_scope(self.execution_subject):
                 try:
-                    await session.pre_run()
-                    await prepare_subagent_task_resources(self._agent)
-                    if self._on_turn_start is not None:
-                        await self._on_turn_start(session)
                     if self._on_turn_stream_start is not None:
                         await self._on_turn_stream_start(op)
-                    inputs = self._build_stream_inputs(op)
-                    gen = self._agent.stream(inputs, session=session)
-                    async with contextlib.aclosing(gen):
-                        async for chunk in gen:
-                            aggregator.consume(chunk)
-                            if self._on_chunk is not None:
-                                await self._on_chunk(chunk)
-                    # Drain the turn tail before settling: the terminal status doubles as
-                    # the turn-end signal, so nothing may be emitted after it.
-                    if self._on_turn_stream_end is not None:
-                        await self._on_turn_stream_end(op, aggregator)
-                    await self._settle_turn(op, aggregator)
-                    succeeded = (
-                        not aggregator.is_error()
-                        and self.status.current().kind is SubagentStatusKind.COMPLETED
+
+                    settled = False
+
+                    async def on_result(result: SubagentTurnResult) -> None:
+                        nonlocal settled
+                        if settled:
+                            message = "subagent execution settled a turn more than once"
+                            await self._set_status(SubagentStatus.errored(message))
+                            raise RuntimeError(message)
+                        # Drain the turn tail before settling: the terminal status doubles as
+                        # the turn-end signal, so nothing may be emitted after it.
+                        if self._on_turn_stream_end is not None:
+                            await self._on_turn_stream_end(op, result)
+                        await self._settle_turn(op, result)
+                        settled = True
+
+                    await self._execution.run_turn(
+                        SubagentTurnRequest(task_id=op.task_id, query=op.query),
+                        on_chunk=self._on_chunk,
+                        on_result=on_result,
                     )
+                    if not settled:
+                        raise RuntimeError("subagent execution returned without a turn result")
                 except BaseError as exc:
-                    await self._set_status(
-                        SubagentStatus.errored(str(exc), code=exc.status.name),
-                    )
+                    if not self.status.current().is_final():
+                        await self._set_status(
+                            SubagentStatus.errored(str(exc), code=exc.status.name),
+                        )
                     raise
                 except Exception as exc:
-                    await self._set_status(SubagentStatus.errored(str(exc)))
+                    if not self.status.current().is_final():
+                        await self._set_status(SubagentStatus.errored(str(exc)))
                     raise
-                finally:
-                    await self._finalize_turn(session, succeeded=succeeded)
         finally:
             self._unregister_observability_owner(owner_root)
 
@@ -321,29 +308,18 @@ class SubagentInstance:
                 exc,
             )
 
-    async def _settle_turn(self, op: UserInputOp, aggregator: TurnOutputAggregator) -> None:
-        output = aggregator.output()
-        if aggregator.is_error():
+    async def _settle_turn(self, op: UserInputOp, result: SubagentTurnResult) -> None:
+        if result.is_error:
             await self._set_status(
-                SubagentStatus.errored(output or "subagent stream reported error"),
+                SubagentStatus.errored(
+                    result.output or "subagent execution reported error",
+                    code=result.error_code,
+                ),
             )
             return
-        self.last_output = output
+        self.last_output = result.output
         self.last_task_id = op.task_id
-        await self._set_status(SubagentStatus.completed(output))
-
-    async def _finalize_turn(self, session: Any, *, succeeded: bool) -> None:
-        task = asyncio.create_task(
-            self._finalize_turn_inner(session, succeeded=succeeded),
-        )
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.shield(task)
-
-    async def _finalize_turn_inner(self, session: Any, *, succeeded: bool) -> None:
-        await cleanup_subagent_task_resources(self._agent)
-        await _close_session_quietly(session)
-        if self._on_turn_finished is not None:
-            await self._on_turn_finished(session, succeeded)
+        await self._set_status(SubagentStatus.completed(result.output))
 
     async def _handle_shutdown(self, reason: str) -> None:
         if self._closed:
@@ -353,6 +329,15 @@ class SubagentInstance:
             self._interrupt_requested = True
             run.cancel()
             await asyncio.wait({run})
+        try:
+            await self._execution.close(reason)
+        except Exception as exc:
+            logger.warning(
+                "[SubagentInstance] execution close failed: subagent_id=%s error=%s",
+                self.subagent_id,
+                exc,
+                exc_info=True,
+            )
         await self._set_status(SubagentStatus.closed(reason))
         await self.status.close()
         self._closed = True

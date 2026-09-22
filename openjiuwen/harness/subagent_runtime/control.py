@@ -11,7 +11,6 @@ from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.harness.kv_cache.kv_cache_subagent_lifecycle import is_sticky_subagent_type
 from openjiuwen.harness.subagent_runtime.activity_events import ActivityEmitter
 from openjiuwen.harness.subagent_runtime.config import (
@@ -50,6 +49,7 @@ from openjiuwen.harness.subagent_runtime.persistence import (
     read_subagent_bucket,
     trim_persisted_bucket,
 )
+from openjiuwen.harness.subagent_runtime.ports import SubagentExecutionFactory
 from openjiuwen.harness.subagent_runtime.registry import SpawnReservation, SubagentRegistry
 from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionManager
 from openjiuwen.harness.subagent_runtime.status import StatusReceiver
@@ -116,6 +116,7 @@ class SubagentControl:
         parent_session_id: str,
         config: SubagentRuntimeConfig | None = None,
         parent_session: Any | None = None,
+        execution_factory: SubagentExecutionFactory | None = None,
     ) -> None:
         self._parent_agent = parent_agent
         self._parent_session_id = parent_session_id
@@ -144,6 +145,7 @@ class SubagentControl:
             self._config,
             self._semaphore,
             parent_session=parent_session,
+            execution_factory=execution_factory,
             status_change_handler=self._handle_instance_status_changed,
             activity_handler=self._handle_activity if self._config.enable_activity_stream else None,
             transcript_handler=(self._handle_transcript_message if self._config.enable_transcript_stream else None),
@@ -451,10 +453,6 @@ class SubagentControl:
         if record is None:
             raise_subagent_not_found(subagent_id)
 
-        checkpointer = CheckpointerFactory.get_checkpointer()
-        if not await checkpointer.session_exists(subagent_id):
-            raise_subagent_not_found(subagent_id)
-
         reservation = await self._acquire_slot()
         try:
             await self._manager.restore(
@@ -499,6 +497,9 @@ class SubagentControl:
                 self._registry.release(sid)
             closed.append(sid)
         await self.persist()
+        if self._activity_emitter is not None:
+            await self._activity_emitter.close()
+            self._activity_emitter = None
         return closed
 
     def _ingest_persisted_record(self, sid: str, raw: dict[str, Any]) -> None:
@@ -525,6 +526,12 @@ class SubagentControl:
         if session is not self._parent_session:
             self._merged_records_marker = None
         self._parent_session = session
+        self._manager.set_parent_session(session)
+
+    @property
+    def execution_factory(self) -> SubagentExecutionFactory:
+        """The construction port fixed for this parent Session."""
+        return self._manager.execution_factory
 
     def _merge_persisted_record_bucket(self, bucket: dict[str, Any]) -> None:
         session = self._parent_session
@@ -596,16 +603,16 @@ class SubagentControl:
             for metadata in self._registry.list_live():
                 records[metadata.subagent_id] = SubagentControl._metadata_to_record(metadata).to_dict()
 
-            for sid, items in self._turns.items():
+            for sid, turn_items in self._turns.items():
                 existing = [SubagentTurn.from_dict(item) for item in (turns.get(sid) or []) if isinstance(item, dict)]
-                merged = self._merge_turns(existing, items)
+                merged = self._merge_turns(existing, turn_items)
                 turns[sid] = [item.to_dict() for item in merged]
 
-            for sid, items in self._activities.items():
+            for sid, activity_items in self._activities.items():
                 existing = [
                     SubagentActivity.from_dict(item) for item in (activities.get(sid) or []) if isinstance(item, dict)
                 ]
-                merged = self._merge_activities(existing, list(items))
+                merged = self._merge_activities(existing, list(activity_items))
                 activities[sid] = [item.to_dict() for item in merged]
 
             records, turns, activities = trim_persisted_bucket(
