@@ -69,7 +69,7 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 | `state` | 当前 `HarnessState` |
 | `provider_session_id` | provider-native conversation/thread/session id |
 | `start(context)` | 绑定 agent 身份、宿主服务和恢复检查点并启动 cycle |
-| `stop()` | 终止运行、释放资源、关闭 event stream；幂等 |
+| `stop()` | 终止运行、释放资源、关闭 event stream；幂等。仅正常返回代表退出已确认；无法确认时抛错、不得进入 `TERMINATED`，重复调用重试同一保留资源 |
 | `event_buffer_config` | 有界 capacity 与 overflow policy |
 | `events()` | cycle-long ordered `HarnessEventCursor`；单消费者、可 `aclose()` |
 | `turn_events(turn_id=None)` | 指定下一 Turn 的有限 cursor；包含 STARTED 和 terminal event |

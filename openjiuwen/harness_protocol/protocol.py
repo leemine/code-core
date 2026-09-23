@@ -58,7 +58,10 @@ class HarnessProtocol(Protocol):
     async def stop(self) -> None:
         """Stop the cycle, close events, and settle in ``TERMINATED``.
 
-        The operation must be idempotent.
+        The operation must be idempotent.  Returning normally confirms that
+        owned Provider resources exited.  If exit cannot be confirmed, the
+        implementation raises, must not report ``TERMINATED``, and a repeated
+        call retries cleanup of the same retained resources.
         """
         ...
 

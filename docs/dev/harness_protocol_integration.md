@@ -123,7 +123,7 @@ TERMINATED + events EOF
 - receipt 在接受时返回该输入关联的 `turn_id`；STEER 返回 active Turn ID；
 - public command 允许从不同协程并发调用；
 - Harness 内只有一个逻辑 state writer，例如 supervisor task；
-- `stop()` 幂等，并使 `events()`/未完成的 `turn_events()` 最终结束；
+- `stop()` 幂等，并使 `events()`/未完成的 `turn_events()` 最终结束；只有正常返回才表示 Provider 资源退出已确认。若退出无法确认，调用必须失败、不得发布 `TERMINATED`，后续 `stop()` 重试同一保留句柄；
 - 每个 Turn 只有一个 `STARTED` 和一个 terminal Turn event；PAUSED/RESUMED 保持同一 `turn_id`，
   不终结 Turn；
 - 未声明能力抛 `UnsupportedHarnessCapabilityError`。

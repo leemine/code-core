@@ -489,17 +489,25 @@ class SubagentControl:
     async def cancel_all(self, reason: str = "parent_ended") -> list[str]:
         """Force-close every live subagent regardless of RUNNING state."""
         closed: list[str] = []
+        failures: list[Exception] = []
         for sid in list(self._manager.list_ids()):
             try:
                 await self._evict_from_memory(sid, reason=reason, persist=False)
-            except Exception:
-                logger.warning("[SubagentControl] cancel_all failed: sid=%s", sid)
-                self._registry.release(sid)
-            closed.append(sid)
+            except Exception as exc:
+                logger.warning(
+                    "[SubagentControl] cancel_all failed: sid=%s", sid, exc_info=True
+                )
+                failures.append(exc)
+            else:
+                closed.append(sid)
         await self.persist()
-        if self._activity_emitter is not None:
+        if not failures and self._activity_emitter is not None:
             await self._activity_emitter.close()
             self._activity_emitter = None
+        if failures:
+            raise ExceptionGroup(
+                "one or more subagent exits could not be confirmed", failures
+            )
         return closed
 
     def _ingest_persisted_record(self, sid: str, raw: dict[str, Any]) -> None:

@@ -20,6 +20,7 @@ from openjiuwen.harness_protocol import (
     HarnessCard,
     HarnessCheckpoint,
     HarnessContext,
+    HarnessError,
     HarnessEvent,
     HarnessInput,
     HarnessProtocol,
@@ -66,15 +67,22 @@ class _ScriptedHarness(SerializedTurnHarness):
         self.crash_next = False
         self.ask_user_next = False
         self.responses: list[Any] = []
+        self.close_failures = 0
+        self.open_error: Exception | None = None
 
     async def _open_session(self, context: HarnessContext) -> str | None:
         _ = context
         self.opened += 1
+        if self.open_error is not None:
+            raise self.open_error
         await self._publish_checkpoint({"cursor": 1}, reason=CheckpointReason.SESSION_ACTIVATED)
         return "scripted-session"
 
     async def _close_session(self) -> None:
         self.closed += 1
+        if self.close_failures:
+            self.close_failures -= 1
+            raise RuntimeError("close unconfirmed")
         self.release.set()
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
@@ -188,6 +196,40 @@ async def test_start_settles_idle_and_publishes_checkpoint() -> None:
     assert harness.state is HarnessState.TERMINATED
     await harness.stop()
     assert harness.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_stop_retains_cycle_and_retries_same_provider() -> None:
+    harness = _ScriptedHarness()
+    await harness.start(_context())
+    harness.close_failures = 1
+
+    with pytest.raises(RuntimeError, match="close unconfirmed"):
+        await harness.stop()
+
+    assert harness.state is HarnessState.IDLE
+    with pytest.raises(HarnessStateError):
+        await harness.send(HarnessInput(content="must not restart"))
+
+    await harness.stop()
+    assert harness.state is HarnessState.TERMINATED
+    assert harness.closed == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_start_rollback_blocks_restart_until_stop_confirms_exit() -> None:
+    harness = _ScriptedHarness()
+    harness.open_error = RuntimeError("startup failed")
+    harness.close_failures = 1
+
+    with pytest.raises(HarnessError, match="cleanup could not be confirmed"):
+        await harness.start(_context())
+    with pytest.raises(HarnessStateError, match="already started"):
+        await harness.start(_context())
+
+    await harness.stop()
+    assert harness.state is HarnessState.TERMINATED
+    assert harness.closed == 2
 
 
 @pytest.mark.asyncio

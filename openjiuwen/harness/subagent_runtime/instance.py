@@ -99,6 +99,7 @@ class SubagentInstance:
         self._running_semaphore = running_semaphore
         self._interrupt_requested = False
         self._closed = False
+        self._shutdown_lock = asyncio.Lock()
 
     def agent_status(self) -> SubagentStatus:
         return self.status.current()
@@ -126,10 +127,19 @@ class SubagentInstance:
             self._worker_task = asyncio.create_task(self._worker_main())
 
     async def shutdown(self, reason: str) -> None:
-        await self.interrupt()
-        await self.enqueue(ShutdownOp(reason=reason))
-        if self._worker_task is not None:
-            await self._worker_task
+        async with self._shutdown_lock:
+            if self._closed:
+                return
+            if self._worker_task is not None and self._worker_task.done():
+                # A prior ShutdownOp may have reached the execution close and
+                # failed.  Retry the same retained execution directly; never
+                # enqueue onto a worker that has already exited.
+                await self._handle_shutdown(reason)
+                return
+            await self.interrupt()
+            await self.enqueue(ShutdownOp(reason=reason))
+            if self._worker_task is not None:
+                await self._worker_task
 
     def is_evictable(self) -> bool:
         if self._closed:
@@ -338,6 +348,7 @@ class SubagentInstance:
                 exc,
                 exc_info=True,
             )
+            raise
         await self._set_status(SubagentStatus.closed(reason))
         await self.status.close()
         self._closed = True

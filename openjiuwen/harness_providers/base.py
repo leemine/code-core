@@ -133,6 +133,7 @@ class SerializedTurnHarness(ABC):
         self._supervisor_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._cycle_started = False
+        self._cleanup_pending = False
         self._stopping = False
         self._command_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
@@ -208,7 +209,7 @@ class SerializedTurnHarness(ABC):
         """Validate the host, open the provider session and settle in IDLE."""
 
         async with self._lifecycle_lock:
-            if self._cycle_started:
+            if self._cycle_started or self._cleanup_pending:
                 raise HarnessStateError(f"{self.card.name} harness is already started")
             self._validate_context(context)
             self._context = context
@@ -223,30 +224,43 @@ class SerializedTurnHarness(ABC):
             self._latest_checkpoint = None
             self._checkpoint_sequence = 0
             self._checkpoint_storage_revision = None
+            # A Provider may allocate resources before ``_open_session``
+            # raises.  Track that half-started ownership separately from a
+            # published cycle so callers can retry ``stop`` without exposing
+            # the Provider as started.
+            self._cleanup_pending = True
             try:
                 self._session_id = await self._open_session(context)
             except BaseException:
-                await self._rollback_start()
+                try:
+                    await self._rollback_start()
+                except BaseException as cleanup_error:
+                    raise HarnessError(
+                        f"{self.card.name} startup failed and cleanup could not be confirmed"
+                    ) from cleanup_error
                 raise
             self._cycle_started = True
+            self._cleanup_pending = False
             await self._transition(HarnessState.IDLE)
 
     async def _rollback_start(self) -> None:
-        try:
-            await self._close_session()
-        except Exception:
-            logger.debug("[%s] session rollback after failed start raised", self.card.name, exc_info=True)
+        await self._close_session()
         self._event_buffer = None
         self._context = None
         self._session_id = None
+        self._cycle_started = False
+        self._cleanup_pending = False
 
     async def stop(self) -> None:
         """Stop the provider, terminate accepted turns and close the event stream."""
 
         async with self._lifecycle_lock:
-            if not self._cycle_started:
+            if not self._cycle_started and not self._cleanup_pending:
                 return
-            if self._stop_task is None:
+            if self._stop_task is None or (
+                self._stop_task.done()
+                and (self._stop_task.cancelled() or self._stop_task.exception() is not None)
+            ):
                 async with self._command_lock:
                     self._stopping = True
                     active = self._active_turn
@@ -260,10 +274,10 @@ class SerializedTurnHarness(ABC):
 
     async def _do_stop(self) -> None:
         await self._cancel_pending_interactions(InteractionCancelReason.HARNESS_STOPPED)
-        try:
-            await self._close_session()
-        except Exception:
-            logger.exception("[%s] provider session close failed during stop", self.card.name)
+        # Do not turn a close failure into a false TERMINATED state.  Provider
+        # implementations retain unconfirmed handles so a repeated stop can
+        # retry the same owned resource.
+        await self._close_session()
 
         supervisor = self._supervisor_task
         if supervisor is not None and supervisor is not asyncio.current_task():
@@ -285,6 +299,7 @@ class SerializedTurnHarness(ABC):
             await buffer.close()
         self._context = None
         self._cycle_started = False
+        self._cleanup_pending = False
 
     # ------------------------------------------------------------------
     # HarnessProtocol: observation

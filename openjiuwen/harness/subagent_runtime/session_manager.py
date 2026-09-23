@@ -185,12 +185,14 @@ class SubagentSessionManager:
         *,
         reason: str = "manual",
     ) -> SubagentInstance | None:
-        instance = self._instances.pop(subagent_id, None)
+        instance = self._instances.get(subagent_id)
         if instance is None:
             return None
-        self._projectors.pop(subagent_id, None)
-        self._transcript_projectors.pop(subagent_id, None)
         await instance.shutdown(reason)
+        if self._instances.get(subagent_id) is instance:
+            self._instances.pop(subagent_id, None)
+            self._projectors.pop(subagent_id, None)
+            self._transcript_projectors.pop(subagent_id, None)
         return instance
 
     def list_ids(self) -> list[str]:
