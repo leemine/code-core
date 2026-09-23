@@ -125,14 +125,17 @@ async def test_unadmitted_sources_fail_before_read_copy_or_client(policy, tmp_pa
 async def test_unisolated_execution_sources_never_create_client(policy, tmp_path, monkeypatch, kind):
     config, context = policy
     _, state = _install_fake_sdk(monkeypatch)
+    rejection = "does not admit"
     if kind == "mcp":
+        config = replace(config, mcp_default_tools_approval_mode="prompt")
+        rejection = "admits only authenticated loopback HTTP MCP"
         context = replace(context, mcp_servers=(McpServerConfig(
             name="blocked", transport=McpTransport.STDIO, command=("/never/run",),
         ),))
     else:
         path = tmp_path / "codex" / ("plugins" if kind == "plugins" else "hooks.json")
         path.mkdir() if kind == "plugins" else path.write_text("{}")
-    with pytest.raises(HarnessProtocolError, match="does not admit"):
+    with pytest.raises(HarnessProtocolError, match=rejection):
         await CodexHarness(config).start(context)
     assert not state.clients
 
