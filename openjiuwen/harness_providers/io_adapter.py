@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -60,6 +61,7 @@ from openjiuwen.harness_protocol import (
     UserInputResponse,
     json_value_to_builtin,
 )
+from openjiuwen.harness_providers.output_buffer import OutputBudget, OutputBudgetExceeded, OutputBuffer, OutputLimits
 
 logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
 
@@ -83,7 +85,7 @@ class _OutputIterator:
 
     __slots__ = ("_queue", "_with_turns")
 
-    def __init__(self, queue: asyncio.Queue[Any], *, with_turns: bool = False) -> None:
+    def __init__(self, queue: OutputBuffer, *, with_turns: bool = False) -> None:
         self._queue = queue
         self._with_turns = with_turns
 
@@ -92,7 +94,10 @@ class _OutputIterator:
 
     async def __anext__(self) -> Any:
         while True:
-            item = await self._queue.get()
+            try:
+                item = await self._queue.get()
+            except EOFError:
+                raise StopAsyncIteration from None
             if item is _END:
                 raise StopAsyncIteration
             if self._with_turns:
@@ -127,6 +132,10 @@ class HarnessIOAdapter:
         preserve_native_chunks: Restore Native JSON output snapshots instead of
             generic projections. Requires a Native harness configured with
             preserve_output_chunks=True; interaction routing is unchanged.
+        output_limits: Finite item, memory, spool and single-item byte budgets.
+            Defaults to 8192 items, 4 MiB RAM, 256 MiB disk and 64 MiB per item.
+            Exhaustion raises OutputBudgetExceeded, requests abort and cancels
+            pending interactions; it never invents a Provider terminal event.
         provider_interaction_handler: Optional coroutine answering provider
             extension requests. When set the adapter declares
             ``HostCapability.PROVIDER_INTERACTION``; otherwise every
@@ -142,6 +151,7 @@ class HarnessIOAdapter:
         auto_approve_tools: bool = True,
         stop_on_unsupported_force_abort: bool = False,
         provider_interaction_handler: ProviderInteractionHandler | None = None,
+        output_limits: OutputLimits | None = None,
     ) -> None:
         self._native_projection = None
         if preserve_native_chunks:
@@ -155,11 +165,15 @@ class HarnessIOAdapter:
         self._auto_approve_tools = auto_approve_tools
         self._provider_interaction_handler = provider_interaction_handler
         self._stop_on_unsupported_force_abort = stop_on_unsupported_force_abort
-        self._output_queue: asyncio.Queue[Any] = asyncio.Queue()
+        self._output_limits = output_limits
+        self._output_queue = OutputBuffer(OutputBudget(output_limits))
+        self._output_failure: OutputBudgetExceeded | None = None
+        self._output_abort_task: asyncio.Task[None] | None = None
         self._event_task: asyncio.Task[None] | None = None
         self._stopped = True
+        self._stopping = False
         self._output_index = 0
-        self._output_text: dict[str, str] = {}
+        self._output_text: dict[tuple[str | None, str], tuple[Any, int]] = {}
         self._pending: dict[str, _PendingInteraction] = {}
         self._lifecycle_lock = asyncio.Lock()
 
@@ -218,7 +232,10 @@ class HarnessIOAdapter:
         async with self._lifecycle_lock:
             if not self._stopped:
                 raise HarnessStateError("harness IO adapter is already started")
-            self._output_queue = asyncio.Queue()
+            self._output_queue.close()
+            self._output_queue = OutputBuffer(OutputBudget(self._output_limits))
+            self._output_failure = None
+            self._stopping = False
             self._output_index = 0
             self._output_text.clear()
             prepared = self.prepare_context(context)
@@ -241,7 +258,11 @@ class HarnessIOAdapter:
         async with self._lifecycle_lock:
             if self._stopped:
                 return
+            self._stopping = True
             self._fail_pending(InteractionCancelReason.HARNESS_STOPPED)
+            if self._output_abort_task is not None:
+                await self._output_abort_task
+                self._output_abort_task = None
             await self._harness.stop()
             task = self._event_task
             self._event_task = None
@@ -250,8 +271,10 @@ class HarnessIOAdapter:
                     await task
                 except Exception:
                     logger.exception("harness IO adapter event pump failed during stop")
-            self._output_queue.put_nowait(_END)
+            self._output_queue.finish()
+            self._output_text.clear()
             self._stopped = True
+            self._stopping = False
 
     async def _safe_stop_harness(self) -> None:
         try:
@@ -283,6 +306,8 @@ class HarnessIOAdapter:
         ``None`` when an ``InteractiveInput`` merely resolved pending
         interactions without reaching the provider.
         """
+        if self._output_failure is not None:
+            raise OutputBudgetExceeded(str(self._output_failure))
         if isinstance(content, InteractiveInput):
             resolved = self._resolve_pending(content)
             if resolved:
@@ -375,16 +400,23 @@ class HarnessIOAdapter:
                     status=InteractionResponseStatus.DECLINED,
                 )
             return await handler(request)
+        if self._output_failure is not None:
+            raise OutputBudgetExceeded(str(self._output_failure))
+        if len(self._pending) >= 128 or len(request.request_id.encode("utf-8")) > 1024:
+            raise OutputBudgetExceeded("pending interaction budget exhausted")
         if request.request_id in self._pending:
             raise HarnessStateError(f"interaction {request.request_id!r} is already pending")
         loop = asyncio.get_running_loop()
         pending = _PendingInteraction(request=request, future=loop.create_future())
         self._pending[request.request_id] = pending
-        await self._output_queue.put(
-            ProjectedOutput(turn_id=request.turn_id, chunk=self._interaction_chunk(request))
-        )
         try:
+            await self._output_queue.put(
+                ProjectedOutput(turn_id=request.turn_id, chunk=self._interaction_chunk(request))
+            )
             return await pending.future
+        except OutputBudgetExceeded as exc:
+            self._fail_output(exc)
+            raise
         finally:
             self._pending.pop(request.request_id, None)
 
@@ -432,51 +464,75 @@ class HarnessIOAdapter:
     async def _pump_events(self, cursor: Any) -> None:
         try:
             async for envelope in cursor:
-                observer = self._event_observer
-                if observer is not None:
-                    await observer(envelope)
-                payload = envelope.event
-                chunk = self._native_projection(payload) if self._native_projection is not None else None
-                if chunk is None:
-                    if isinstance(payload, OutputEvent):
-                        chunk = self._project_output(payload)
-                    elif isinstance(payload, ItemLifecycleEvent):
-                        chunk = self._project_item(envelope.item_id, payload)
-                if chunk is not None:
-                    await self._output_queue.put(
-                        ProjectedOutput(turn_id=envelope.turn_id, chunk=chunk)
-                    )
-                if (
-                    isinstance(payload, TurnLifecycleEvent)
-                    and payload.kind in {
+                if self._output_failure is not None:
+                    continue  # keep consuming the sole cursor so stop/abort cannot deadlock
+                try:
+                    if envelope.turn_id is not None and len(envelope.turn_id.encode("utf-8")) > 1024:
+                        raise OutputBudgetExceeded("Turn identifier byte budget exhausted")
+                    observer = self._event_observer
+                    if observer is not None:
+                        await observer(envelope)
+                    payload = envelope.event
+                    chunk = self._native_projection(payload) if self._native_projection is not None else None
+                    if chunk is None:
+                        if isinstance(payload, OutputEvent):
+                            chunk = self._project_output(payload, turn_id=envelope.turn_id)
+                        elif isinstance(payload, ItemLifecycleEvent):
+                            chunk = self._project_item(envelope.item_id, payload)
+                    if chunk is not None:
+                        await self._output_queue.put(ProjectedOutput(turn_id=envelope.turn_id, chunk=chunk))
+                    if isinstance(payload, TurnLifecycleEvent) and payload.kind in {
                         TurnEventKind.FINISHED,
                         TurnEventKind.FAILED,
                         TurnEventKind.ABORTED,
-                    }
-                ):
-                    await self._output_queue.put(
-                        ProjectedOutput(turn_id=envelope.turn_id, terminal=payload.kind)
-                    )
+                    }:
+                        await self._output_queue.put(ProjectedOutput(turn_id=envelope.turn_id, terminal=payload.kind))
+                        self._output_text = {
+                            key: value for key, value in self._output_text.items() if key[0] != envelope.turn_id
+                        }
+                except OutputBudgetExceeded as exc:
+                    self._fail_output(exc)
         finally:
+            self._output_queue.finish()
             await cursor.aclose()
 
-    def _project_output(self, output: OutputEvent) -> OutputSchema | None:
+    def _fail_output(self, error: OutputBudgetExceeded) -> None:
+        if self._output_failure is not None:
+            return
+        self._output_failure = OutputBudgetExceeded(str(error))
+        self._output_queue.fail(self._output_failure)
+        self._output_text.clear()
+        self._fail_pending(InteractionCancelReason.HARNESS_STOPPED)
+        if not self._stopping:
+            self._output_abort_task = asyncio.create_task(self._abort_failed_output())
+
+    async def _abort_failed_output(self) -> None:
+        try:
+            await asyncio.wait_for(self.abort(), timeout=5)
+        except Exception:
+            logger.warning("output budget failure: provider abort could not be confirmed")
+
+    def _project_output(self, output: OutputEvent, *, turn_id: str | None = None) -> OutputSchema | None:
         value = json_value_to_builtin(output.content)
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        previous = self._output_text.get(output.output_id, "")
-        if output.operation is OutputOperation.DELTA:
-            emitted = text
-            self._output_text[output.output_id] = previous + text
-        elif not previous:
-            emitted = text
-            self._output_text[output.output_id] = text
-        elif text.startswith(previous):
-            emitted = text[len(previous) :]
-            self._output_text[output.output_id] = text
+        key = (turn_id, output.output_id)
+        if len(output.output_id.encode("utf-8")) > 1024:
+            raise OutputBudgetExceeded("output identifier byte budget exhausted")
+        previous = self._output_text.get(key)
+        if previous is None:
+            if len(self._output_text) >= 2048:
+                raise OutputBudgetExceeded("output prefix count budget exhausted")
+            digest, chars = hashlib.sha256(), 0
         else:
-            # OutputSchema has append-only semantics.  The protocol event stays
-            # authoritative; avoid duplicating a FINAL snapshot after its deltas.
+            digest, chars = previous
+        if output.operation is OutputOperation.DELTA or not chars:
+            emitted = text
+        elif len(text) >= chars and hashlib.sha256(text[:chars].encode("utf-8")).digest() == digest.digest():
+            emitted = text[chars:]
+        else:
             return None
+        digest.update(emitted.encode("utf-8"))
+        self._output_text[key] = (digest, chars + len(emitted))
         if not emitted:
             return None
         chunk_type = "llm_reasoning" if output.channel is OutputChannel.REASONING else "llm_output"
