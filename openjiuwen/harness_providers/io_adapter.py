@@ -243,7 +243,14 @@ class HarnessIOAdapter:
                 await self._harness.start(prepared)
                 cursor = self._harness.events()
             except BaseException:
-                await self._safe_stop_harness()
+                try:
+                    await self._safe_stop_harness()
+                except BaseException:
+                    # The Provider still owns an unconfirmed half-started
+                    # cycle.  Let the host retry ``stop`` through this adapter
+                    # instead of treating the failed start as resource-free.
+                    self._stopped = False
+                    raise
                 raise
             self._stopped = False
             self._event_task = asyncio.create_task(
@@ -277,10 +284,7 @@ class HarnessIOAdapter:
             self._stopping = False
 
     async def _safe_stop_harness(self) -> None:
-        try:
-            await self._harness.stop()
-        except Exception:
-            logger.exception("harness cleanup failed after start")
+        await self._harness.stop()
 
     def outputs(self) -> AsyncIterator[OutputSchema]:
         """Return the queue-backed single-consumer output iterator."""

@@ -140,7 +140,9 @@ class MyHarness:
 1. Public commands are concurrency-safe and state transitions have one logical
    writer inside the harness.
 2. `start` creates one cycle and settles in `HarnessState.IDLE`; idempotent
-   `stop` closes events and settles in `TERMINATED`.
+   `stop` closes events and settles in `TERMINATED` only after Provider exit is
+   confirmed. An unconfirmed exit raises, retains the owned handle, and is
+   retried by the next `stop` call.
 3. `events()` is the full-cycle stream; `turn_events()` is the finite next-turn
    view. They share one consumer, and envelope sequence numbers remain
    strictly increasing across every payload type.

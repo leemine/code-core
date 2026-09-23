@@ -303,24 +303,26 @@ class DeepAgentHarness(SerializedTurnHarness):
     async def _close_session(self) -> None:
         agent = self._agent
         session = self._agent_session
-        self._agent = None
-        self._agent_session = None
-        stopped = False
-        try:
-            if agent is not None:
-                try:
-                    await agent.stop()
-                    stopped = True
-                except Exception:
-                    logger.exception("[deepagent] stop failed during teardown")
-            if session is not None:
-                try:
-                    await session.post_run()
-                except Exception:
-                    logger.exception("[deepagent] session post_run failed during teardown")
-        finally:
-            if agent is not None and stopped:
+        errors: list[Exception] = []
+        if agent is not None:
+            try:
+                await agent.stop()
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                if self._agent is agent:
+                    self._agent = None
                 release_agent(agent, self._ownership_token)
+        if session is not None:
+            try:
+                await session.post_run()
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                if self._agent_session is session:
+                    self._agent_session = None
+        if errors:
+            raise ExceptionGroup("Native provider cleanup was not confirmed", errors)
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()

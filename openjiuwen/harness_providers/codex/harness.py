@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
@@ -323,8 +322,13 @@ class CodexHarness(SerializedTurnHarness):
                 thread_id=str(thread.id),
             )
         except BaseException:
-            with contextlib.suppress(Exception):
+            try:
                 await client.close()
+            except Exception:
+                # Keep the only process handle reachable when close itself
+                # fails; startup rollback will retry this exact client.
+                self._client = client
+                raise
             raise
         self._client = client
         self._thread = thread
@@ -338,16 +342,17 @@ class CodexHarness(SerializedTurnHarness):
 
     async def _close_session(self) -> None:
         handle = self._active_handle
-        self._active_handle = None
         if handle is not None:
             await self._interrupt_handle(handle)
+            if self._active_handle is handle:
+                self._active_handle = None
         client = self._client
-        self._client = None
+        if client is not None:
+            await client.close()
+            if self._client is client:
+                self._client = None
         self._thread = None
         self._confirmed_model = ""
-        if client is not None:
-            with contextlib.suppress(Exception):
-                await client.close()
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()

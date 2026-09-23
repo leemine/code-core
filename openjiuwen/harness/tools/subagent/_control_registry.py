@@ -68,9 +68,11 @@ async def release_subagent_control(
 ) -> None:
     """Cancel all subagents and drop the cached control for a parent session."""
     controls = getattr(parent_agent, _CONTROL_ATTR, None) or {}
-    control = controls.pop(parent_session_id, None)
+    control = controls.get(parent_session_id)
     if control is not None:
         await control.cancel_all(reason)
+        if controls.get(parent_session_id) is control:
+            controls.pop(parent_session_id, None)
 
 
 async def release_all_subagent_controls(

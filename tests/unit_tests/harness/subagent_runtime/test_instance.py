@@ -336,6 +336,20 @@ async def test_shutdown_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_shutdowns_share_one_confirmed_close() -> None:
+    instance, _, _ = _make_instance()
+    await instance.start_worker()
+
+    await asyncio.gather(
+        instance.shutdown("parent_ended"),
+        instance.shutdown("duplicate"),
+    )
+
+    assert instance.is_closed()
+    assert instance.agent_status() == SubagentStatus.closed("parent_ended")
+
+
+@pytest.mark.asyncio
 async def test_shared_semaphore_serializes_streams_across_instances() -> None:
     semaphore = asyncio.Semaphore(1)
     agent_a = MockAgent(delay_s=0.1)

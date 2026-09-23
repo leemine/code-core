@@ -14,24 +14,24 @@ from typing import Any, cast
 
 from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
-    HarnessCard,
     HarnessCapability,
-    HostCapability,
+    HarnessCard,
     HarnessContext,
     HarnessError,
     HarnessInput,
     HarnessProtocolError,
+    HostCapability,
     ResumePolicy,
     TurnEventKind,
     TurnResult,
     UnsupportedHarnessCapabilityError,
     json_value_to_builtin,
 )
-from openjiuwen.harness_providers.skills import install_skills
-from openjiuwen.harness_providers.base import PendingTurn, SerializedTurnHarness, TurnTiming, logger
+from openjiuwen.harness_providers.base import PendingTurn, SerializedTurnHarness, TurnTiming
 from openjiuwen.harness_providers.dsh.composition import mcp_configs, write_overlay
 from openjiuwen.harness_providers.dsh.config import DshHarnessConfig
 from openjiuwen.harness_providers.dsh.mapping import DshTurnAccumulator, MappedDshEvent
+from openjiuwen.harness_providers.skills import install_skills
 
 ADAPTER_VERSION = "0.3.0"
 
@@ -118,29 +118,26 @@ class DshHarness(SerializedTurnHarness):
                 sdk_harness = sdk.DeepSeekHarness(_launch_args=launch_args, **options)
             else:
                 sdk_harness = sdk.DeepSeekHarness(**options)
+            self._sdk_harness = sdk_harness
             sdk_session = await asyncio.to_thread(sdk_harness.start_session, session_id)
         except Exception:
-            if sdk_harness is not None:
-                await _close_sdk_quietly(sdk_harness)
             # SDK transport errors may include a subprocess stderr tail; do
             # not retain it as an exception cause because context.env and
             # provider credentials are explicitly sensitive.
             raise HarnessError("failed to start the DeepSeek Harness SDK runtime") from None
         except BaseException:
-            if sdk_harness is not None:
-                await _close_sdk_quietly(sdk_harness)
             raise
-        self._sdk_harness = sdk_harness
         self._sdk_session = sdk_session
         return session_id
 
     async def _close_session(self) -> None:
         sdk_harness = self._sdk_harness
-        self._sdk_harness = None
-        self._sdk_session = None
         try:
             if sdk_harness is not None:
-                await _close_sdk_quietly(sdk_harness)
+                await asyncio.to_thread(sdk_harness.close)
+                if self._sdk_harness is sdk_harness:
+                    self._sdk_harness = None
+                    self._sdk_session = None
         finally:
             if self._overlay is not None:
                 self._overlay.cleanup()
@@ -235,13 +232,6 @@ def _load_dsh_sdk() -> Any:
         raise HarnessError(
             "deepseek-harness-sdk is required for the DSH adapter; install the optional SDK before start()"
         ) from exc
-
-
-async def _close_sdk_quietly(sdk_harness: Any) -> None:
-    try:
-        await asyncio.to_thread(sdk_harness.close)
-    except Exception as exc:
-        logger.debug("DSH SDK close failed during teardown: %s", type(exc).__name__)
 
 
 def _to_dsh_input(content: HarnessInput) -> str | list[dict[str, object]]:

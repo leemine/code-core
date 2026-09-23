@@ -213,6 +213,13 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         try:
             await client.connect()
         except Exception as exc:
+            try:
+                await client.disconnect()
+            except Exception:
+                # Retain the partially connected client so base startup
+                # rollback (and a later explicit stop) can retry its exit.
+                self._client = client
+                raise
             error = classify_claude_exception(exc, phase="startup")
             stderr_tail = self._stderr_tail.render()
             message = f"{error.message}\n{stderr_tail}" if stderr_tail else error.message
@@ -230,13 +237,11 @@ class ClaudeCodeHarness(SerializedTurnHarness):
 
     async def _close_session(self) -> None:
         client = self._client
-        self._client = None
         if client is None:
             return
-        try:
-            await client.disconnect()
-        except Exception as exc:
-            logger.debug("[claude-code] disconnect failed during teardown: %s", exc)
+        await client.disconnect()
+        if self._client is client:
+            self._client = None
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()

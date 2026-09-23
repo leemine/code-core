@@ -49,6 +49,21 @@ async def test_release_subagent_control_cancels_and_drops_cache() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_release_subagent_control_retains_cache_until_exit_is_confirmed() -> None:
+    parent = SimpleNamespace()
+    session = Session(session_id="parent_sess")
+    control = get_subagent_control(parent, session)
+    control.cancel_all = AsyncMock(side_effect=[RuntimeError("unconfirmed"), []])
+
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await release_subagent_control(parent, "parent_sess", reason="test")
+    assert parent._subagent_controls["parent_sess"] is control
+
+    await release_subagent_control(parent, "parent_sess", reason="retry")
+    assert "parent_sess" not in parent._subagent_controls
+
+
 def test_get_subagent_control_requires_session() -> None:
     parent = SimpleNamespace()
     with pytest.raises(Exception):

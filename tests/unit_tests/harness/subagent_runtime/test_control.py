@@ -468,7 +468,7 @@ async def test_browser_spawn_uses_fresh_subagent_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_all_releases_slots_when_one_remove_fails() -> None:
+async def test_cancel_all_retains_unconfirmed_child_when_one_remove_fails() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.05))
     async with _patched_control(
         parent=parent,
@@ -488,13 +488,18 @@ async def test_cancel_all_releases_slots_when_one_remove_fails() -> None:
             return await original_remove(sid, reason=reason)
 
         with patch.object(control._manager, "remove", side_effect=remove_maybe_fail):
-            closed = await control.cancel_all(reason="parent_ended")
+            with pytest.raises(ExceptionGroup, match="exits could not be confirmed"):
+                await control.cancel_all(reason="parent_ended")
 
-        assert first.subagent_id in closed
-        assert second.subagent_id in closed
+        assert control._registry.count == 1
+        assert len(control._manager.list_ids()) == 1
+        retained = control._manager.list_ids()[0]
+        assert retained in {first.subagent_id, second.subagent_id}
+
+        closed = await control.cancel_all(reason="parent_ended")
+        assert closed == [retained]
         assert control._registry.count == 0
-        # Registry slots are always released; a failed remove may leave a ghost instance.
-        assert len(control._manager.list_ids()) <= 1
+        assert control._manager.list_ids() == []
 
 
 @pytest.mark.asyncio
