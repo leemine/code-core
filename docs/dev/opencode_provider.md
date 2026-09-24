@@ -1,7 +1,7 @@
-# OpenCode Provider（OC1/OC2）
+# OpenCode Provider（OC1–OC5）
 
 OC1/OC2 提供公共 `opencode` 注册、文本/原生工具/用量映射、审批/提问、graceful abort、
-完成态会话续接和受管服务生命周期。
+完成态会话续接、受管服务生命周期、portable Skills 与宿主准入 MCP。
 它复用 `SerializedTurnHarness`，可通过 `resolve_provider`、`create_harness` 或
 `create_harness_engine` 构造；构造不发现 CLI、不启动服务、不安装依赖。
 
@@ -58,10 +58,17 @@ Card 声明 `GRACEFUL_ABORT`、`PERSISTENT_SESSION`、`CHECKPOINT`、`MCP_TOOLS`
 这不表示图片/附件或结构化输出能力已实现。一个 Turn 必须有匹配当前 user messageID 的
 最后 assistant completed/stop、后续 idle 及消息回读；204、step-finish、裸 idle、EOF 均不能判成功。
 
-不支持的环境覆盖、原生宿主 ToolGateway、Hooks、Skills、steer/pause 明确拒绝。宿主 MCP 首批只接受
-显式端口的 `127.0.0.1` HTTP endpoint、唯一 Bearer Authorization 头并强制 `oauth=false`；stdio、
-in-process、非 loopback、匿名或额外 header 均失败关闭。临时 MCP URL/token 不改变既有 scope 的
-稳定存储身份，但本代完整有效配置仍封存并回读。`abort(GRACEFUL)` 调原生
+不支持的环境覆盖、原生宿主 ToolGateway、Hooks、steer/pause 明确拒绝。manifest
+portable Skills 在 CLI 启动前完整复制到项目内按配置指纹隔离的
+`.openjiuwen/harness-skills/opencode/<fingerprint>`，只通过受管 `skills.paths` 显式启用。
+ambient `.claude/.agents/.opencode` Skills 仍禁用；未配置 Skills 的新 Session 不会因上一 Session
+留下的副本而发现它。`skip/replace`、完整 bundle、链接边界与停止后保留语义复用公共装配。
+
+普通宿主 MCP 允许显式 stdio 或 HTTPS；明文 HTTP 只允许 loopback。名称、command/env、URL/header
+逐项校验，拒绝 OpenCode 配置插值、userinfo/fragment、in-process 及隐式 OAuth。OC4 产品 MCP
+的保留名称继续只接受显式端口的 `127.0.0.1` HTTP、唯一 Bearer Authorization 头并强制
+`oauth=false`。产品 MCP 的临时 URL/token 不改变既有 scope 稳定身份；其他 MCP 配置进入稳定指纹。
+本代完整有效配置始终封存并回读。`abort(GRACEFUL)` 调原生
 session abort，并以关联 `MessageAbortedError` + idle 收口 ABORTED；回答与 abort 竞态始终优先取消
 宿主 pending interaction，迟到回答不再执行工具。异常、超时、断流后服务停止并返回未知失败，
 当前生命周期不重新发送输入；这并不保证已开始的原生工具没有产生副作用。
@@ -92,6 +99,6 @@ RUN_OPENCODE_OC1=1 timeout 240 python -m pytest \
   tests/system_tests/harness_providers/test_opencode_e2e.py --timeout=45 -q
 ```
 
-`RUN_OPENCODE_OC1` / `OPENCODE_OC1_CLI` 名称为 OC1 建立时的兼容入口，OC2 继续复用。测试创建并回收
+`RUN_OPENCODE_OC1` / `OPENCODE_OC1_CLI` 名称为 OC1 建立时的兼容入口，OC2–OC5 继续复用。测试创建并回收
 自己的 loopback listener、私有运行根、
 服务和工具进程；不调用远端模型，不安装 CLI，不构成 Web/CLI 产品渠道或正式锁定发布验收。

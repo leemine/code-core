@@ -33,11 +33,11 @@ DeepAgent 设计，`tools` / `rails` / `subagents` / `skills` 依赖框架，三
    `HarnessInteractionHandler`，`UserInputRequest` → `__interaction__` chunk → `InteractiveInput`
    应答；工具审批默认自动放行。
 4. **`create_harness` / `build_harness_context`**（`factory.py`）：`provider` 参数取
-   `native | claudecode | codex | dsh`；`native` 热加载整份 `AgentTemplateSpec`（card / model
+   `native | native_v2 | claudecode | codex | dsh | opencode`；`native` 热加载整份 `AgentTemplateSpec`（card / model
    缺省从 template 补），三方 provider 只取模型端点并拒绝 DeepAgent-only 段；context 构建把
    persona sections 按 priority 渲染为 `system_prompt`（新增
    `render_agent_template_system_prompt`），manifest MCP → `McpServerConfig`。
-5. **Claude Code / Codex / DSH provider** 的映射与限制见 agent_teams `F_96`；DSH 配置字段更新为当前
+5. **Claude Code / Codex / DSH / OpenCode provider** 的映射与限制见对应 Provider 规约；DSH 配置字段更新为当前
    安装 SDK 的 `DeepSeekHarnessConfig`（`dsh_home` / `profile` / `dsh_bin` / `patches` 等）。
 
 ## 拒绝的方案

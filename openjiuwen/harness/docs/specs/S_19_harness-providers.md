@@ -134,7 +134,8 @@
 17. **受管产品 MCP 不扩大协议或工具所有权**：产品宿主仍拥有原工具目录、主体/父 Session/工作空间路由和授权；
     Codex/OpenCode Provider 只消费 HarnessContext 的 MCP 配置并走原生工具审批。临时 URL/token 不进入稳定来源范围身份。
     Codex 的 server 名称进入来源指纹；CLI 有效配置丢失认证、出现额外 server、改变 required/prompt 或改成非 loopback 时启动失败。
-    OpenCode 首批只接受显式端口的 `127.0.0.1` HTTP、唯一 Bearer Authorization 头和禁用 OAuth 的远端 MCP；
+    OpenCode 的产品保留 server 只接受显式端口的 `127.0.0.1` HTTP、唯一 Bearer Authorization
+    头和禁用 OAuth 的远端 MCP；
     完整有效配置逐 generation 封存和回读，但稳定 scope 身份继续按无临时 MCP 的既有算法计算，使旧 Session 可冷恢复。
     Provider 不复制产品工具、不启动通用 MCP 注册中心，也不把 Team operator 权限用于 Single。
 
@@ -209,8 +210,11 @@ assembly hook 仅替换 prefix 文本，保留其它 sections（新 prefix 仍�
 bundle 的 library。包路径按现有 manifest loader 解析为绝对路径，内存配置也建议传绝对源路径。
 同名的 config.skills 显式覆盖 manifest 声明；skill_conflict 为 skip（默认）或 replace。
 
-start 在 SDK 启动前复制完整目录到 cwd/.claude/skills（claudecode）、cwd/.agents/skills（codex）、
-cwd/.dsh/skills（dsh）。cwd 优先取 HarnessContext，再取 provider config，再取当前进程目录。
+start 在 SDK/CLI 启动前复制完整目录到 cwd/.claude/skills（claudecode）、
+cwd/.agents/skills（codex）、cwd/.dsh/skills（dsh）。OpenCode 使用项目内按配置指纹隔离的
+cwd/.openjiuwen/harness-skills/opencode/<fingerprint>，仅将该精确路径编译到原生
+`skills.paths`；不把副本放入 ambient 默认扫描目录。cwd 优先取 HarnessContext，再取 provider
+config，再取当前进程目录。
 名称取 SKILL.md front matter.name，缺省取目录名；同名按不区分大小写比较，同时识别已有目录里的
 声明名。enabled_skills 非空时筛选声明名；mode 仍被解析校验，但原生 CLI 决定加载/调用方式，
 不仿造 DeepAgent 的 auto_list 工具。skip 保留已有目录全部内容，replace 完整替换（清除旧文件），
@@ -230,7 +234,7 @@ Codex 编译对应 bypass/MCP 参数，Swarm 不再解释这些字段；原运�
 旧 Web full_access 的 Codex profile 由 core 兼容投影保留完全相同的旧 JSON，
 不自动给旧 profile 注入新字段，也不修改已有 Binding/恢复归档校验。
 
-## OpenCode OC1/OC2 构建、交互与受管服务边界
+## OpenCode OC1–OC5 构建、交互、Skills/MCP 与受管服务边界
 
 OpenCode 首批固定 1.18.18 的 `/session` + `/event` HTTP/SSE 代际，复用
 SerializedTurnHarness 的输入队列、事件信封与唯一终态。配置与工厂导入不启动进程；
@@ -239,7 +243,7 @@ SerializedTurnHarness 的输入队列、事件信封与唯一终态。配置与�
 回收该描述所属的孤儿 unit。service 内 wrapper 持有原生启动锁，禁止旧排队启动跨 generation。
 不能确认退出则保留所有权和描述，禁止新建/attach；数据不自动删除。
 
-新 Provider 配置仅接受模型、显式 full_access、CLI/私有运行根与有界传输参数；不接收任意
+新 Provider 配置仅接受模型、显式 full_access、portable skills、CLI/私有运行根与有界传输参数；不接收任意
 原生 JSON、环境、插件或可执行覆盖。公共授权在 Provider 编译到私有 full_access；旧工厂
 未声明授权时保留默认普通策略，模型配置不能扩权。HOME/config 封存、managed/auth 来源拒绝、
 固定二进制与有效配置回读在启动完成前执行，每轮前复检。cgroup 用于资源回收，非 OS 沙箱。
@@ -255,9 +259,15 @@ session/status、pending permission/question 及最后完成消息；活动/待�
 由宿主保持只读历史，不能静默创建新会话。原生 data/state 在 scope 内跨随机 service generation 保留；
 HOME/config/cache/tmp、来源快照、launch 和日志仍逐 generation 隔离。
 
-未适配的 Hook、Skills、steer/pause 命令明确拒绝，不忽略输入。MCP 仅开放宿主管理的认证 loopback HTTP；
-stdio/in-process、非 loopback、匿名/额外 header、隐式 OAuth 均在服务启动前拒绝。不自动批准原生交互，也不把普通
-策略解释成 full-access。
+未适配的 Hook、steer/pause 命令明确拒绝，不忽略输入。ambient Skills 及项目配置扫描仍禁用；
+portable skills 只从宿主配置的完整 bundle 复制到独立显式路径。未配置 Skills 的新 Session 不会发现
+历史副本；不同源选择不共用扫描根。
+
+普通宿主 MCP 接受显式 stdio、HTTPS 或 loopback HTTP，且关闭 OAuth；拒绝配置插值、
+HTTP 远程明文、userinfo/fragment、in-process、非法/重名 server。该配置进入稳定 scope 身份。
+产品保留 MCP 仍只开放唯一 Bearer 认证的 `127.0.0.1` HTTP，其临时 URL/token 按 OC4 兼容
+要求排除于稳定身份。完整本代配置始终封存和回读。不自动批准原生交互，也不把普通策略解释成
+full-access。
 流与 HTTP 响应有上限；EOF、裸 idle、204 均不是成功。成功要求匹配本轮 user messageID 的
 assistant 完成消息、原生 stop 原因、后续 idle 和权威消息回读一致。异常/超时/断流后停止
 受管服务、禁止未知副作用重试；SSE 断开会取消宿主待答并产生未知失败，不自动重连或重放。活动 Turn/

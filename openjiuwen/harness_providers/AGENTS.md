@@ -97,7 +97,9 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    `AgentTemplateSpec` for `native`; third-party providers only take the model
    endpoint and, through `build_harness_context`, the rendered prompt sections
    and MCP servers. Portable `skills` are copied before SDK startup into the
-   CLI project discovery directory: .claude/skills, .agents/skills, .dsh/skills.
+   CLI discovery directory: .claude/skills, .agents/skills, .dsh/skills. OpenCode instead uses a
+   configuration-fingerprinted `.openjiuwen/harness-skills/opencode/` directory and an explicit
+   native `skills.paths` entry so disabling a later session cannot rediscover an old copy.
    `skill_conflict` defaults to skip; replace stages a complete bundle before
    renaming the existing directory. Never remove copied skills at stop.
    Manifests carrying `tools` / `rails` / `subagents` are still rejected.
@@ -115,8 +117,11 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
     descriptors and the service-side generation lease cover host hard crashes. Text/tool/usage
     mapping shares the base lifecycle. OC2 routes approvals/questions through the base interaction ledger,
     publishes an unsafe checkpoint before prompt submission and only marks a session resumable after an
-    authoritative idle terminal. OC4 accepts only authenticated loopback HTTP MCP from the host context,
+    authoritative idle terminal. OC4's reserved product MCP accepts only authenticated loopback HTTP,
     renders it with OAuth disabled, and excludes its generation-local URL/token from the stable storage identity.
+    OC5 admits explicit host stdio/HTTPS (or loopback HTTP) MCP, keeps OAuth disabled, and includes those stable
+    declarations in storage identity. Portable skills use only the explicit isolated path; ambient skill discovery
+    remains disabled.
     Native replies are scoped to the locally claimed request; disconnects never
     replay unknown input. Stable native data is scope-private across managed service generations, while sealed
     configuration and logs remain generation-specific. OC3 product wiring is separate.
