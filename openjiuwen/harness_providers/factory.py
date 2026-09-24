@@ -129,6 +129,8 @@ def manifest_provider_config(
             values.setdefault("base_url", api_base)
         if api_key is not None:
             values.setdefault("api_key", api_key)
+    elif provider == "opencode":
+        values.setdefault("model", {"model": model_name, "api_base": api_base, "api_key": api_key})
     return values
 
 
@@ -143,7 +145,7 @@ def create_harness(
 
     Args:
         manifest: An ``AgentTemplateSpec`` or a path to its package.
-        provider: One of ``native`` / ``native_v2`` / ``claudecode`` / ``codex`` / ``dsh``.
+        provider: One of ``native`` / ``native_v2`` / ``claudecode`` / ``codex`` / ``dsh`` / ``opencode``.
         config: Provider-specific overrides merged over the manifest-derived
             configuration (see :func:`manifest_provider_config`).
         language: Language used to render manifest prompt sections.

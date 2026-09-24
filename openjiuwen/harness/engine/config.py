@@ -13,6 +13,10 @@ def config_fingerprint(spec: AgentExecutionSpec) -> str:
     """Detect payload changes even when a caller reuses a revision label."""
     payload = [spec.provider_id, spec.config_revision, spec.requested_mode,
                json_value_to_builtin(spec.provider_config)]
+    # Do not append null/defaults: old Session metadata and encrypted recovery
+    # archives contain the digest of exactly these four elements.
+    if spec.authorization is not None:
+        payload.append({"authorization_v1": {"full_access": spec.authorization.full_access}})
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
                                      ensure_ascii=True).encode()).hexdigest()
 

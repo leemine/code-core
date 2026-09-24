@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from openjiuwen.harness_protocol.checkpoints import HarnessCheckpoint
+from openjiuwen.harness_protocol.construction import ExecutionAuthorization
 from openjiuwen.harness_protocol.events import EventBufferConfig
 from openjiuwen.harness_protocol.models import (
     AbortMode,
@@ -140,4 +141,21 @@ class HarnessProvider(Protocol):
         ...
 
 
-__all__ = ["HarnessProtocol", "HarnessProvider"]
+@runtime_checkable
+class HarnessAuthorizationProvider(Protocol):
+    """Optional pure construction port; never starts a provider or grants access.
+
+    The host supplies the authorization decision. Legacy decoding belongs to
+    the provider so product hosts need not interpret private configuration.
+    """
+
+    def compile_authorization(self, config: JsonObject, authorization: ExecutionAuthorization) -> JsonObject:
+        """Compile an explicit host decision into immutable vendor configuration."""
+        ...
+
+    def legacy_authorization(self, config: JsonObject) -> ExecutionAuthorization:
+        """Describe the pre-existing authorization of a trusted legacy snapshot."""
+        ...
+
+
+__all__ = ["HarnessProtocol", "HarnessProvider", "HarnessAuthorizationProvider"]

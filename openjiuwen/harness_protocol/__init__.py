@@ -10,7 +10,7 @@ from openjiuwen.harness_protocol.checkpoints import (
     HarnessCheckpoint,
     HarnessCheckpointSink,
 )
-from openjiuwen.harness_protocol.construction import AgentExecutionSpec
+from openjiuwen.harness_protocol.construction import AgentExecutionSpec, ExecutionAuthorization
 from openjiuwen.harness_protocol.errors import (
     CheckpointConflictError,
     HarnessError,
@@ -93,6 +93,7 @@ from openjiuwen.harness_protocol.models import (
     json_value_to_builtin,
 )
 from openjiuwen.harness_protocol.protocol import (
+    HarnessAuthorizationProvider,
     HarnessProtocol,
     HarnessProvider,
 )
@@ -126,6 +127,8 @@ from openjiuwen.harness_protocol.tools import (
 
 __all__ = [
     "AgentExecutionSpec",
+    "ExecutionAuthorization",
+    "HarnessAuthorizationProvider",
     "PROTOCOL_VERSION",
     "AbortMode",
     "AfterToolContext",
