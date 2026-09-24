@@ -14,6 +14,7 @@ from openjiuwen.harness_protocol import (
     CheckpointReason,
     CheckpointSaveReceipt,
     ExecutionAuthorization,
+    HarnessCapability,
     HarnessContext,
     HarnessInput,
     HarnessProtocolError,
@@ -22,6 +23,8 @@ from openjiuwen.harness_protocol import (
     InteractionResponseStatus,
     ItemEventKind,
     ItemLifecycleEvent,
+    McpServerConfig,
+    McpTransport,
     OutputOperation,
     ResumePolicy,
     ToolApprovalDecision,
@@ -92,6 +95,70 @@ def test_authorization_and_separate_model_identity():
     assert native_config(config())["permission"]["question"] == "deny"
     assert native_config(config(), {HostCapability.USER_INPUT})["permission"]["question"] == "allow"
     assert native_config(config())["provider"]["openjiuwen"]["options"]["apiKey"] == "test-secret"
+    assert provider.card.supports(HarnessCapability.MCP_TOOLS)
+    assert not provider.card.supports(HarnessCapability.NATIVE_TOOLS)
+
+
+def _product_mcp(**overrides):
+    values = {
+        "name": "jiuwenswarm_product_tools",
+        "transport": McpTransport.HTTP,
+        "url": "http://127.0.0.1:43111/mcp",
+        "headers": {"Authorization": "Bearer " + "x" * 43},
+    }
+    values.update(overrides)
+    return McpServerConfig(**values)
+
+
+def test_managed_product_mcp_is_rendered_without_changing_base_config():
+    base = native_config(config(), {HostCapability.MCP_SERVERS})
+    managed = native_config(
+        config(),
+        {HostCapability.MCP_SERVERS},
+        (_product_mcp(),),
+    )
+
+    assert base["mcp"] == {}
+    assert managed["mcp"] == {
+        "jiuwenswarm_product_tools": {
+            "type": "remote",
+            "url": "http://127.0.0.1:43111/mcp",
+            "headers": {"Authorization": "Bearer " + "x" * 43},
+            "oauth": False,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        McpServerConfig(
+            name="stdio",
+            transport=McpTransport.STDIO,
+            command=("mcp",),
+        ),
+        _product_mcp(url="https://mcp.example/mcp"),
+        _product_mcp(url="http://127.0.0.1:invalid/mcp"),
+        _product_mcp(headers={}),
+        _product_mcp(name="invalid.name"),
+    ],
+)
+def test_unmanaged_product_mcp_is_rejected(server):
+    with pytest.raises(OpenCodeError):
+        native_config(config(), {HostCapability.MCP_SERVERS}, (server,))
+
+
+def test_mcp_context_requires_declared_host_capability():
+    harness = OpenCodeHarness()
+    with pytest.raises(HarnessProtocolError, match="MCP_SERVERS"):
+        harness._validate_context(context(mcp_servers=(_product_mcp(),)))
+
+    harness._validate_context(
+        context(
+            mcp_servers=(_product_mcp(),),
+            host_capabilities=frozenset({HostCapability.MCP_SERVERS}),
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -612,9 +679,7 @@ class InteractiveHarness(FakeHarness):
 
 @pytest.mark.asyncio
 async def test_permission_allow_and_deny_are_scoped_and_terminal():
-    allow = AnsweringHandler(
-        lambda request: ToolApprovalResponse(request.request_id, ToolApprovalDecision.ALLOW)
-    )
+    allow = AnsweringHandler(lambda request: ToolApprovalResponse(request.request_id, ToolApprovalDecision.ALLOW))
     harness = InteractiveHarness("approval")
     await harness.start(
         context(
@@ -626,14 +691,10 @@ async def test_permission_allow_and_deny_are_scoped_and_terminal():
     events = await collect_turn(harness, receipt.turn_id)
     assert terminal_of(events).kind is TurnEventKind.FINISHED
     assert allow.requests[0].call_id == "call_1"
-    assert harness._transport.native_replies == [
-        ("/session/ses_s/permissions/per_req", {"response": "once"})
-    ]
+    assert harness._transport.native_replies == [("/session/ses_s/permissions/per_req", {"response": "once"})]
     await harness.stop()
 
-    deny = AnsweringHandler(
-        lambda request: ToolApprovalResponse(request.request_id, ToolApprovalDecision.DENY)
-    )
+    deny = AnsweringHandler(lambda request: ToolApprovalResponse(request.request_id, ToolApprovalDecision.DENY))
     harness = InteractiveHarness("approval")
     await harness.start(
         context(
@@ -669,9 +730,7 @@ async def test_question_round_trip_uses_native_positional_answers():
     events = await collect_turn(harness, receipt.turn_id)
     assert terminal_of(events).kind is TurnEventKind.FINISHED
     assert handler.requests[0].choices == ("Yes",)
-    assert harness._transport.native_replies == [
-        ("/question/que_req/reply", {"answers": [["Yes"]]})
-    ]
+    assert harness._transport.native_replies == [("/question/que_req/reply", {"answers": [["Yes"]]})]
     await harness.stop()
 
 
@@ -698,9 +757,7 @@ async def test_abort_cancels_pending_interaction_and_is_not_success():
     terminal = terminal_of(events)
     assert terminal.kind is TurnEventKind.ABORTED
     assert terminal.result.status is TurnStatus.INTERRUPTED
-    assert handler.cancelled == [
-        ("opencode-approval:per_req", InteractionCancelReason.TURN_ABORTED)
-    ]
+    assert handler.cancelled == [("opencode-approval:per_req", InteractionCancelReason.TURN_ABORTED)]
     await harness.stop()
 
 
@@ -729,9 +786,7 @@ async def test_disconnect_while_waiting_marks_result_unknown_and_cancels_host_re
     assert terminal.kind is TurnEventKind.FAILED
     assert terminal.result.error.code == "event_stream_closed"
     assert terminal.result.error.retryable is True
-    assert handler.cancelled == [
-        ("opencode-approval:per_req", InteractionCancelReason.PROVIDER_WITHDREW)
-    ]
+    assert handler.cancelled == [("opencode-approval:per_req", InteractionCancelReason.PROVIDER_WITHDREW)]
     await harness.stop()
 
 
@@ -761,9 +816,7 @@ async def test_completed_session_checkpoint_resumes_without_creating_session():
     await harness.stop()
 
     resumed = FakeHarness("normal")
-    await resumed.start(
-        context(checkpoint=checkpoint, resume_policy=ResumePolicy.REQUIRE_RESUME)
-    )
+    await resumed.start(context(checkpoint=checkpoint, resume_policy=ResumePolicy.REQUIRE_RESUME))
     assert not any(method == "POST" and path == "/session" for method, path, _ in resumed._transport.requests)
     assert (await resumed.export_checkpoint()).data["resumed"] is True
     await resumed.stop()
