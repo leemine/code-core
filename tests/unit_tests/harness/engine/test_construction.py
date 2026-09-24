@@ -72,13 +72,16 @@ import sys
 class Block(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.startswith(("openjiuwen.harness.deep_agent", "openjiuwen.harness.resources",
-                                "claude_agent_sdk", "codex", "deepseek_harness")):
+                                "claude_agent_sdk", "codex", "openai_codex", "deepseek_harness")):
             raise AssertionError("unexpected dependency: " + fullname)
 sys.meta_path.insert(0, Block())
 from openjiuwen.harness import ExecutionBinding, create_harness_engine
-from openjiuwen.harness_protocol import AgentExecutionSpec
+from openjiuwen.harness_protocol import AgentExecutionSpec, ExecutionAuthorization
 value = AgentExecutionSpec("claudecode", "r1")
 binding = ExecutionBinding.create(value, subject_id="alice", host_session_id="s1", workspace="/tmp/work")
+assert create_harness_engine(value, binding=binding).binding is binding
+value = AgentExecutionSpec("codex", "r1", authorization=ExecutionAuthorization(True))
+binding = ExecutionBinding.create(value, subject_id="alice", host_session_id="s2", workspace="/tmp/work")
 assert create_harness_engine(value, binding=binding).binding is binding
 '''
     subprocess.run([sys.executable, "-c", code], check=True, env=os.environ.copy(), timeout=30)

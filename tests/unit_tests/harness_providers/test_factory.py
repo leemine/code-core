@@ -21,6 +21,7 @@ from openjiuwen.harness_providers.codex import CodexHarness
 from openjiuwen.harness_providers.dsh import DshHarness
 from openjiuwen.harness_providers.factory import manifest_provider_config
 from openjiuwen.harness_providers.native import DeepAgentHarness
+from openjiuwen.harness_providers.opencode import OpenCodeHarness
 from tests.test_logger import logger
 
 
@@ -58,6 +59,8 @@ def test_manifest_provider_config_maps_the_model_per_provider() -> None:
     assert codex["model"]["provider"].lower() == "openai"
     dsh = manifest_provider_config(manifest, provider="dsh", config={"model": "custom"})
     assert dsh["model"] == "custom" and dsh["base_url"] == "https://llm"
+    opencode = manifest_provider_config(manifest, provider="opencode")
+    assert opencode["model"] == {"model": "gpt-x", "api_base": "https://llm", "api_key": "secret"}
     native = manifest_provider_config(manifest, provider="native", language="en")
     assert native["language"] == "en"
     assert native["agent_template"]["agent_card"]["name"] == "expert"
@@ -77,6 +80,7 @@ def test_create_harness_returns_the_requested_implementation() -> None:
     assert isinstance(create_harness(manifest, provider="claudecode", config={"cwd": "/tmp"}), ClaudeCodeHarness)
     assert isinstance(create_harness(manifest, provider="codex"), CodexHarness)
     assert isinstance(create_harness(manifest, provider="dsh"), DshHarness)
+    assert isinstance(create_harness(manifest, provider="opencode"), OpenCodeHarness)
     native = create_harness(_manifest(with_tools=True), provider="native", language="en")
     assert isinstance(native, DeepAgentHarness)
     with pytest.raises(ValueError, match="unknown harness provider"):
