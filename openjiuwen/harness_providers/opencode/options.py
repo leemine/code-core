@@ -2,13 +2,58 @@
 """Provider-owned native options; no ambient config or credential discovery."""
 
 import json
+import re
+from urllib.parse import urlsplit
 
-from openjiuwen.harness_protocol import HostCapability
+from openjiuwen.harness_protocol import HostCapability, McpTransport
 
 from .errors import OpenCodeError
 
 
-def native_config(config, host_capabilities=frozenset()):
+def _native_mcp_config(mcp_servers):
+    result = {}
+    for server in mcp_servers:
+        if server.transport is not McpTransport.HTTP or not server.url:
+            raise OpenCodeError("unsupported_mcp_transport", category="process_start_failed")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", server.name) or server.name in result:
+            raise OpenCodeError("invalid_mcp_server_name", category="process_start_failed")
+        url = urlsplit(server.url)
+        try:
+            port = url.port
+        except ValueError:
+            raise OpenCodeError(
+                "unmanaged_mcp_endpoint",
+                category="process_start_failed",
+            ) from None
+        if (
+            url.scheme != "http"
+            or url.hostname != "127.0.0.1"
+            or port is None
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+        ):
+            raise OpenCodeError("unmanaged_mcp_endpoint", category="process_start_failed")
+        headers = dict(server.headers)
+        authorization = headers.get("Authorization")
+        if (
+            set(headers) != {"Authorization"}
+            or not isinstance(authorization, str)
+            or not authorization.startswith("Bearer ")
+            or len(authorization) <= len("Bearer ")
+        ):
+            raise OpenCodeError("invalid_mcp_authentication", category="process_start_failed")
+        result[server.name] = {
+            "type": "remote",
+            "url": server.url,
+            "headers": headers,
+            "oauth": False,
+        }
+    return result
+
+
+def native_config(config, host_capabilities=frozenset(), mcp_servers=()):
     model = config.model
     if model is None:
         raise OpenCodeError("explicit_model_required", category="process_start_failed")
@@ -38,7 +83,7 @@ def native_config(config, host_capabilities=frozenset()):
         "lsp": False,
         "formatter": False,
         "agent": {"title": {"disable": True}},
-        "mcp": {},
+        "mcp": _native_mcp_config(mcp_servers),
     }
 
 

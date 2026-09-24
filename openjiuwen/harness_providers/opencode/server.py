@@ -56,7 +56,11 @@ class ManagedServer:
         self.config, self.context = config, context
         self.lock = self.process = self.log = self.owner = self.scope = None
         self._stop_lock = asyncio.Lock()
-        self.native_config = native_config(config, context.host_capabilities)
+        self.native_config = native_config(
+            config,
+            context.host_capabilities,
+            context.mcp_servers,
+        )
 
     async def control(self, *args):
         process = await asyncio.create_subprocess_exec(
@@ -168,8 +172,18 @@ class ManagedServer:
             self.lock = lease(self.scope / "host.lock")
         except BlockingIOError:
             raise OpenCodeError("storage_already_owned", category="process_start_failed") from None
+        # Product MCP endpoints have per-generation ports and bearer tokens.
+        # Keep the pre-OC4 stable identity byte-for-byte compatible while the
+        # full generated config remains sealed and verified for this service.
+        stable_native_config = native_config(
+            self.config,
+            self.context.host_capabilities,
+        )
         fingerprint = hashlib.sha256(
-            json.dumps({"config": asdict(self.config), "native": self.native_config}, sort_keys=True).encode()
+            json.dumps(
+                {"config": asdict(self.config), "native": stable_native_config},
+                sort_keys=True,
+            ).encode()
         ).hexdigest()
         identity_file = self.scope / "identity.json"
         if os.path.lexists(identity_file):  # noqa: ASYNC240

@@ -45,11 +45,16 @@ class OpenCodeHarness(SerializedTurnHarness):
                 HarnessCapability.GRACEFUL_ABORT,
                 HarnessCapability.PERSISTENT_SESSION,
                 HarnessCapability.CHECKPOINT,
-                HarnessCapability.NATIVE_TOOLS,
+                HarnessCapability.MCP_TOOLS,
             }
         ),
         optional_host_capabilities=frozenset(
-            {HostCapability.CHECKPOINT_SINK, HostCapability.TOOL_APPROVAL, HostCapability.USER_INPUT}
+            {
+                HostCapability.CHECKPOINT_SINK,
+                HostCapability.MCP_SERVERS,
+                HostCapability.TOOL_APPROVAL,
+                HostCapability.USER_INPUT,
+            }
         ),
     )
 
@@ -70,10 +75,10 @@ class OpenCodeHarness(SerializedTurnHarness):
             and context.interactions is None
         ):
             raise HarnessProtocolError("OpenCode interactive host capabilities require an interaction handler")
-        if context.env or context.tools is not None or context.mcp_servers or context.hooks is not None:
-            raise UnsupportedHarnessCapabilityError(
-                "OpenCode does not support environment, host tools, MCP or hooks"
-            )
+        if context.mcp_servers and HostCapability.MCP_SERVERS not in context.host_capabilities:
+            raise HarnessProtocolError("OpenCode MCP configuration requires the MCP_SERVERS host capability")
+        if context.env or context.tools is not None or context.hooks is not None:
+            raise UnsupportedHarnessCapabilityError("OpenCode does not support environment, native host tools or hooks")
 
     async def _open_session(self, context: HarnessContext) -> str:
         # Imports remain cheap and platform-independent until runtime startup.
@@ -153,9 +158,7 @@ class OpenCodeHarness(SerializedTurnHarness):
             raise OpenCodeError("resume_session_not_idle", category="server_unavailable")
         for path in ("/permission", "/question"):
             pending = await self._transport.request("GET", path)
-            if not isinstance(pending, list) or any(
-                not isinstance(item, Mapping) for item in pending
-            ):
+            if not isinstance(pending, list) or any(not isinstance(item, Mapping) for item in pending):
                 raise OpenCodeError("invalid_pending_interactions")
             if any(item.get("sessionID") == session_id for item in pending):
                 raise OpenCodeError("resume_session_has_pending_interaction", category="server_unavailable")
@@ -384,11 +387,7 @@ class OpenCodeHarness(SerializedTurnHarness):
                 },
             )
             response = await self._await_host_interaction(request)
-        if (
-            response is not None
-            and response.status is InteractionResponseStatus.COMPLETED
-            and not turn.abort_requested
-        ):
+        if response is not None and response.status is InteractionResponseStatus.COMPLETED and not turn.abort_requested:
             answers = self._answers(json_value_to_builtin(response.content), questions)
         else:
             answers = None
