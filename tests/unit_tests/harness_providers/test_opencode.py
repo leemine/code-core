@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -129,11 +130,107 @@ def test_managed_product_mcp_is_rendered_without_changing_base_config():
     }
 
 
+def test_host_mcp_stdio_and_remote_are_compiled_without_oauth_or_interpolation():
+    servers = (
+        McpServerConfig(
+            name="local_tools",
+            transport=McpTransport.STDIO,
+            command=("/usr/bin/python3", "server.py"),
+            env={"FIXTURE": "value"},
+        ),
+        McpServerConfig(
+            name="remote_tools",
+            transport=McpTransport.HTTP,
+            url="https://mcp.example/mcp?tenant=fixture",
+            headers={"X-Fixture": "value"},
+        ),
+    )
+    rendered = native_config(config(), {HostCapability.MCP_SERVERS}, servers)["mcp"]
+    assert rendered == {
+        "local_tools": {
+            "type": "local",
+            "command": ["/usr/bin/python3", "server.py"],
+            "environment": {"FIXTURE": "value"},
+        },
+        "remote_tools": {
+            "type": "remote",
+            "url": "https://mcp.example/mcp?tenant=fixture",
+            "headers": {"X-Fixture": "value"},
+            "oauth": False,
+        },
+    }
+
+
+def test_stable_mcp_identity_excludes_only_generation_local_product_server():
+    manifest_server = McpServerConfig(
+        name="manifest",
+        transport=McpTransport.HTTP,
+        url="http://127.0.0.1:43112/mcp",
+    )
+    rendered = native_config(
+        config(),
+        {HostCapability.MCP_SERVERS},
+        (_product_mcp(), manifest_server),
+        include_product_mcp=False,
+    )
+    assert set(rendered["mcp"]) == {"manifest"}
+
+
+def test_explicit_skill_path_is_the_only_enabled_skill_source():
+    skill_path = Path("/work/.openjiuwen/harness-skills/opencode/config")
+    rendered = native_config(config(skills=("/source",)), skill_path=skill_path)
+    assert rendered["skills"] == {"paths": [str(skill_path)], "urls": []}
+    assert "skills" not in native_config(config())
+    with pytest.raises(OpenCodeError, match="explicit_skill_path_required"):
+        native_config(config(skills=("/source",)))
+
+
 @pytest.mark.parametrize(
     "server",
     [
         McpServerConfig(
-            name="stdio",
+            name="plain_remote",
+            transport=McpTransport.HTTP,
+            url="http://mcp.example/mcp",
+        ),
+        McpServerConfig(
+            name="interpolated_command",
+            transport=McpTransport.STDIO,
+            command=("{env:UNTRUSTED}",),
+        ),
+        McpServerConfig(
+            name="interpolated_header",
+            transport=McpTransport.HTTP,
+            url="https://mcp.example/mcp",
+            headers={"Authorization": "{file:/tmp/secret}"},
+        ),
+        McpServerConfig(
+            name="in_process",
+            transport=McpTransport.IN_PROCESS,
+            instance=object(),
+        ),
+    ],
+)
+def test_uncontrolled_host_mcp_sources_are_rejected(server):
+    with pytest.raises(OpenCodeError):
+        native_config(config(), {HostCapability.MCP_SERVERS}, (server,))
+
+
+def test_duplicate_product_mcp_names_are_rejected_even_in_stable_identity():
+    with pytest.raises(OpenCodeError, match="invalid_mcp_server_name"):
+        native_config(
+            config(),
+            {HostCapability.MCP_SERVERS},
+            (_product_mcp(), _product_mcp()),
+            include_product_mcp=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        McpServerConfig(
+            name="jiuwenswarm_product_tools",
             transport=McpTransport.STDIO,
             command=("mcp",),
         ),

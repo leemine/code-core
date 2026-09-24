@@ -33,7 +33,9 @@ def _manifest(*, with_tools: bool = False) -> AgentTemplateSpec:
             model_request_config=ModelRequestConfig(model="gpt-x"),
         ),
         prompt_sections=[
-            PromptSectionSpec(name="rules", content={"en": "Follow {{language}} rules.", "cn": "遵守规则"}, priority=20),
+            PromptSectionSpec(
+                name="rules", content={"en": "Follow {{language}} rules.", "cn": "遵守规则"}, priority=20
+            ),
             PromptSectionSpec(name="identity", content={"en": "You are an expert."}, priority=10),
         ],
         mcps=[McpServerSpec(type="stdio", server_name="fs", command="mcp-fs", args=["--root", "/tmp"])],
@@ -105,7 +107,9 @@ def test_build_harness_context_renders_prompt_and_mcp_servers() -> None:
     assert context.mcp_servers[0].command == ("mcp-fs", "--root", "/tmp")
     assert HostCapability.MCP_SERVERS in context.host_capabilities
 
-    native_context = build_harness_context(manifest, provider="native", host_session_id="host-1", extra_system_prompt="x")
+    native_context = build_harness_context(
+        manifest, provider="native", host_session_id="host-1", extra_system_prompt="x"
+    )
     assert native_context.system_prompt == "x"
     assert native_context.mcp_servers == ()
 
@@ -134,7 +138,7 @@ def test_create_harness_loads_a_manifest_package(tmp_path: Path) -> None:
 
 def test_native_v2_factory_uses_native_harness_template_construction():
     from openjiuwen.agent_teams.harness import NativeHarnessProtocolAdapter
-    from openjiuwen.harness_protocol import HarnessProvider, HarnessCapability
+    from openjiuwen.harness_protocol import HarnessCapability, HarnessProvider
 
     manifest = _manifest(with_tools=True)
     provider = resolve_provider("native_v2")
@@ -151,7 +155,9 @@ def test_native_v2_factory_uses_native_harness_template_construction():
     assert harness._spec.language == "en"
     assert harness._spec.max_iterations == 9
     assert harness.event_buffer_config.capacity == 32
-    context = build_harness_context(manifest, provider="native_v2", host_session_id="session", extra_system_prompt="extra")
+    context = build_harness_context(
+        manifest, provider="native_v2", host_session_id="session", extra_system_prompt="extra"
+    )
     assert context.system_prompt == "extra"
     assert not context.mcp_servers
     with pytest.raises(ValueError, match="unknown native_v2"):
@@ -168,6 +174,7 @@ def test_native_v2_factory_uses_native_harness_template_construction():
 ])
 async def test_manifest_skills_are_copied_at_start_before_sdk_launch(tmp_path, monkeypatch, provider, relative, loader):
     import importlib
+
     from openjiuwen.harness.schema.extension_spec import SkillSpec
     from openjiuwen.harness_protocol import HarnessContext
     from tests.unit_tests.harness_providers.test_skills import bundle
@@ -185,4 +192,50 @@ async def test_manifest_skills_are_copied_at_start_before_sdk_launch(tmp_path, m
         raise RuntimeError("SDK launch reached")
     monkeypatch.setattr(module, loader, fail_loading)
     with pytest.raises(RuntimeError, match="SDK launch reached"):
-        await harness.start(HarnessContext(agent_name="test", agent_id="test", host_session_id="test", system_prompt="", cwd=str(project)))
+        await harness.start(
+            HarnessContext(
+                agent_name="test", agent_id="test", host_session_id="test", system_prompt="", cwd=str(project)
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_opencode_manifest_skills_use_an_explicit_isolated_path_before_cli_launch(tmp_path, monkeypatch):
+    import asyncio
+
+    from openjiuwen.harness.schema.extension_spec import SkillSpec
+    from openjiuwen.harness_protocol import HarnessContext
+    from openjiuwen.harness_providers.opencode.server import ManagedServer
+    from tests.unit_tests.harness_providers.test_skills import bundle
+
+    source = bundle(tmp_path / "source")
+    project = tmp_path / "project"
+    project.mkdir()
+    manifest = _manifest().model_copy(update={"mcps": [], "skills": [SkillSpec(dir=str(source))]})
+    harness = create_harness(
+        manifest,
+        provider="opencode",
+        config={"runtime_root": str(tmp_path / "runtime"), "skill_conflict": "replace"},
+    )
+
+    async def fail_start(server):
+        assert server.skill_path.is_relative_to(project / ".openjiuwen/harness-skills/opencode")
+        assert (server.skill_path / "example/scripts/run.sh").is_file()
+        assert server.native_config["skills"] == {"paths": [str(server.skill_path)], "urls": []}
+        raise RuntimeError("CLI launch reached")
+
+    async def inline_to_thread(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(ManagedServer, "start", fail_start)
+    monkeypatch.setattr(asyncio, "to_thread", inline_to_thread)
+    with pytest.raises(Exception, match="failed to start managed OpenCode"):
+        await harness.start(
+            HarnessContext(
+                agent_name="test",
+                agent_id="test",
+                host_session_id="test",
+                system_prompt="",
+                cwd=str(project),
+            )
+        )

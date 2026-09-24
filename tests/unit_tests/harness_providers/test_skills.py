@@ -3,12 +3,17 @@
 
 """Portable skill bundle copying and collision behavior."""
 
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
-from openjiuwen.harness_providers.skills import SkillSource, install_skills, normalize_skills
+from openjiuwen.harness_providers.skills import (
+    SkillSource,
+    install_skills,
+    isolated_skill_scan_directory,
+    normalize_skills,
+)
 
 
 def bundle(root: Path, name: str = "example", text: str = "instructions") -> Path:
@@ -21,7 +26,10 @@ def bundle(root: Path, name: str = "example", text: str = "instructions") -> Pat
     return root
 
 
-@pytest.mark.parametrize("provider,relative", [("claudecode", ".claude/skills"), ("codex", ".agents/skills"), ("dsh", ".dsh/skills")])
+@pytest.mark.parametrize(
+    "provider,relative",
+    [("claudecode", ".claude/skills"), ("codex", ".agents/skills"), ("dsh", ".dsh/skills")],
+)
 def test_complete_bundle_and_conflict_policies(tmp_path, provider, relative):
     source = bundle(tmp_path / "source")
     project = tmp_path / "project"
@@ -133,3 +141,34 @@ def test_replace_destination_symlink_copies_files_without_mutating_source(tmp_pa
     assert destination.is_dir() and not destination.is_symlink()
     assert (destination / "scripts/run.sh").is_file()
     assert (source / "SKILL.md").is_file()
+
+
+def test_explicit_skill_scan_is_configuration_isolated_and_project_contained(tmp_path):
+    first = SkillSource(str(bundle(tmp_path / "first", "first")))
+    second = SkillSource(str(bundle(tmp_path / "second", "second")))
+    project = tmp_path / "project"
+    project.mkdir()
+    first_scan = isolated_skill_scan_directory(
+        (first,), provider="opencode", cwd=str(project), conflict="skip"
+    )
+    second_scan = isolated_skill_scan_directory(
+        (second,), provider="opencode", cwd=str(project), conflict="skip"
+    )
+    assert first_scan != second_scan
+    assert first_scan.is_relative_to(project / ".openjiuwen/harness-skills/opencode")
+    install_skills((first,), provider="opencode", cwd=str(project), scan_dir=first_scan)
+    assert (first_scan / "first/SKILL.md").is_file()
+    assert not second_scan.exists()
+
+
+def test_explicit_skill_scan_cannot_escape_project(tmp_path):
+    source = SkillSource(str(bundle(tmp_path / "source")))
+    project = tmp_path / "project"
+    project.mkdir()
+    with pytest.raises(ValueError, match="escapes"):
+        install_skills(
+            (source,),
+            provider="opencode",
+            cwd=str(project),
+            scan_dir=tmp_path / "outside",
+        )

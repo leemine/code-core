@@ -23,6 +23,8 @@ from openjiuwen.harness_protocol import (
     HarnessInput,
     HostCapability,
     InteractionResponseStatus,
+    McpServerConfig,
+    McpTransport,
     ResumePolicy,
     ToolApprovalDecision,
     ToolApprovalRequest,
@@ -41,6 +43,9 @@ pytestmark = pytest.mark.skipif(os.environ.get("RUN_OPENCODE_OC1") != "1", reaso
 class ModelFixture:
     def __init__(self):
         self.actions, self.requests = [], []
+        self.mcp_calls = []
+        self.mcp_token = "oc5-loopback-token"
+        self.mcp_url = ""
         self.entered = asyncio.Event()
 
     async def respond(self, request):
@@ -78,18 +83,50 @@ class ModelFixture:
             content_type="text/event-stream",
         )
 
+    async def mcp(self, request):
+        if request.headers.get("Authorization") != "Bearer " + self.mcp_token:
+            return web.Response(status=401)
+        body = await request.json()
+        method = body.get("method")
+        self.mcp_calls.append(method)
+        if "id" not in body:
+            return web.Response(status=202)
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "oc5-fixture", "version": "1"},
+            }
+        elif method == "tools/list":
+            result = {
+                "tools": [
+                    {
+                        "name": "echo",
+                        "description": "Return the fixed OC5 MCP marker",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            }
+        elif method == "tools/call":
+            result = {"content": [{"type": "text", "text": "OC5-MCP-MARKER"}]}
+        else:
+            result = {}
+        return web.json_response({"jsonrpc": "2.0", "id": body["id"], "result": result})
+
 
 @pytest_asyncio.fixture
 async def runtime(tmp_path):
     model = ModelFixture()
     app = web.Application()
     app.router.add_post("/v1/chat/completions", model.respond)
+    app.router.add_route("*", "/mcp", model.mcp)
     runner = web.AppRunner(app)
     await runner.setup()
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     await web.SockSite(runner, sock).start()
+    model.mcp_url = f"http://127.0.0.1:{port}/mcp"
     root = tmp_path / "runtime"
     root.mkdir(mode=0o700)
     work = tmp_path / "work"
@@ -158,6 +195,72 @@ async def test_text_followup_tool_usage_and_cleanup(runtime):
     await h.stop()
     assert (await server.properties(owner)).get("ActiveState") != "active"
     assert not (server.scope / "owner.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_portable_skill_discovery_call_and_new_session_disable(runtime, tmp_path):
+    config, model, work, create = runtime
+    source = tmp_path / "portable-skill"
+    source.mkdir()
+    (source / "SKILL.md").write_text(
+        "---\nname: portable-proof\ndescription: Use for the fixed OC5 portable proof.\n---\n"
+        "Return OC5-SKILL-MARKER when this skill is loaded.\n"
+    )
+    enabled = create(replace(config, skills=(str(source),), skill_conflict="replace"))
+    await enabled.start(make_context(cwd=str(work), host_session_id="oc5-skills-enabled"))
+    discovered = await enabled._transport.request("GET", "/skill")
+    assert any(item.get("name") == "portable-proof" for item in discovered)
+    model.actions = [
+        {"tool": "skill", "args": {"name": "portable-proof"}},
+        {"text": "OC5-SKILL-DONE"},
+    ]
+    _, terminal = await turn(enabled, "Load the portable proof skill")
+    assert terminal.kind is TurnEventKind.FINISHED, terminal.result
+    assert any(
+        block.kind == "tool_result" and "OC5-SKILL-MARKER" in str(block.content)
+        for message in terminal.result.messages
+        for block in message.content
+    )
+    copied = enabled._server.skill_path / "portable-proof/SKILL.md"
+    assert copied.is_file()
+    await enabled.stop()
+
+    disabled = create(config)
+    await disabled.start(make_context(cwd=str(work), host_session_id="oc5-skills-disabled"))
+    discovered = await disabled._transport.request("GET", "/skill")
+    assert not any(item.get("name") == "portable-proof" for item in discovered)
+    assert copied.is_file()
+
+
+@pytest.mark.asyncio
+async def test_host_admitted_remote_mcp_is_discovered_and_called(runtime):
+    _, model, work, create = runtime
+    server = McpServerConfig(
+        name="fixture",
+        transport=McpTransport.HTTP,
+        url=model.mcp_url,
+        headers={"Authorization": "Bearer " + model.mcp_token},
+    )
+    h = create()
+    context = replace(
+        make_context(cwd=str(work), host_session_id="oc5-mcp"),
+        host_capabilities=frozenset({HostCapability.MCP_SERVERS}),
+        mcp_servers=(server,),
+    )
+    await h.start(context)
+    assert h._server.native_config["mcp"]["fixture"]["oauth"] is False
+    model.actions = [
+        {"tool": "fixture_echo", "args": {}},
+        {"text": "OC5-MCP-DONE"},
+    ]
+    _, terminal = await turn(h, "Call the fixture MCP tool")
+    assert terminal.kind is TurnEventKind.FINISHED, terminal.result
+    assert "tools/call" in model.mcp_calls
+    assert any(
+        block.kind == "tool_result" and "OC5-MCP-MARKER" in str(block.content)
+        for message in terminal.result.messages
+        for block in message.content
+    )
 
 
 @pytest.mark.asyncio
