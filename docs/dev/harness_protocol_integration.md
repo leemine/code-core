@@ -911,7 +911,7 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 | `claudecode` | `claudecode.ClaudeCodeHarness`（claude-agent-sdk） | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS |
 | `codex` | `codex.CodexHarness`（openai-codex） | `codex` | 同上 |
 | `dsh` | `dsh.DshHarness`（deepseek-harness） | `deepseek-harness` | MCP_TOOLS |
-| `opencode` | `opencode.OpenCodeHarness`（固定 CLI / HTTP SSE） | `opencode` | NATIVE_TOOLS（OC1） |
+| `opencode` | `opencode.OpenCodeHarness`（固定 CLI / HTTP SSE） | `opencode` | GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS |
 
 - `harness_providers.io_adapter.HarnessIOAdapter`：把任意 `HarnessProtocol` 投影成 DeepAgent 风格
   输入输出——输入接受用户文本与 `InteractiveInput`（回答 ask-user 中断），输出为
@@ -920,7 +920,7 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
   宿主 `send(InteractiveInput)` 才应答 provider。
 - `harness_providers.create_harness(manifest, provider=..., config=..., language=...)`：从 AgentTemplate
   manifest（`AgentTemplateSpec` 或 `manifest.json` 包路径）建未启动 harness；`native` / `native_v2` 加载整份
-  template；三方 provider 接收模型端点；Claude/Codex/DSH 接收 portable skills，OpenCode OC1 明确拒绝 Skills/MCP，manifest 里的 `tools` / `rails` /
+  template；三方 provider 接收模型端点；Claude/Codex/DSH 接收 portable skills，OpenCode 接受宿主管理的认证 loopback HTTP MCP、仍拒绝 Skills，manifest 里的 `tools` / `rails` /
   `subagents` 仍会被拒绝。`build_harness_context(...)` 把 persona prompt sections 渲染成 `system_prompt`、manifest MCP
   变成 `mcp_servers`。
 - team 侧 `ExternalHarnessMemberRuntime` 组合 IO adapter；`build_cli_runtime` 的 claude / codex 分支

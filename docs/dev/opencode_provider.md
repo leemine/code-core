@@ -52,13 +52,16 @@ request ID 后发送。未提供审批宿主时原生请求被拒绝。只有宿
 
 ## 能力与失败边界
 
-Card 声明 `GRACEFUL_ABORT`、`PERSISTENT_SESSION`、`CHECKPOINT`、`NATIVE_TOOLS`。文本、reasoning、
+Card 声明 `GRACEFUL_ABORT`、`PERSISTENT_SESSION`、`CHECKPOINT`、`MCP_TOOLS`。文本、reasoning、
 工具开始/更新/结果、累计 tokens 和 cost
 保留原生 message/part/call ID。非文本 JSON 输入按公共 `harness_input_text` 渲染为文本；
 这不表示图片/附件或结构化输出能力已实现。一个 Turn 必须有匹配当前 user messageID 的
 最后 assistant completed/stop、后续 idle 及消息回读；204、step-finish、裸 idle、EOF 均不能判成功。
 
-不支持的环境覆盖、宿主工具、MCP、Hooks、Skills、steer/pause 明确拒绝。`abort(GRACEFUL)` 调原生
+不支持的环境覆盖、原生宿主 ToolGateway、Hooks、Skills、steer/pause 明确拒绝。宿主 MCP 首批只接受
+显式端口的 `127.0.0.1` HTTP endpoint、唯一 Bearer Authorization 头并强制 `oauth=false`；stdio、
+in-process、非 loopback、匿名或额外 header 均失败关闭。临时 MCP URL/token 不改变既有 scope 的
+稳定存储身份，但本代完整有效配置仍封存并回读。`abort(GRACEFUL)` 调原生
 session abort，并以关联 `MessageAbortedError` + idle 收口 ABORTED；回答与 abort 竞态始终优先取消
 宿主 pending interaction，迟到回答不再执行工具。异常、超时、断流后服务停止并返回未知失败，
 当前生命周期不重新发送输入；这并不保证已开始的原生工具没有产生副作用。

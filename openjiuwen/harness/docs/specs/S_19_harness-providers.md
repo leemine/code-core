@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
 | 最近一次修订日期 | 2026-09-24 |
-| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md |
+| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md |
 
 ## 范围 / 边界
 
@@ -30,7 +30,7 @@
    | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
    | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
    | `dsh` | `deepseek-harness` | MCP_TOOLS | MCP_SERVERS |
-   | `opencode` | `opencode` | GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, NATIVE_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK |
+   | `opencode` | `opencode` | GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS |
 
    未声明的命令抛 `UnsupportedHarnessCapabilityError`；`_validate_context` 在 `start` 里 fail-fast。
 3. **SDK 惰性加载**：config / provider / 包 import 不导入 vendor SDK；缺 SDK 在 `start` 抛
@@ -132,8 +132,10 @@
     新增不准入来源使该轮失败并关闭 client。Skill 安装仍早于 SDK 加载，旧 Team 显式 approve/bypass 不改。
     这是来源准入与受限启动，非 OS 文件 ACL；同 UID 修改、检查使用竞态、硬链接及全部进程隔离不由此保证。
 17. **受管产品 MCP 不扩大协议或工具所有权**：产品宿主仍拥有原工具目录、主体/父 Session/工作空间路由和授权；
-    Codex Provider 只消费 HarnessContext 的 MCP 配置并走原生工具审批。临时 URL/token 不进入稳定来源范围身份，
-    server 名称进入来源指纹；CLI 有效配置丢失认证、出现额外 server、改变 required/prompt 或改成非 loopback 时启动失败。
+    Codex/OpenCode Provider 只消费 HarnessContext 的 MCP 配置并走原生工具审批。临时 URL/token 不进入稳定来源范围身份。
+    Codex 的 server 名称进入来源指纹；CLI 有效配置丢失认证、出现额外 server、改变 required/prompt 或改成非 loopback 时启动失败。
+    OpenCode 首批只接受显式端口的 `127.0.0.1` HTTP、唯一 Bearer Authorization 头和禁用 OAuth 的远端 MCP；
+    完整有效配置逐 generation 封存和回读，但稳定 scope 身份继续按无临时 MCP 的既有算法计算，使旧 Session 可冷恢复。
     Provider 不复制产品工具、不启动通用 MCP 注册中心，也不把 Team operator 权限用于 Single。
 
 ## 接口契约
@@ -253,7 +255,8 @@ session/status、pending permission/question 及最后完成消息；活动/待�
 由宿主保持只读历史，不能静默创建新会话。原生 data/state 在 scope 内跨随机 service generation 保留；
 HOME/config/cache/tmp、来源快照、launch 和日志仍逐 generation 隔离。
 
-未适配的 Hook/MCP、Skills、steer/pause 命令明确拒绝，不忽略输入。不自动批准原生交互，也不把普通
+未适配的 Hook、Skills、steer/pause 命令明确拒绝，不忽略输入。MCP 仅开放宿主管理的认证 loopback HTTP；
+stdio/in-process、非 loopback、匿名/额外 header、隐式 OAuth 均在服务启动前拒绝。不自动批准原生交互，也不把普通
 策略解释成 full-access。
 流与 HTTP 响应有上限；EOF、裸 idle、204 均不是成功。成功要求匹配本轮 user messageID 的
 assistant 完成消息、原生 stop 原因、后续 idle 和权威消息回读一致。异常/超时/断流后停止
