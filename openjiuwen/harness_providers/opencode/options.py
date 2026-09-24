@@ -3,60 +3,136 @@
 
 import json
 import re
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from openjiuwen.harness_protocol import HostCapability, McpTransport
 
 from .errors import OpenCodeError
 
+_PRODUCT_MCP_SERVER_NAME = "jiuwenswarm_product_tools"
 
-def _native_mcp_config(mcp_servers):
-    result = {}
-    for server in mcp_servers:
-        if server.transport is not McpTransport.HTTP or not server.url:
-            raise OpenCodeError("unsupported_mcp_transport", category="process_start_failed")
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", server.name) or server.name in result:
-            raise OpenCodeError("invalid_mcp_server_name", category="process_start_failed")
-        url = urlsplit(server.url)
-        try:
-            port = url.port
-        except ValueError:
-            raise OpenCodeError(
-                "unmanaged_mcp_endpoint",
-                category="process_start_failed",
-            ) from None
-        if (
-            url.scheme != "http"
-            or url.hostname != "127.0.0.1"
-            or port is None
-            or url.username
-            or url.password
-            or url.query
-            or url.fragment
-        ):
-            raise OpenCodeError("unmanaged_mcp_endpoint", category="process_start_failed")
-        headers = dict(server.headers)
-        authorization = headers.get("Authorization")
-        if (
-            set(headers) != {"Authorization"}
-            or not isinstance(authorization, str)
-            or not authorization.startswith("Bearer ")
-            or len(authorization) <= len("Bearer ")
-        ):
-            raise OpenCodeError("invalid_mcp_authentication", category="process_start_failed")
-        result[server.name] = {
-            "type": "remote",
-            "url": server.url,
-            "headers": headers,
-            "oauth": False,
+
+def _literal(value, *, reason, allow_empty=False):
+    if (
+        not isinstance(value, str)
+        or not allow_empty
+        and not value
+        or "{env:" in value
+        or "{file:" in value
+        or "\x00" in value
+    ):
+        raise OpenCodeError(reason, category="process_start_failed")
+    return value
+
+
+def _product_mcp_config(server):
+    if server.transport is not McpTransport.HTTP or not server.url:
+        raise OpenCodeError("unsupported_product_mcp_transport", category="process_start_failed")
+    url = urlsplit(server.url)
+    try:
+        port = url.port
+    except ValueError:
+        raise OpenCodeError("unmanaged_mcp_endpoint", category="process_start_failed") from None
+    if (
+        url.scheme != "http"
+        or url.hostname != "127.0.0.1"
+        or port is None
+        or url.username
+        or url.password
+        or url.query
+        or url.fragment
+    ):
+        raise OpenCodeError("unmanaged_mcp_endpoint", category="process_start_failed")
+    headers = dict(server.headers)
+    authorization = headers.get("Authorization")
+    if (
+        set(headers) != {"Authorization"}
+        or not isinstance(authorization, str)
+        or not authorization.startswith("Bearer ")
+        or len(authorization) <= len("Bearer ")
+    ):
+        raise OpenCodeError("invalid_mcp_authentication", category="process_start_failed")
+    return {
+        "type": "remote",
+        "url": server.url,
+        "headers": headers,
+        "oauth": False,
+    }
+
+
+def _host_mcp_config(server):
+    if server.transport is McpTransport.STDIO:
+        command = [
+            _literal(item, reason="invalid_mcp_command", allow_empty=index > 0)
+            for index, item in enumerate(server.command)
+        ]
+        environment = {
+            _literal(key, reason="invalid_mcp_environment"): _literal(
+                value, reason="invalid_mcp_environment", allow_empty=True
+            )
+            for key, value in server.env.items()
         }
+        return {
+            "type": "local",
+            "command": command,
+            **({"environment": environment} if environment else {}),
+        }
+    if server.transport is not McpTransport.HTTP or not server.url:
+        raise OpenCodeError("unsupported_mcp_transport", category="process_start_failed")
+    raw_url = _literal(server.url, reason="invalid_mcp_endpoint")
+    url = urlsplit(raw_url)
+    try:
+        port = url.port
+    except ValueError:
+        raise OpenCodeError("invalid_mcp_endpoint", category="process_start_failed") from None
+    if (
+        url.scheme not in {"http", "https"}
+        or not url.hostname
+        or url.username
+        or url.password
+        or url.fragment
+        or (url.scheme == "http" and url.hostname not in {"127.0.0.1", "localhost", "::1"})
+        or port is not None
+        and not 0 < port <= 65535
+    ):
+        raise OpenCodeError("invalid_mcp_endpoint", category="process_start_failed")
+    headers = {
+        _literal(key, reason="invalid_mcp_headers"): _literal(
+            value, reason="invalid_mcp_headers", allow_empty=True
+        )
+        for key, value in server.headers.items()
+    }
+    return {
+        "type": "remote",
+        "url": raw_url,
+        **({"headers": headers} if headers else {}),
+        "oauth": False,
+    }
+
+
+def _native_mcp_config(mcp_servers, *, include_product=True):
+    result = {}
+    names = set()
+    for server in mcp_servers:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", server.name) or server.name in names:
+            raise OpenCodeError("invalid_mcp_server_name", category="process_start_failed")
+        names.add(server.name)
+        if server.name == _PRODUCT_MCP_SERVER_NAME:
+            if include_product:
+                result[server.name] = _product_mcp_config(server)
+            continue
+        result[server.name] = _host_mcp_config(server)
     return result
 
 
-def native_config(config, host_capabilities=frozenset(), mcp_servers=()):
+def native_config(config, host_capabilities=frozenset(), mcp_servers=(), *, skill_path: Path | None = None,
+                  include_product_mcp=True):
     model = config.model
     if model is None:
         raise OpenCodeError("explicit_model_required", category="process_start_failed")
+    if config.skills and skill_path is None:
+        raise OpenCodeError("explicit_skill_path_required", category="process_start_failed")
     return {
         "autoupdate": False,
         "share": "disabled",
@@ -83,7 +159,12 @@ def native_config(config, host_capabilities=frozenset(), mcp_servers=()):
         "lsp": False,
         "formatter": False,
         "agent": {"title": {"disable": True}},
-        "mcp": _native_mcp_config(mcp_servers),
+        "mcp": _native_mcp_config(mcp_servers, include_product=include_product_mcp),
+        **(
+            {"skills": {"paths": [str(skill_path)], "urls": []}}
+            if config.skills and skill_path is not None
+            else {}
+        ),
     }
 
 
@@ -124,5 +205,7 @@ def validate_readback(actual, expected):
     normalized = {**expected, "agent": {"title": {"disable": True, "options": {}, "permission": {}}}}
     if not isinstance(actual, dict) or any(actual.get(key) != value for key, value in normalized.items()):
         raise OpenCodeError("effective_config_mismatch", category="process_start_failed")
-    if any(actual.get(key) for key in ("plugin", "instructions", "command", "skills")):
+    if actual.get("skills") != expected.get("skills"):
+        raise OpenCodeError("effective_skill_config_mismatch", category="process_start_failed")
+    if any(actual.get(key) for key in ("plugin", "instructions", "command")):
         raise OpenCodeError("unadmitted_effective_source", category="process_start_failed")

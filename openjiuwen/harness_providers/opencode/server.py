@@ -52,14 +52,16 @@ def lease(path):
 
 
 class ManagedServer:
-    def __init__(self, config, context):
+    def __init__(self, config, context, *, skill_path=None):
         self.config, self.context = config, context
+        self.skill_path = skill_path
         self.lock = self.process = self.log = self.owner = self.scope = None
         self._stop_lock = asyncio.Lock()
         self.native_config = native_config(
             config,
             context.host_capabilities,
             context.mcp_servers,
+            skill_path=skill_path,
         )
 
     async def control(self, *args):
@@ -178,6 +180,9 @@ class ManagedServer:
         stable_native_config = native_config(
             self.config,
             self.context.host_capabilities,
+            self.context.mcp_servers,
+            skill_path=self.skill_path,
+            include_product_mcp=False,
         )
         fingerprint = hashlib.sha256(
             json.dumps(

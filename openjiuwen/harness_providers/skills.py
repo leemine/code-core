@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -117,8 +119,48 @@ def _matches(scan: Path, name: str) -> list[Path]:
     return matches
 
 
-def install_skills(sources: tuple[SkillSource, ...], *, provider: str,
-                   cwd: str | None, conflict: str = "skip") -> tuple[Path, ...]:
+def isolated_skill_scan_directory(
+    sources: tuple[SkillSource, ...],
+    *,
+    provider: str,
+    cwd: str | None,
+    conflict: str,
+) -> Path:
+    """Return a project-contained, configuration-specific discovery root.
+
+    Providers that can take an explicit skill search path use this instead of
+    a native ambient discovery directory.  Different source selections cannot
+    become visible to each other, and omitting ``skills`` from a later session
+    really disables the copied bundles.
+    """
+
+    if conflict not in {"skip", "replace"}:
+        raise ValueError("skill_conflict must be skip or replace")
+    project = Path(cwd or os.getcwd()).expanduser().resolve(strict=True)
+    material = {
+        "provider": provider,
+        "conflict": conflict,
+        "sources": [
+            {
+                "dir": str(Path(source.dir).expanduser().resolve(strict=True)),
+                "mode": source.mode,
+                "enabled_skills": source.enabled_skills,
+            }
+            for source in sources
+        ],
+    }
+    digest = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()[:32]
+    return project / ".openjiuwen" / "harness-skills" / provider / digest
+
+
+def install_skills(
+    sources: tuple[SkillSource, ...],
+    *,
+    provider: str,
+    cwd: str | None,
+    conflict: str = "skip",
+    scan_dir: Path | None = None,
+) -> tuple[Path, ...]:
     """Copy complete bundles before runtime startup, preserving project skills.
 
     Replacement is staged outside the discovery directory and rolls back a
@@ -130,7 +172,8 @@ def install_skills(sources: tuple[SkillSource, ...], *, provider: str,
     if conflict not in {"skip", "replace"}:
         raise ValueError("skill_conflict must be skip or replace")
     project = Path(cwd or os.getcwd()).expanduser().resolve(strict=True)
-    scan = project / _SCAN_DIRS[provider]
+    scan = scan_dir or project / _SCAN_DIRS[provider]
+    scan = scan.expanduser().resolve()
     planned = []
     for source in sources:
         root = Path(source.dir).expanduser().resolve(strict=True)
@@ -146,7 +189,7 @@ def install_skills(sources: tuple[SkillSource, ...], *, provider: str,
     installed = []
     # Multiple members can start on the same project within this host process.
     with _COPY_LOCK:
-        if not scan.resolve().is_relative_to(project):
+        if not scan.is_relative_to(project):
             raise ValueError("skill discovery directory escapes the project")
         scan.mkdir(parents=True, exist_ok=True)
         for name, source in planned:

@@ -29,6 +29,7 @@ from openjiuwen.harness_protocol import (
 )
 from openjiuwen.harness_providers.base import PendingTurn, ProviderStartupError, SerializedTurnHarness, TurnTiming
 from openjiuwen.harness_providers.inputs import harness_input_text
+from openjiuwen.harness_providers.skills import install_skills, isolated_skill_scan_directory
 
 from .config import CLI_VERSION, OpenCodeHarnessConfig
 from .errors import OpenCodeError
@@ -90,7 +91,23 @@ class OpenCodeHarness(SerializedTurnHarness):
             from .transport import Transport
 
             async with asyncio.timeout(self._config.startup_timeout_s):
-                self._server = ManagedServer(self._config, context)
+                skill_path = None
+                if self._config.skills:
+                    skill_path = isolated_skill_scan_directory(
+                        self._config.skills,
+                        provider="opencode",
+                        cwd=context.cwd,
+                        conflict=self._config.skill_conflict,
+                    )
+                    await asyncio.to_thread(
+                        install_skills,
+                        self._config.skills,
+                        provider="opencode",
+                        cwd=context.cwd,
+                        conflict=self._config.skill_conflict,
+                        scan_dir=skill_path,
+                    )
+                self._server = ManagedServer(self._config, context, skill_path=skill_path)
                 await self._server.start()
                 self._transport = Transport(self._server, self._config)
                 while True:

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from openjiuwen.harness_providers.skills import SkillSource, normalize_skills
+
 CLI_VERSION = "1.18.18"
 CLI_SHA256 = "bb71f45b564f9234a97f54d6252a4a41d2f4388ae4b078918f691824cc3b3e54"
 
@@ -54,6 +56,8 @@ class OpenCodeHarnessConfig:
     runtime_root: str | None = None
     model: OpenCodeModelConfig | None = None
     full_access: bool = False
+    skills: tuple[SkillSource, ...] = ()
+    skill_conflict: str = "skip"
     startup_timeout_s: float = 30
     request_timeout_s: float = 15
     turn_timeout_s: float = 180
@@ -66,6 +70,7 @@ class OpenCodeHarnessConfig:
 
     def __post_init__(self):
         object.__setattr__(self, "model", OpenCodeModelConfig.from_mapping(self.model))
+        object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
         for name in ("cli_path", "runtime_root"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not Path(value).is_absolute()):
