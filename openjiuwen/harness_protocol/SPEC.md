@@ -218,3 +218,22 @@ Harness 在获得或改变可恢复 provider 状态后，通过 `context.checkpo
 `AgentExecutionSpec` in construction.py is an immutable, secret-repr-safe construction snapshot (provider_id, config_revision, requested_mode, provider_config). `harness.engine.resolve_execution_spec` selects explicit > project > default without merging vendor configuration or silently choosing Native. `ExecutionBinding.create` records authorized subject/session/absolute workspace and a content fingerprint. `create_harness_engine` validates that fingerprint then constructs an unstarted existing HarnessProtocol. Optional SDK imports and startup remain inside each provider.
 
 The existing manifest factory delegates provider lookup to the same registry in harness_providers/construction.py; its API and Native assembly remain compatible. Explicit requested_mode is rejected at configuration compilation until mode adapters are implemented; it is never silently discarded. OpenCode registration, runtime routing, mode control, new events and durable bindings are not delivered by this construction slice. The host owns authorization, lifecycle, persistence and event consumption.
+
+## Optional construction authorization (2026-09-24)
+
+`ExecutionAuthorization` is an immutable, strictly boolean host decision.
+`AgentExecutionSpec.authorization` defaults to `None` for legacy behavior.
+`HarnessAuthorizationProvider` is an optional protocol with pure
+`compile_authorization(config, authorization) -> JsonObject` and
+`legacy_authorization(config) -> ExecutionAuthorization` operations. The core
+construction path rejects explicit authorization on unsupported providers;
+it does not silently ignore or infer permission from model configuration.
+Vendor translation and legacy decoding belong to the provider. Runtime
+capability, interaction and effective-policy checks remain mandatory.
+
+An absent authorization retains the existing four-component configuration
+fingerprint. An explicit decision adds the versioned `authorization_v1`
+component, so changing it invalidates Binding identity, including transitions
+between `None` and explicit `False`. Hosts must not rewrite old identities or
+skip scope/fingerprint checks during cold restoration. This additive optional
+contract does not change event, interaction or checkpoint wire formats.

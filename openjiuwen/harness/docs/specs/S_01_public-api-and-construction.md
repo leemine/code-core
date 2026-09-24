@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/__init__.py`、`openjiuwen/harness/factory.py`、`openjiuwen/harness/schema/config.py`、`openjiuwen/harness/extension_binder.py` |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-09-24 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -35,9 +35,10 @@
 
 公开表面：
 
-1. `openjiuwen/harness/__init__.py` 的 `__all__` 是公开 API 的**完整集合**（8 个符号）：
+1. `openjiuwen/harness/__init__.py` 的 `__all__` 是公开 API 的**完整集合**（12 个符号）：
    `DeepAgent`、`TaskLoopEventHandler`、`TaskLoopEventExecutor`、`DeepAgentConfig`、
-   `AudioModelConfig`、`VisionModelConfig`、`create_deep_agent`、`Workspace`。
+   `AudioModelConfig`、`VisionModelConfig`、`create_deep_agent`、`Workspace`，以及
+   `ExecutionBinding`、`HarnessEngine`、`create_harness_engine`、`resolve_execution_spec`。
 2. 模块顶层用 `__getattr__` **懒加载**公开符号；从 `from openjiuwen.harness import X` 拿到的
    是重模块导入，但首见开销被推迟到第一次访问。任何不在 `__all__` 里的导入路径都是内部实现，
    不承担兼容性保证。
@@ -75,7 +76,10 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.schema.config import AudioModelConfig, DeepAgentConfig, VisionModelConfig
 from openjiuwen.harness.workspace.workspace import Workspace
 
-__all__ = ["DeepAgent", "TaskLoopEventHandler", "TaskLoopEventExecutor",
+from openjiuwen.harness.engine import ExecutionBinding, HarnessEngine, create_harness_engine, resolve_execution_spec
+
+__all__ = ["ExecutionBinding", "HarnessEngine", "create_harness_engine", "resolve_execution_spec",
+           "DeepAgent", "TaskLoopEventHandler", "TaskLoopEventExecutor",
            "DeepAgentConfig", "AudioModelConfig", "VisionModelConfig",
            "create_deep_agent", "Workspace"]
 ```
@@ -187,3 +191,9 @@ def create_deep_agent(
   异步子代理运行时见 `S_10_subagent-runtime`。
 - 顶层懒加载 `__getattr__` 模式与 `task_loop/__init__.py` / `schema/__init__.py` 的子包懒加载
   同构，但各自独立维护，不共享实现。
+
+## Execution Binding 授权指纹
+
+engine 只校验/绑定/委托；公共授权值对象和 Provider 可选编译契约见 harness_protocol。
+未声明 authorization 的 spec 保留原四元素 JSON 摘要，显式授权追加版本化授权载荷。
+权限、revision、原配置、主体或路径不匹配时不能借助兼容逻辑放宽验证。

@@ -902,7 +902,7 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 
 ## 15. 内置实现、IO adapter 与 manifest 工厂
 
-`openjiuwen.harness_providers` 提供五个内置实现与两层宿主胶水：
+`openjiuwen.harness_providers` 提供六个内置实现与两层宿主胶水：
 
 | provider 名 | 实现 | card 名 | capabilities |
 |---|---|---|---|
@@ -911,6 +911,7 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 | `claudecode` | `claudecode.ClaudeCodeHarness`（claude-agent-sdk） | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS |
 | `codex` | `codex.CodexHarness`（openai-codex） | `codex` | 同上 |
 | `dsh` | `dsh.DshHarness`（deepseek-harness） | `deepseek-harness` | MCP_TOOLS |
+| `opencode` | `opencode.OpenCodeHarness`（固定 CLI / HTTP SSE） | `opencode` | NATIVE_TOOLS（OC1） |
 
 - `harness_providers.io_adapter.HarnessIOAdapter`：把任意 `HarnessProtocol` 投影成 DeepAgent 风格
   输入输出——输入接受用户文本与 `InteractiveInput`（回答 ask-user 中断），输出为
@@ -919,11 +920,13 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
   宿主 `send(InteractiveInput)` 才应答 provider。
 - `harness_providers.create_harness(manifest, provider=..., config=..., language=...)`：从 AgentTemplate
   manifest（`AgentTemplateSpec` 或 `manifest.json` 包路径）建未启动 harness；`native` / `native_v2` 加载整份
-  template；三方 provider 接收模型端点和 portable skills，manifest 里的 `tools` / `rails` /
+  template；三方 provider 接收模型端点；Claude/Codex/DSH 接收 portable skills，OpenCode OC1 明确拒绝 Skills/MCP，manifest 里的 `tools` / `rails` /
   `subagents` 仍会被拒绝。`build_harness_context(...)` 把 persona prompt sections 渲染成 `system_prompt`、manifest MCP
   变成 `mcp_servers`。
 - team 侧 `ExternalHarnessMemberRuntime` 组合 IO adapter；`build_cli_runtime` 的 claude / codex 分支
   已切到这两个 provider（`ExternalCliAgentSpec` 字段不变）。
+
+OpenCode OC1 的启动条件、范围和用法见 [OpenCode Provider](opencode_provider.md)。
 
 仍未完成：Python entry point provider discovery；把 `dsh` / `native` 接入 `ExternalCliAgentSpec`
 声明式 spawn。端到端契约测试见 `tests/system_tests/harness_providers/`（对本机 CLI 运行，缺 CLI
@@ -957,3 +960,29 @@ harness = create_harness(
 `AgentExecutionSpec` in construction.py is an immutable, secret-repr-safe construction snapshot (provider_id, config_revision, requested_mode, provider_config). `harness.engine.resolve_execution_spec` selects explicit > project > default without merging vendor configuration or silently choosing Native. `ExecutionBinding.create` records authorized subject/session/absolute workspace and a content fingerprint. `create_harness_engine` validates that fingerprint then constructs an unstarted existing HarnessProtocol. Optional SDK imports and startup remain inside each provider.
 
 The existing manifest factory delegates provider lookup to the same registry in harness_providers/construction.py; its API and Native assembly remain compatible. Explicit requested_mode is rejected at configuration compilation until mode adapters are implemented; it is never silently discarded. OpenCode registration, runtime routing, mode control, new events and durable bindings are not delivered by this construction slice. The host owns authorization, lifecycle, persistence and event consumption.
+
+## Explicit host authorization
+
+```python
+from openjiuwen.harness_protocol import AgentExecutionSpec, ExecutionAuthorization
+
+spec = AgentExecutionSpec(
+    "codex", "authorized-v1",
+    authorization=ExecutionAuthorization(full_access=False),
+)
+```
+
+Supply this decision from trusted host policy, never from model/chat input.
+The engine compiles it through the provider's optional
+`HarnessAuthorizationProvider` port before construction. Hosts can use
+`openjiuwen.harness_providers.construction.execution_authorization(spec)` for
+the corresponding product-tool policy without inspecting vendor JSON.
+Explicit unsupported providers fail; only Codex currently adapts this contract.
+
+Leave old specs at `authorization=None`: their JSON and Binding digests stay
+unchanged. The narrow `apply_legacy_full_access` helper preserves the historical
+Codex Web projection for hosts migrating that existing facade. It is not a
+new-provider grant mechanism. Adding explicit authorization to an old profile
+changes the digest; create a new profile/session instead of bypassing restore
+checks. Normal authorization still relies on runtime permission enforcement
+and does not itself establish filesystem/process isolation.

@@ -19,11 +19,12 @@ harness_providers/
 ├── native/         # DeepAgentHarness over the in-process DeepAgent interaction loop (+ NativeHarnessProvider)
 ├── claudecode/     # ClaudeCodeHarness over claude-agent-sdk (config / options / mapping / failure_classifier)
 ├── codex/          # CodexHarness over openai-codex (config / options / mapping / failure_classifier)
-└── dsh/            # DshHarness over deepseek-harness (moved from agent_teams.external.dsh; see dsh/AGENTS.md)
+├── dsh/            # DshHarness over deepseek-harness (moved from agent_teams.external.dsh; see dsh/AGENTS.md)
+└── opencode/       # fixed HTTP/SSE CLI, interactions, checkpoints and owned systemd cgroup (OC1/OC2)
 ```
 
-Provider names accepted by the factory: `native`, `native_v2`, `claudecode`, `codex`, `dsh`.
-The provider card names are `deepagent`, `native_v2`, `claude-code`, `codex`, `deepseek-harness`.
+Provider names accepted by the factory: `native`, `native_v2`, `claudecode`, `codex`, `dsh`, `opencode`.
+The provider card names are `deepagent`, `native_v2`, `claude-code`, `codex`, `deepseek-harness`, `opencode`.
 `native_v2` is resolved lazily to `agent_teams.harness.protocol_adapter.NativeV2HarnessProvider`;
 its implementation stays in the team package and reuses NativeHarness manifest construction.
 
@@ -44,7 +45,8 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    these per provider.
 2. **Capabilities are truthful.** A card declares only what the SDK can do
    end to end; unsupported commands raise `UnsupportedHarnessCapabilityError`.
-   DSH keeps an empty capability set; Claude Code / Codex declare STEER,
+   DSH declares MCP_TOOLS; OpenCode declares GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT and NATIVE_TOOLS;
+   Claude Code / Codex declare STEER,
    GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS; the DeepAgent
    harness declares STEER and FORCE_ABORT.
 3. **Vendor SDKs stay optional.** Config / provider / package imports never
@@ -105,6 +107,17 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    C1 components, native loader inventory, MCP startup and namespace conflicts.
    It never installs or updates plugins. Hooks/commands/agents/apps remain outside
    C1, and plugin controls cannot be supplied through arbitrary config overrides.
+
+11. **OpenCode owns one service per scope.** Runtime admission requires non-root Linux,
+    user systemd/cgroup v2, a private explicit runtime root and working directory, and the pinned
+    binary digest. Never attach to user services, retry ambiguous inputs, approve unsupported
+    interactions, or release a lease before exact owned exit confirmation. Persistent owner
+    descriptors and the service-side generation lease cover host hard crashes. Text/tool/usage
+    mapping shares the base lifecycle. OC2 routes approvals/questions through the base interaction ledger,
+    publishes an unsafe checkpoint before prompt submission and only marks a session resumable after an
+    authoritative idle terminal. Native replies are scoped to the locally claimed request; disconnects never
+    replay unknown input. Stable native data is scope-private across managed service generations, while sealed
+    configuration and logs remain generation-specific. OC3 product wiring is separate.
 
 ## Change requirements
 

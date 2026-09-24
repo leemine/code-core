@@ -22,7 +22,7 @@ settings, and `Makefile` defines the common lint/test entry points.
 - `openjiuwen/harness_protocol/`: provider-neutral SPI (contracts and frozen
   value objects only) for driving third-party agent harnesses.
 - `openjiuwen/harness_providers/`: built-in implementations of that SPI
-  (`native` DeepAgent, `claudecode`, `codex`, `dsh`), the DeepAgent-style
+  (`native` DeepAgent, `native_v2`, `claudecode`, `codex`, `dsh`, `opencode`), the DeepAgent-style
   `HarnessIOAdapter`, and the manifest-driven `create_harness` factory.
 - `openjiuwen/extensions/`: optional integrations such as storage,
   checkpointers, sandbox providers, and vendor-specific adapters.

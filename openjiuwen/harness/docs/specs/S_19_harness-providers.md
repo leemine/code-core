@@ -5,13 +5,13 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/`） |
-| 最近一次修订日期 | 2026-09-21 |
-| 关联 feature | F_03_harness-providers-and-manifest-factory.md |
+| 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
+| 最近一次修订日期 | 2026-09-24 |
+| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md |
 
 ## 范围 / 边界
 
-本规约定义 `openjiuwen.harness_protocol` 的内置实现包：共享的串行 Turn 骨架、五个 provider 的能力
+本规约定义 `openjiuwen.harness_protocol` 的内置实现包：共享的串行 Turn 骨架、六个 provider 的能力
 声明、DeepAgent 风格 IO adapter，以及从 AgentTemplate manifest 创建 harness 的工厂。协议契约本身
 以 `openjiuwen/harness_protocol/SPEC.md` 为准；团队成员接线见 agent_teams `S_27`。
 
@@ -30,6 +30,7 @@
    | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
    | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
    | `dsh` | `deepseek-harness` | MCP_TOOLS | MCP_SERVERS |
+   | `opencode` | `opencode` | GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, NATIVE_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK |
 
    未声明的命令抛 `UnsupportedHarnessCapabilityError`；`_validate_context` 在 `start` 里 fail-fast。
 3. **SDK 惰性加载**：config / provider / 包 import 不导入 vendor SDK；缺 SDK 在 `start` 抛
@@ -41,9 +42,11 @@
    provider-private 构造参数（`CodexHarness(notification_observer)`、
    `ClaudeCodeHarness(transport_factory)`）流向宿主。
 6. **用户输入是 interaction**：Claude `AskUserQuestion`、Codex `request_user_input`
-   （App Server 请求 `item/tool/requestUserInput`）与 DeepAgent `ask_user` 中断映射为
+   （App Server 请求 `item/tool/requestUserInput`）、OpenCode `question.asked` 与 DeepAgent
+   `ask_user` 中断映射为
    `UserInputRequest`，Turn 在应答前保持 RUNNING；宿主未提供 handler 时 Claude 拒绝该工具、Codex 回
-   空 `answers`、DeepAgent 以 `stop_reason="interrupt"` 结束 Turn 并保留 `pending_interrupt_ids`。
+   空 `answers`、OpenCode 调原生 reject、DeepAgent 以 `stop_reason="interrupt"` 结束 Turn 并保留
+   `pending_interrupt_ids`。
    Codex 的该工具是 CLI 实验特性，宿主声明 USER_INPUT 时 harness 自动追加
    `features.default_mode_request_user_input=true`；多题请求渲染为一条 prompt，首题选项作 `choices`，
    原始 `questions` 进 `provider_data`，宿主答案按题 id / 题面 / 位置归一化回
@@ -67,7 +70,7 @@
    原生端点并让当前 Turn 按原 `auth_required` 失败，不发布 `auth_fallback_activated`。
 9. **manifest 是 DeepAgent-first**：`create_harness` 对 `native` 传整份 template
    （`NativeHarnessProvider.create({"deep_agent", "agent_template", "session_id", "language",
-   "event_buffer_capacity"})`）；对 `claudecode` / `codex` / `dsh` 只把 `model` 端点映射进 provider
+   "event_buffer_capacity"})`）；对 `claudecode` / `codex` / `dsh` / `opencode` 只把 `model` 端点映射进 provider
    配置（显式 `config` 优先），manifest 的 `tools` / `rails` / `subagents` 非空时
    `ValueError`。`build_harness_context` 对三方 provider 渲染 prompt sections 与 MCP，对 `native`
    只放 `extra_system_prompt`。
@@ -143,7 +146,7 @@ def build_harness_context(manifest, *, provider, host_session_id, agent_id=None,
                           host_capabilities=frozenset(), resume_policy=ResumePolicy.NEW,
                           checkpoint=None, checkpoint_sink=None, interactions=None, metadata=None) -> HarnessContext
 def resolve_provider(provider: str) -> HarnessProvider
-PROVIDER_NAMES == ("native", "native_v2", "claudecode", "codex", "dsh")
+PROVIDER_NAMES == ("native", "native_v2", "claudecode", "codex", "dsh", "opencode")
 
 class HarnessIOAdapter:
     def __init__(self, harness, *, event_observer=None, auto_approve_tools=True,
@@ -171,7 +174,7 @@ provider 配置模型：`ClaudeCodeHarnessConfig`（`cwd` / `add_dirs` / `env` /
 | 项 | 说明 |
 |---|---|
 | `PendingTurn` | `content` / `message_id` / `turn_id` / `accepted_mode` / `abort_requested` / `abort_mode` / `stop_requested` |
-| checkpoint data | claudecode `{session_id, resumed}`；codex `{thread_id, resumed[, fallback]}`；dsh / native 不发布 |
+| checkpoint data | claudecode `{session_id, resumed}`；codex `{thread_id, resumed[, fallback]}`；opencode `{session_id, resumable, state, resumed, turn_id}`；dsh / native 不发布 |
 | `ProviderEvent` | claudecode `system/<subtype>`、`auth_fallback_activated`；codex 未识别 notification、`auth_fallback_activated`；native 未识别 chunk 类型 |
 | `DiagnosticEvent` | codex `data.kind == "retrying"`（WARNING）与 pending error（ERROR）；claudecode assistant error（ERROR） |
 
@@ -215,3 +218,44 @@ cwd/.dsh/skills（dsh）。cwd 优先取 HarnessContext，再取 provider config
 Claude 指定 portable skills 时显式启用 SDK skills=all，并保留 user/project/local settings 来源；
 DSH sdk-minimal 自动挂载原生 skill/skill-filesystem/tool-skill 插件。SSH/custom Claude transport
 不自动上传本地技能，显式报错而非复制到错误主机。见 team F_101。
+
+## 公共授权构建
+
+`AgentExecutionSpec.authorization` 可选；`None` 保留旧四项配置指纹与厂商策略。显式
+`ExecutionAuthorization(full_access: bool)` 是可信宿主快照，加入 Binding 指纹。
+可选 `HarnessAuthorizationProvider` 提供编译与旧授权读取；未实现者拒绝显式授权。
+Codex 编译对应 bypass/MCP 参数，Swarm 不再解释这些字段；原运行时权限回读仍执行。
+旧 Web full_access 的 Codex profile 由 core 兼容投影保留完全相同的旧 JSON，
+不自动给旧 profile 注入新字段，也不修改已有 Binding/恢复归档校验。
+
+## OpenCode OC1/OC2 构建、交互与受管服务边界
+
+OpenCode 首批固定 1.18.18 的 `/session` + `/event` HTTP/SSE 代际，复用
+SerializedTurnHarness 的输入队列、事件信封与唯一终态。配置与工厂导入不启动进程；
+运行要求受信非 root Linux、用户级 systemd/cgroup v2、明确授权的私有 runtime_root 和 cwd。
+每个宿主/agent/workspace scope 独占锁与随机 service；资源描述先于启动落盘，重试先核验并
+回收该描述所属的孤儿 unit。service 内 wrapper 持有原生启动锁，禁止旧排队启动跨 generation。
+不能确认退出则保留所有权和描述，禁止新建/attach；数据不自动删除。
+
+新 Provider 配置仅接受模型、显式 full_access、CLI/私有运行根与有界传输参数；不接收任意
+原生 JSON、环境、插件或可执行覆盖。公共授权在 Provider 编译到私有 full_access；旧工厂
+未声明授权时保留默认普通策略，模型配置不能扩权。HOME/config 封存、managed/auth 来源拒绝、
+固定二进制与有效配置回读在启动完成前执行，每轮前复检。cgroup 用于资源回收，非 OS 沙箱。
+
+OpenCode 支持基础文本/原生工具观察、宿主审批/提问、graceful abort 及完成态会话 checkpoint/续接。
+审批与提问经基类 awaited interaction，Provider 在回复原生 API 前核对 session、当前根消息、call 和
+request ID；重复/迟到/跨 session 请求不能再次执行。宿主未声明对应能力时失败关闭。审批拒绝须有
+关联 tool error、completed/tool-calls 及 idle 后才以失败终态收口；不能伪造成正常 stop。
+
+每轮提交前发布 `resumable=false/state=turn_active`，只有原生 stop、已确认拒绝或 MessageAbortedError
+与后续 idle 关联后才发布 `resumable=true/state=idle`。恢复固定同 scope 的原生 session ID，并核对
+session/status、pending permission/question 及最后完成消息；活动/待答/结果未知 checkpoint 明确拒绝，
+由宿主保持只读历史，不能静默创建新会话。原生 data/state 在 scope 内跨随机 service generation 保留；
+HOME/config/cache/tmp、来源快照、launch 和日志仍逐 generation 隔离。
+
+未适配的 Hook/MCP、Skills、steer/pause 命令明确拒绝，不忽略输入。不自动批准原生交互，也不把普通
+策略解释成 full-access。
+流与 HTTP 响应有上限；EOF、裸 idle、204 均不是成功。成功要求匹配本轮 user messageID 的
+assistant 完成消息、原生 stop 原因、后续 idle 和权威消息回读一致。异常/超时/断流后停止
+受管服务、禁止未知副作用重试；SSE 断开会取消宿主待答并产生未知失败，不自动重连或重放。活动 Turn/
+待答的冷重建仍不支持，不复制第二套 Turn 状态机。
