@@ -4,6 +4,8 @@
 """Unit tests for Milvus graph store package __init__ and registration."""
 
 from openjiuwen.core.foundation.store.graph.base import GraphStoreFactory
+from openjiuwen.core.foundation.store.graph.milvus import register_milvus_support
+from openjiuwen.core.foundation.store.graph.milvus.milvus_support import MilvusGraphStore
 from openjiuwen.core.foundation.store.graph.result_ranking import RANKER_CLS
 
 
@@ -14,8 +16,6 @@ class TestRegisterMilvusSupport:
     def test_milvus_backend_registered_in_factory():
         """After import, 'milvus' backend is registered in GraphStoreFactory."""
         assert "milvus" in GraphStoreFactory.class_map
-        from openjiuwen.core.foundation.store.graph.milvus.milvus_support import MilvusGraphStore
-
         assert GraphStoreFactory.class_map["milvus"] is MilvusGraphStore
 
     @staticmethod
@@ -30,11 +30,6 @@ class TestRegisterMilvusSupport:
     @staticmethod
     def test_register_is_idempotent():
         """Calling register_milvus_support again does not double-register."""
-        from openjiuwen.core.foundation.store.graph.milvus import (
-            register_milvus_support,
-        )
-        from openjiuwen.core.foundation.store.graph.milvus.milvus_support import MilvusGraphStore
-
         register_milvus_support()
         assert GraphStoreFactory.class_map["milvus"] is MilvusGraphStore
         # Second call should be no-op (MILVUS_SUPPORT_REGISTERED is True)

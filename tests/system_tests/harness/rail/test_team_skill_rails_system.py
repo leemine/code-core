@@ -26,11 +26,11 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.extensions.observability import semconv
+from openjiuwen.harness.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillEvolutionRail
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
-from openjiuwen.harness.prompts.builder import SystemPromptBuilder
-from openjiuwen.harness.prompts.sections import SectionName
 
 
 @dataclass
@@ -108,8 +108,8 @@ def _record_tool_span(
             kind=SpanKind.INTERNAL,
             attributes={
                 semconv.GEN_AI_TOOL_NAME: tool_name,
-                semconv.GEN_AI_TOOL_INPUT: json.dumps(tool_input),
-                semconv.GEN_AI_TOOL_OUTPUT: json.dumps(tool_output),
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps(tool_input),
+                semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps(tool_output),
             },
             status=Status(StatusCode.OK),
             start_time=span_id * 2,

@@ -17,42 +17,42 @@ from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.harness.schema.build_context import BuildContext
 from openjiuwen.harness.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
+from openjiuwen.harness.schema.state import DeepAgentState
 from openjiuwen.harness_protocol import (
     AbortMode,
     CheckpointReason,
     ContentBlock,
     DeliveryMode,
-    HarnessCheckpoint,
-    MessageRole,
-    ResumePolicy,
-    TurnMessage,
-    SendReceipt,
-    UnsupportedHarnessCapabilityError,
-    json_value_to_builtin,
     HarnessCapability,
     HarnessCard,
+    HarnessCheckpoint,
     HarnessContext,
     HarnessInput,
-    JsonObject,
     HarnessProtocolError,
     HarnessState,
     HarnessStateError,
     HostCapability,
+    JsonObject,
+    MessageRole,
     ProviderEvent,
+    ResumePolicy,
+    SendReceipt,
     TurnError,
     TurnEventKind,
     TurnLifecycleEvent,
+    TurnMessage,
+    UnsupportedHarnessCapabilityError,
+    json_value_to_builtin,
 )
 from openjiuwen.harness_providers.base import PendingTurn, SerializedTurnHarness, logger
-from openjiuwen.harness.schema.state import DeepAgentState
-from openjiuwen.harness_providers.jsonsafe import to_json_safe
 from openjiuwen.harness_providers.factory import load_manifest
 from openjiuwen.harness_providers.inputs import harness_input_text
+from openjiuwen.harness_providers.jsonsafe import to_json_safe
 from openjiuwen.harness_providers.native.harness import (
     DeepAgentHarness,
+    _append_context_prompt,
     _ObservationRail,
     _TurnState,
-    _append_context_prompt,
 )
 
 _CONTROL_CHUNK = "native_protocol.control"
@@ -231,7 +231,20 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
         if session is not None:
             await session.write_stream(OutputSchema(type=_CONTROL_CHUNK, index=0, payload=payload))
 
-    async def _run_round(self, agent: NativeHarness, turn: PendingTurn, state: _TurnState, query: Any) -> None:
+    async def _run_round(
+        self,
+        agent: NativeHarness,
+        turn: PendingTurn,
+        state: _TurnState,
+        query: Any,
+        *,
+        resuming: bool = False,
+    ) -> None:
+        # ``DeepAgentHarness`` distinguishes an initial dispatch from an
+        # interaction resume.  NativeHarness already derives that distinction
+        # from the structured ``InteractiveInput`` query, but the override must
+        # still accept the base hook's keyword to preserve substitutability.
+        _ = resuming
         self._dispatched.clear()
         self._current_output_state = state
         try:

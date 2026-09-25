@@ -17,14 +17,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
+
 import pytest
 import yaml
+
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.resources_manager.base import Ok
@@ -50,9 +53,11 @@ from openjiuwen.harness.schema.config import DeepAgentConfig
 from openjiuwen.harness.schema.deep_agent_spec import (
     BuiltinToolSpec,
     DeepAgentSpec,
-    RailSpec as ColdRailSpec,
     SysOperationSpec,
     WorkspaceSpec,
+)
+from openjiuwen.harness.schema.deep_agent_spec import (
+    RailSpec as ColdRailSpec,
 )
 from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -277,9 +282,32 @@ class _DeterministicToolCallModel:
             finish_reason="tool_calls",
         )
 
-    async def stream(self, *args: object, **kwargs: object) -> None:
-        _ = args, kwargs
-        raise AssertionError("deterministic fake model should not use stream()")
+    async def stream(
+        self,
+        messages: Any,
+        *,
+        tools: Any = None,
+        **kwargs: object,
+    ) -> AsyncIterator[AssistantMessageChunk]:
+        _ = kwargs
+        self.call_history.append(
+            {
+                "messages": list(messages) if isinstance(messages, list) else [messages],
+                "tools": list(tools or []),
+            }
+        )
+        yield AssistantMessageChunk(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="from_spec_static_tool_call",
+                    type="function",
+                    name=self.tool_name,
+                    arguments=json.dumps(self.tool_args),
+                )
+            ],
+            finish_reason="tool_calls",
+        )
 
     @property
     def call_count(self) -> int:
@@ -1734,6 +1762,13 @@ class TestExtensionLoadE2E:
             identity_marker=_E2E4_ROOT_IDENTITY_MARKER,
             with_subagent=False,
         )
+        manifest_path = pkg.package / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        # A leaf skill can now share an already-mounted parent directory.
+        # Mount the library root here to exercise the duplicate-root failure
+        # and the same late-stage rollback path this test is responsible for.
+        manifest["skills"][0]["dir"] = "skills"
+        _write_json(manifest_path, manifest)
         agent = await _create_initialized_agent(
             tmp_path,
             language="en",
@@ -1743,9 +1778,9 @@ class TestExtensionLoadE2E:
         )
         _clear_default_identity_section(agent)
 
-        # Pre-bind a skill at the exact directory the template also mounts, so
-        # `_bind_skill` raises "Skill already bound" only after tool/mcp/rail/prompt
-        # have already bound in this batch -- forcing all four to roll back.
+        # Pre-bind a leaf whose parent is the library root mounted by the
+        # template. `_bind_skill` then raises "Skill already bound" only after
+        # tool/mcp/rail/prompt have bound, forcing all four to roll back.
         await agent.load_plugin_ability(
             skills=[ResolvedSkill(directory=str(pkg.fixture.skill_root), mode="all")]
         )

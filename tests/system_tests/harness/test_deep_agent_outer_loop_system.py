@@ -19,10 +19,13 @@ import pytest
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.schema.config import (
+    DeepAgentConfig,
+    TaskLoopNoProgressGuardConfig,
+)
 from openjiuwen.harness.schema.task import (
-    TodoItem,
     TaskPlan,
+    TodoItem,
     TodoStatus,
 )
 
@@ -222,6 +225,12 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
             DeepAgentConfig(
                 enable_task_loop=True,
                 max_iterations=10,
+                # This case exercises follow-up FIFO semantics. Its short
+                # deterministic answers would otherwise intentionally trip
+                # the independent no-progress guard after three rounds.
+                task_loop_no_progress_guard=TaskLoopNoProgressGuardConfig(
+                    enabled=False,
+                ),
             )
         )
         fake_react = ControlledReactAgent(
@@ -254,7 +263,7 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
         )
         fake_react.release_call(1)
 
-        result = await asyncio.wait_for(
+        await asyncio.wait_for(
             invoke_task, timeout=10.0
         )
 
