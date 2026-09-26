@@ -32,7 +32,14 @@ from openjiuwen.harness_protocol import (
     TurnEventKind,
     UserInputResponse,
 )
-from openjiuwen.harness_providers.opencode import OpenCodeHarness, OpenCodeHarnessConfig, OpenCodeModelConfig
+from openjiuwen.harness_providers.base import ProviderStartupError
+from openjiuwen.harness_providers.opencode import (
+    OpenCodeHarness,
+    OpenCodeHarnessConfig,
+    OpenCodeModelConfig,
+    OpenCodeNativePluginConfig,
+    opencode_plugin_content_digest,
+)
 from openjiuwen.harness_providers.opencode.server import ManagedServer, write_private
 
 from ._contract import assert_turn_invariants, collect_turn, make_context, terminal_of, tool_items
@@ -195,6 +202,230 @@ async def test_text_followup_tool_usage_and_cleanup(runtime):
     await h.stop()
     assert (await server.properties(owner)).get("ActiveState") != "active"
     assert not (server.scope / "owner.json").exists()
+
+
+def _native_plugin(
+    source: Path,
+    *,
+    version="1.0.0",
+    hooks=("event", "tool.execute.before", "tool.execute.after"),
+    tools=(),
+):
+    return OpenCodeNativePluginConfig(
+        plugin_id="ocp-guard",
+        source_type="local",
+        source_locator=str(source),
+        version=version,
+        content_sha256=opencode_plugin_content_digest(source),
+        entrypoint="guard.js",
+        export_name="Guard",
+        required_hooks=hooks,
+        required_tools=tools,
+    )
+
+
+@pytest.mark.asyncio
+async def test_managed_native_plugin_hooks_tamper_gate_and_cleanup(runtime, tmp_path):
+    config, model, work, create = runtime
+    source = tmp_path / "ocp-guard"
+    source.mkdir()
+    entrypoint = source / "guard.js"
+    entrypoint.write_text(
+        "export const Guard = async () => ({\n"
+        "  event: async () => {},\n"
+        '  "tool.execute.before": async (_input, output) => {\n'
+        '    if (String(output.args?.command || "").includes("OC-P-MUTATE")) '
+        'output.args.command = "printf OC-P-PRODUCTION"\n'
+        "  },\n"
+        '  "tool.execute.after": async (_input, output) => { output.output += "|OC-P-AFTER" },\n'
+        "})\n"
+    )
+    plugin = _native_plugin(source)
+    h = create(replace(config, native_plugins=(plugin,)))
+    await h.start(make_context(cwd=str(work), host_session_id="ocp-native"))
+    server = h._server
+    owner = dict(server.owner)
+    assert server.native_config["plugin"] == list(server.plugin_stage.specs)
+    assert all(spec.startswith("file:") and str(source) not in spec for spec in server.plugin_stage.specs)
+    model.actions = [
+        {"tool": "bash", "args": {"command": "printf OC-P-MUTATE", "description": "managed plugin"}},
+        {"text": "OC-P-DONE"},
+    ]
+    _, terminal = await turn(h, "Run the managed plugin fixture")
+    assert terminal.kind is TurnEventKind.FINISHED, terminal.result
+    assert any(
+        block.kind == "tool_result" and block.content == "OC-P-PRODUCTION|OC-P-AFTER"
+        for message in terminal.result.messages
+        for block in message.content
+    )
+    checkpoint = await h.export_checkpoint()
+    assert checkpoint.data["native_plugin_fingerprint"] == server.plugin_fingerprint
+
+    entrypoint.write_text(entrypoint.read_text() + "// drift\n")
+    _, terminal = await turn(h, "This turn must fail before native dispatch")
+    assert terminal.kind is TurnEventKind.FAILED
+    assert terminal.result.error.code == "native_plugin_source_drift"
+    assert (await server.properties(owner)).get("ActiveState") != "active"
+    assert not (server.scope / "owner.json").exists()
+
+    replacement = tmp_path / "ocp-guard-v2"
+    replacement.mkdir()
+    (replacement / "guard.js").write_text(entrypoint.read_text().removesuffix("// drift\n"))
+    plugin_v2 = _native_plugin(replacement, version="2.0.0")
+    resumed = create(replace(config, native_plugins=(plugin_v2,)))
+    with pytest.raises(ProviderStartupError) as rejected:
+        await resumed.start(
+            make_context(
+                cwd=str(work),
+                host_session_id="ocp-native",
+                checkpoint=checkpoint,
+                resume_policy=ResumePolicy.REQUIRE_RESUME,
+            )
+        )
+    assert rejected.value.error.code == "storage_identity_mismatch"
+    fresh = create(replace(config, native_plugins=(plugin_v2,)))
+    await fresh.start(make_context(cwd=str(work), host_session_id="ocp-changed-new"))
+    model.actions = [
+        {"tool": "bash", "args": {"command": "printf OC-P-MUTATE", "description": "new snapshot"}},
+        {"text": "OC-P-NEW-DONE"},
+    ]
+    _, terminal = await turn(fresh, "Use the replacement plugin in a new session")
+    assert terminal.kind is TurnEventKind.FINISHED, terminal.result
+
+
+@pytest.mark.asyncio
+async def test_managed_native_plugin_custom_tool_uses_host_permission_and_native_loader(runtime, tmp_path):
+    config, model, work, create = runtime
+    handler = InteractionHandler()
+    source = tmp_path / "ocp-custom-tool"
+    source.mkdir()
+    (source / "guard.js").write_text(
+        'import { writeFile } from "node:fs/promises"\n'
+        "export const Guard = async () => ({\n"
+        "  event: async () => {},\n"
+        '  "tool.execute.before": async () => {},\n'
+        '  "tool.execute.after": async () => {},\n'
+        "  tool: { managed_marker: { description: 'managed marker', args: {}, "
+        "execute: async () => { await writeFile(process.env.TMPDIR + '/custom-tool-executed', 'yes'); "
+        "return 'OC-P-CUSTOM-TOOL' } } },\n"
+        "})\n"
+    )
+    plugin = _native_plugin(source, tools=("managed_marker",))
+    h = create(replace(config, full_access=False, native_plugins=(plugin,)))
+    await h.start(
+        make_context(
+            cwd=str(work),
+            host_session_id="ocp-native-tool",
+            host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
+            interactions=handler,
+        )
+    )
+    model.actions = [
+        {"tool": "managed_marker", "args": {}},
+        {"text": "OC-P-CUSTOM-DONE"},
+    ]
+    _, terminal = await turn(h, "Call the managed marker tool")
+    assert terminal.kind is TurnEventKind.FINISHED, terminal.result
+    assert any(
+        isinstance(request, ToolApprovalRequest) and request.tool_name == "managed_marker"
+        for request in handler.requests
+    )
+    assert any(
+        block.kind == "tool_result" and block.content == "OC-P-CUSTOM-TOOL"
+        for message in terminal.result.messages
+        for block in message.content
+    )
+    assert (h._server.root / "tmp/custom-tool-executed").read_text() == "yes"
+    await h.stop()
+
+    denied = create(replace(config, full_access=False, native_plugins=(plugin,)))
+    await denied.start(make_context(cwd=str(work), host_session_id="ocp-native-tool-denied"))
+    model.actions = [{"tool": "managed_marker", "args": {}}]
+    _, terminal = await turn(denied, "The managed marker must be rejected")
+    assert terminal.kind is TurnEventKind.FAILED
+    assert terminal.result.error.code == "interaction_declined"
+    assert not (denied._server.root / "tmp/custom-tool-executed").exists()
+    await denied.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.environ.get("SQL2JAVA_PLUGIN_ROOT"), reason="prepared sql2java plugin opt-in")
+async def test_sql2java_plugin_workflow_list_through_managed_native_loader(runtime):
+    config, model, work, create = runtime
+    source = Path(os.environ["SQL2JAVA_PLUGIN_ROOT"]).resolve(strict=True)  # noqa: ASYNC240
+    plugin = OpenCodeNativePluginConfig(
+        plugin_id="sql2java-workflow",
+        source_type="local",
+        source_locator=str(source),
+        version=os.environ.get("SQL2JAVA_PLUGIN_VERSION", "local-regression"),
+        content_sha256=opencode_plugin_content_digest(source),  # noqa: ASYNC240
+        entrypoint="plugins/workflow-engine.ts",
+        export_name="WorkflowEnginePlugin",
+        required_hooks=(
+            "chat.message",
+            "chat.params",
+            "event",
+            "experimental.chat.system.transform",
+            "tool.execute.before",
+            "tool.execute.after",
+        ),
+        required_tools=("saveArtifact", "workflow"),
+    )
+    handler = InteractionHandler()
+    h = create(
+        replace(
+            config,
+            full_access=False,
+            native_plugins=(plugin,),
+            startup_timeout_s=90,
+            turn_timeout_s=90,
+        )
+    )
+    await h.start(
+        make_context(
+            cwd=str(work),
+            host_session_id="ocp-sql2java",
+            host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
+            interactions=handler,
+        )
+    )
+    model.actions = [
+        {"tool": "workflow", "args": {"action": "list"}},
+        {"text": "OC-P-SQL2JAVA-DONE"},
+    ]
+    _, terminal = await turn(h, "List sql2java workflow runs")
+    assert terminal.kind is TurnEventKind.FINISHED, terminal.result
+    assert any(
+        isinstance(request, ToolApprovalRequest) and request.tool_name == "workflow"
+        for request in handler.requests
+    )
+    assert any(
+        block.kind == "tool_result" and "No runs" in str(block.content)
+        for message in terminal.result.messages
+        for block in message.content
+    )
+    tools = {tool["function"]["name"] for tool in model.requests[0]["tools"]}
+    assert {"workflow", "saveArtifact"} <= tools
+    await h.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_loader_hook_inventory_mismatch_fails_start_and_reaps(runtime, tmp_path):
+    config, _, work, create = runtime
+    source = tmp_path / "ocp-unexpected-hook"
+    source.mkdir()
+    (source / "guard.js").write_text(
+        "export const Guard = async () => ({\n"
+        "  event: async () => {},\n"
+        '  "tool.execute.before": async () => {},\n'
+        '  "tool.execute.after": async () => {},\n'
+        '  "permission.ask": async () => {},\n'
+        "})\n"
+    )
+    h = create(replace(config, native_plugins=(_native_plugin(source),), startup_timeout_s=5))
+    with pytest.raises(ProviderStartupError):
+        await h.start(make_context(cwd=str(work), host_session_id="ocp-inventory-mismatch"))
+    assert h._server is None and h._transport is None
 
 
 @pytest.mark.asyncio
