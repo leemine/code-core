@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/`（61 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-09-07 |
-| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md` |
+| 最近一次修订日期 | 2026-09-26 |
+| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_10_provider-neutral-goal-driver.md` |
 
 ## 范围 / 边界
 
@@ -98,6 +98,11 @@
     trajectory 读取边界，不属于 rail producer。
 
 ## 接口契约
+
+TaskCompletionRail 的 Goal 接缝保留报告、消息、transcript 与模型用量采集；
+完成决策统一委托 `GoalAttemptDriver.finish`，并传入开始时记录的 attempt_index。
+中断待答不结算，不调用 transcript assessor；旧 attempt 或已结算 attempt 在模型核验前
+拒绝。状态写入仍由 GoalManager 单独完成，详见 S_11。
 
 ```python
 # rails/__init__.py 公开导出（__all__ 节选）

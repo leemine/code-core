@@ -75,7 +75,7 @@ class GoalEvaluator:
     """Evaluate goal completion using the configured stop strategy.
 
     The assessor does not write GoalRecord; it only produces a GoalAssessment
-    that the TaskCompletionRail uses to update state.
+    that GoalAttemptDriver submits to GoalManager for state updates.
     """
 
     def __init__(self, config: Optional[GoalStopConfig] = None) -> None:

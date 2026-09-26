@@ -5,17 +5,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Protocol
 
+from openjiuwen.harness.goal.execution import GoalExecutionPort
 from openjiuwen.harness.goal.schema import (
     GoalAssessment,
     GoalAssessmentStatus,
     GoalOperationError,
     GoalRecord,
     GoalStatus,
+    TokenUsage,
 )
-from openjiuwen.harness.task_loop.event_manager import EventManager
-from openjiuwen.harness.schema.interaction import InteractionEvent, RoundWorkItem
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.schema.interaction import InteractionEvent
+    from openjiuwen.harness.task_loop.event_manager import EventManager
 
 logger = logging.getLogger(__name__)
 
@@ -54,22 +58,35 @@ class GoalManager:
         self,
         *,
         store: GoalStore,
-        event_manager: EventManager,
         control_lock: asyncio.Lock,
-        has_output_stream: Callable[[], bool],
-        cancel_active_round: CancelRound,
-        emit_event: Callable[[InteractionEvent], None],
-        notify_work: Callable[[], None],
+        execution: GoalExecutionPort | None = None,
+        event_manager: EventManager | None = None,
+        has_output_stream: Callable[[], bool] | None = None,
+        cancel_active_round: CancelRound | None = None,
+        emit_event: Callable[[InteractionEvent], None] | None = None,
+        notify_work: Callable[[], None] | None = None,
         language: str = "cn",
     ) -> None:
         self._store = store
-        self._event_manager = event_manager
         self._control_lock = control_lock
-        self._has_output_stream = has_output_stream
-        self._cancel_active_round = cancel_active_round
-        self._emit_event = emit_event
-        self._notify_work = notify_work
-        self._language = language
+        native_arguments = (event_manager, has_output_stream, cancel_active_round, emit_event, notify_work)
+        if execution is not None:
+            if any(value is not None for value in native_arguments):
+                raise ValueError("execution and Native execution arguments are mutually exclusive")
+        else:
+            if any(value is None for value in native_arguments):
+                raise ValueError("provide execution or all Native execution arguments")
+            from openjiuwen.harness.goal.native import NativeGoalExecutionAdapter
+
+            execution = NativeGoalExecutionAdapter(
+                event_manager=event_manager,
+                has_output_stream=has_output_stream,
+                cancel_active_round=cancel_active_round,
+                emit_event=emit_event,
+                notify_work=notify_work,
+                language=language,
+            )
+        self._execution = execution
 
     def get_store(self, session_id: str | None = None) -> GoalStore:
         """Expose the session store for read-only tools and rails only."""
@@ -131,7 +148,7 @@ class GoalManager:
                 )
 
             if existing is not None:
-                self._event_manager.discard_goal_work(
+                self._execution.discard_work(
                     session_id=existing.session_id,
                     goal_id=existing.goal_id,
                 )
@@ -148,14 +165,13 @@ class GoalManager:
             # An existing stream remains the one and only consumer.  Queue the
             # replacement work before aborting the old goal round so the stream
             # naturally continues into the replacement.
-            if self._has_output_stream():
+            if self._execution.is_available():
                 self._ensure_goal_work_locked(record)
                 self._emit_goal_updated_locked(record)
 
             if existing is not None:
-                await self._cancel_active_round(
-                    expected_run_kind="goal",
-                    expected_goal_id=existing.goal_id,
+                await self._execution.cancel_attempt(
+                    goal_id=existing.goal_id,
                     reason="goal_overwrite",
                 )
 
@@ -171,7 +187,7 @@ class GoalManager:
                 # finish naturally (including assessment).  Bumping would make
                 # the finishing attempt look stale and drop last_assessment /
                 # COMPLETE.  Pending continuations are discarded below.
-                self._event_manager.discard_goal_work(
+                self._execution.discard_work(
                     session_id=record.session_id,
                     goal_id=record.goal_id,
                 )
@@ -187,7 +203,7 @@ class GoalManager:
                 record.touch(bump_revision=False)
                 self._store.save(record)
                 await self._commit_store_locked()
-                if self._has_output_stream():
+                if self._execution.is_available():
                     self._emit_goal_updated_locked(record)
             return record.copy_for_response()
 
@@ -212,7 +228,7 @@ class GoalManager:
                 record.touch(bump_revision=not in_flight)
                 self._store.save(record)
                 await self._commit_store_locked()
-                if self._has_output_stream():
+                if self._execution.is_available():
                     if not in_flight:
                         self._ensure_goal_work_locked(record)
                     self._emit_goal_updated_locked(record)
@@ -226,24 +242,23 @@ class GoalManager:
             record.settle_active_time(keep_active=False)
             self._store.clear()
             await self._commit_store_locked()
-            self._event_manager.discard_goal_work(
+            self._execution.discard_work(
                 session_id=record.session_id,
                 goal_id=record.goal_id,
             )
-            await self._cancel_active_round(
-                expected_run_kind="goal",
-                expected_goal_id=record.goal_id,
+            await self._execution.cancel_attempt(
+                goal_id=record.goal_id,
                 reason="goal_clear",
             )
-            if self._has_output_stream():
-                self._emit_event(InteractionEvent.goal_updated(None))
+            if self._execution.is_available():
+                self._execution.goal_updated(None)
             return record.copy_for_response()
 
     def ensure_active_goal_work_locked(self) -> bool:
         """Ensure the current ACTIVE record has one queued/dequeued/active work.
 
         The caller must hold the shared interaction control lock and must already
-        have acquired an output stream.
+        have acquired execution ownership through the host runtime.
         """
         record = self._store.load()
         if record is None or record.status is not GoalStatus.ACTIVE:
@@ -255,11 +270,14 @@ class GoalManager:
         *,
         goal_id: str,
         revision: int,
+        attempt_index: int | None = None,
     ) -> Optional[GoalRecord]:
-        """Validate and record the start of one goal attempt."""
+        """Validate and record one start; an explicit index rejects duplicate starts."""
         async with self._control_lock:
             record = self._store.load()
             if record is None or not self._matches_active(record, goal_id, revision):
+                return None
+            if attempt_index is not None and attempt_index != record.attempt_count + 1:
                 return None
             record.attempt_count += 1
             record.start_timing()
@@ -276,10 +294,13 @@ class GoalManager:
         input_tokens: int = 0,
         output_tokens: int = 0,
         cached_input_tokens: int = 0,
+        attempt_index: int | None = None,
     ) -> None:
         async with self._control_lock:
             record = self._store.load()
             if record is None or not self._matches_in_flight(record, goal_id, revision):
+                return
+            if attempt_index is not None and not self._matches_attempt(record, attempt_index):
                 return
             # PAUSED finishing attempts still own active_started_at; flush them too.
             if record.active_started_at is not None and record.status in (
@@ -297,6 +318,8 @@ class GoalManager:
         goal_id: str,
         revision: int,
         assessment: GoalAssessment,
+        attempt_index: int | None = None,
+        usage: TokenUsage | None = None,
     ) -> Optional[GoalRecord]:
         """Commit an assessment only when its goal generation is still current.
 
@@ -308,6 +331,14 @@ class GoalManager:
             record = self._store.load()
             if record is None or not self._matches_in_flight(record, goal_id, revision):
                 return None
+            if attempt_index is not None:
+                if not self._matches_attempt(record, attempt_index):
+                    return None
+                record.last_assessed_attempt = attempt_index
+            if usage is not None:
+                if attempt_index is None:
+                    raise ValueError("atomic attempt usage requires attempt_index")
+                record.token_usage.accumulate(usage.input_tokens, usage.output_tokens, usage.cached_input_tokens)
             record.last_assessment = assessment
             if assessment.status is GoalAssessmentStatus.COMPLETE:
                 record.settle_active_time(keep_active=False)
@@ -327,30 +358,27 @@ class GoalManager:
             self._store.save(record)
             await self._commit_store_locked()
 
-            if record.status is GoalStatus.ACTIVE and self._has_output_stream():
+            if record.status is GoalStatus.ACTIVE and self._execution.is_available():
                 self._ensure_goal_work_locked(record)
-            if self._has_output_stream():
+            if self._execution.is_available():
                 self._emit_goal_updated_locked(record)
             return record.copy_for_response()
 
     def _ensure_goal_work_locked(self, record: GoalRecord) -> bool:
-        if record.status is not GoalStatus.ACTIVE or not self._has_output_stream():
+        if record.status is not GoalStatus.ACTIVE or not self._execution.is_available():
             return False
-        from openjiuwen.harness.prompts.sections.goal import build_goal_task_query
-
-        work = RoundWorkItem.goal(
-            inputs={"query": build_goal_task_query(record, self._language)},
-            goal_id=record.goal_id,
-            revision=record.revision,
-            session_id=record.session_id,
-        )
-        queued = self._event_manager.push_goal(work)
-        if queued:
-            self._notify_work()
-        return queued
+        return self._execution.ensure_work(record.copy_for_response())
 
     def _emit_goal_updated_locked(self, record: GoalRecord) -> None:
-        self._emit_event(InteractionEvent.goal_updated(record.to_dict()))
+        self._execution.goal_updated(record.copy_for_response())
+
+    @staticmethod
+    def _matches_attempt(record: GoalRecord, attempt_index: int) -> bool:
+        return (
+            attempt_index > 0
+            and attempt_index == record.attempt_count
+            and attempt_index > record.last_assessed_attempt
+        )
 
     async def _commit_store_locked(self) -> None:
         commit = getattr(self._store, "commit", None)
@@ -377,7 +405,7 @@ class GoalManager:
         Match by ``goal_id`` only: the finishing attempt must stay visible to
         pause/resume even if revision was bumped.
         """
-        return self._event_manager.has_running_goal(goal_id=record.goal_id)
+        return self._execution.has_running_attempt(goal_id=record.goal_id)
 
     @staticmethod
     def _matches_in_flight(

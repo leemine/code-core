@@ -19,8 +19,8 @@ from openjiuwen.harness.goal.schema import (
     GoalStatus,
 )
 from openjiuwen.harness.goal.store import SessionGoalStore
-from openjiuwen.harness.task_loop.event_manager import EventManager
 from openjiuwen.harness.schema.interaction import InteractionEvent, InteractionEventType
+from openjiuwen.harness.task_loop.event_manager import EventManager
 
 
 def _utc_timestamp(seconds: int) -> datetime:
@@ -607,4 +607,88 @@ async def test_pause_then_complete_assessment_overrides_paused() -> None:
     assert completed.status is GoalStatus.COMPLETED
     assert completed.last_assessment is not None
     assert completed.last_stop_reason == "completed"
+    assert harness.events.next_work() is None
+
+
+@pytest.mark.asyncio
+async def test_native_rail_uses_one_settlement_path_across_consecutive_attempts() -> None:
+    """Real Native queue/manager/rail retain one owner and one receipt per attempt."""
+    from types import SimpleNamespace
+
+    from openjiuwen.harness.goal import GoalEvaluator, GoalStopConfig, GoalStopStrategy
+    from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
+
+    harness = ManagerHarness()
+    goal = await harness.manager.set("finish the native goal")
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(harness.manager)
+    rail._goal_evaluator = GoalEvaluator(GoalStopConfig(strategy=GoalStopStrategy.AGENT_REPORT))
+
+    for index, assessment_status in enumerate((GoalAssessmentStatus.CONTINUE, GoalAssessmentStatus.COMPLETE), start=1):
+        work = harness.events.next_work()
+        assert work is not None
+        harness.events.mark_started(work)
+        started = await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=goal.revision)
+        assert started.attempt_count == index
+        ctx = SimpleNamespace(
+            inputs=SimpleNamespace(run_kind="goal", run_context=work.context, query="goal", result={}),
+            extra={},
+            exception=None,
+        )
+        await rail.before_task_iteration(ctx)
+        rail._goal_report_sink.submit(GoalAssessment(assessment_status, "native evidence"))
+        await rail._do_goal_after_iteration(ctx)
+        settled = await harness.manager.get()
+        assert settled.last_assessed_attempt == index
+        assert settled.attempt_count == index
+        commits = harness.session.commit_count
+        # No second receipt, model assessment or notification on duplicate callback.
+        await rail._do_goal_after_iteration(ctx)
+        assert harness.session.commit_count == commits
+        assert harness.events.next_work() is None
+        harness.events.mark_finished(work)
+        async with harness.manager._control_lock:
+            queued = harness.manager.ensure_active_goal_work_locked()
+        assert queued is (assessment_status is GoalAssessmentStatus.CONTINUE)
+
+    assert (await harness.manager.get()).status is GoalStatus.COMPLETED
+    assert harness.events.next_work() is None
+
+
+@pytest.mark.asyncio
+async def test_native_interrupt_then_paused_completion_settles_original_attempt() -> None:
+    from types import SimpleNamespace
+
+    from openjiuwen.harness.goal import GoalEvaluator, GoalStopConfig, GoalStopStrategy
+    from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
+
+    harness = ManagerHarness()
+    goal = await harness.manager.set("finish after approval")
+    work = harness.events.next_work()
+    harness.events.mark_started(work)
+    await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=goal.revision)
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(harness.manager)
+    rail._goal_evaluator = GoalEvaluator(GoalStopConfig(strategy=GoalStopStrategy.AGENT_REPORT))
+    ctx = SimpleNamespace(
+        inputs=SimpleNamespace(
+            run_kind="goal", run_context=work.context, query="goal", result={"result_type": "interrupt"}
+        ),
+        extra={},
+        exception=None,
+    )
+    await rail.before_task_iteration(ctx)
+    await rail._do_goal_after_iteration(ctx)
+    interrupted = await harness.manager.get()
+    assert interrupted.attempt_count == 1
+    assert interrupted.last_assessed_attempt == 0
+    assert interrupted.last_assessment is None
+    await harness.manager.pause()
+    ctx.inputs.result = {"result_type": "answer"}
+    rail._goal_report_sink.submit(GoalAssessment(GoalAssessmentStatus.COMPLETE, "approved and verified"))
+    await rail._do_goal_after_iteration(ctx)
+    result = await harness.manager.get()
+    assert result.status is GoalStatus.COMPLETED
+    assert result.attempt_count == result.last_assessed_attempt == 1
+    assert result.revision == goal.revision
     assert harness.events.next_work() is None

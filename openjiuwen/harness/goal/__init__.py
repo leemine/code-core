@@ -10,7 +10,9 @@ hooks are handled by ``TaskCompletionRail`` (in ``openjiuwen.harness.rails``).
 """
 from __future__ import annotations
 
+from openjiuwen.harness.goal.driver import GoalAttemptDriver
 from openjiuwen.harness.goal.evaluation import GoalEvaluator
+from openjiuwen.harness.goal.execution import GoalExecutionPort
 from openjiuwen.harness.goal.manager import GoalManager
 from openjiuwen.harness.goal.schema import (
     GoalAssessment,
@@ -27,7 +29,9 @@ from openjiuwen.harness.goal.store import SessionGoalStore
 __all__ = [
     "GoalAssessment",
     "GoalAssessmentStatus",
+    "GoalAttemptDriver",
     "GoalEvaluator",
+    "GoalExecutionPort",
     "GoalManager",
     "GoalOperationError",
     "GoalRecord",
