@@ -358,6 +358,7 @@ async def test_goal_round_error_blocks_instead_of_continue() -> None:
     from openjiuwen.harness.goal.schema import GoalStatus
 
     record = GoalRecord.create(session_id="s1", objective="ship it")
+    record.attempt_count = 1
     assessments: list[GoalAssessment] = []
 
     class _Store:
@@ -368,7 +369,11 @@ async def test_goal_round_error_blocks_instead_of_continue() -> None:
         def get_store(self, session_id=None):
             return _Store()
 
-        async def apply_assessment(self, *, goal_id, revision, assessment):
+        async def get(self):
+            return record.copy_for_response()
+
+        async def apply_assessment(self, *, goal_id, revision, assessment, attempt_index, usage):
+            assert attempt_index == 1
             assessments.append(assessment)
             record.status = GoalStatus.BLOCKED
             record.last_assessment = assessment
@@ -380,6 +385,7 @@ async def test_goal_round_error_blocks_instead_of_continue() -> None:
     rail._current_goal_id = record.goal_id
     rail._current_revision = record.revision
     rail._current_session_id = record.session_id
+    rail._current_attempt_index = 1
 
     inputs = SimpleNamespace(
         result={"result_type": "error", "error": "Invalid API Key"},
@@ -406,6 +412,7 @@ async def test_goal_interrupt_skips_assessment() -> None:
     from openjiuwen.harness.goal.schema import GoalStatus
 
     record = GoalRecord.create(session_id="s1", objective="ship it")
+    record.attempt_count = 1
     assessments: list[GoalAssessment] = []
     assessor_calls = {"n": 0}
 
@@ -434,6 +441,7 @@ async def test_goal_interrupt_skips_assessment() -> None:
     rail._current_goal_id = record.goal_id
     rail._current_revision = record.revision
     rail._current_session_id = record.session_id
+    rail._current_attempt_index = 1
 
     async def _should_not_invoke(*args, **kwargs):
         assessor_calls["n"] += 1
