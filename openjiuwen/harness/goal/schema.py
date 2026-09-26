@@ -181,6 +181,9 @@ class GoalRecord:
     created_at: str = field(default_factory=_utc_now_iso)
     updated_at: str = field(default_factory=_utc_now_iso)
 
+    # Appended for positional-construction and persisted-record compatibility.
+    last_assessed_attempt: int = 0
+
     def touch(self, *, bump_revision: bool = False) -> None:
         self.updated_at = _utc_now_iso()
         if bump_revision:
@@ -215,6 +218,7 @@ class GoalRecord:
             "status": self.status.value,
             "revision": self.revision,
             "attempt_count": self.attempt_count,
+            "last_assessed_attempt": self.last_assessed_attempt,
             "token_usage": self.token_usage.to_dict(),
             "max_attempts": self.max_attempts,
             "token_budget": self.token_budget,
@@ -263,6 +267,7 @@ class GoalRecord:
             status=status,
             revision=int(data.get("revision", 0)),
             attempt_count=int(data.get("attempt_count", 0)),
+            last_assessed_attempt=_non_negative_int(data.get("last_assessed_attempt", 0), "last_assessed_attempt"),
             token_usage=TokenUsage.from_dict(usage_data) if isinstance(usage_data, dict) else TokenUsage(),
             max_attempts=_optional_positive_int(data.get("max_attempts"), "max_attempts"),
             token_budget=_optional_positive_int(data.get("token_budget"), "token_budget"),

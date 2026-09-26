@@ -18,9 +18,10 @@ goal attempt lifecycle (formerly in the standalone GoalCompletionDriver):
 - Injecting the goal protocol via PromptAttachment on goal rounds
   (before_model_call; cleared on non-goal rounds)
 - Replacing the query with <goal_task> XML (before_task_iteration)
-- Consuming submit_goal_report and running assessment (after_task_iteration)
+- Consuming submit_goal_report and delegating assessment to GoalAttemptDriver
+  (after_task_iteration)
 - Accumulating token usage (after_model_call)
-- Writing back GoalRecord state transitions
+- Delegating GoalRecord state transitions to the sole writer GoalManager
 - Registering/unregistering the SubmitGoalReportTool via init/uninit
 """
 from __future__ import annotations
@@ -33,7 +34,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
-    ToolCallInputs,
 )
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
@@ -137,6 +137,7 @@ class TaskCompletionRail(DeepAgentRail):
         self._current_goal_id: Optional[str] = None
         self._current_revision: Optional[int] = None
         self._current_session_id: Optional[str] = None
+        self._current_attempt_index: int = 0
         self._current_attempt_messages: List[Any] = []
         self.attachment_manager = None
 
@@ -392,6 +393,7 @@ class TaskCompletionRail(DeepAgentRail):
                 input_tokens=usage.get("input_tokens", 0),
                 output_tokens=usage.get("output_tokens", 0),
                 cached_input_tokens=usage.get("cached_input_tokens", 0),
+                attempt_index=self._current_attempt_index,
             )
 
     async def after_task_iteration(
@@ -462,6 +464,7 @@ class TaskCompletionRail(DeepAgentRail):
         # DeepAgent increments attempt_count before it starts the task-loop
         # round.  Rails only consume that committed generation.
         self._current_revision = record.revision
+        self._current_attempt_index = record.attempt_count
 
         if self._goal_report_sink is not None:
             self._goal_report_sink.begin_attempt(
@@ -498,6 +501,10 @@ class TaskCompletionRail(DeepAgentRail):
             self._current_goal_id,
             self._current_revision,
             allow_paused=True,
+        ) or (
+            self._current_attempt_index <= 0
+            or record.attempt_count != self._current_attempt_index
+            or record.last_assessed_attempt >= self._current_attempt_index
         ):
             logger.info(
                 "[GoalLifecycle] Goal state invalid after iteration, "
@@ -524,28 +531,21 @@ class TaskCompletionRail(DeepAgentRail):
         # ``on_model_exception``: that uses a different AgentCallbackContext
         # inside the model-call @rail wrapper; retries clear it and never
         # surface here unless the exception is re-raised past invoke.
-        from openjiuwen.harness.goal.schema import GoalAssessment, GoalAssessmentStatus
+        from openjiuwen.harness.goal.driver import GoalAttemptDriver
 
+        driver = GoalAttemptDriver(manager, self._goal_evaluator)
         round_error = self._extract_goal_round_error(ctx)
         if round_error is not None:
             logger.warning(
                 "[GoalLifecycle] Goal attempt failed; blocking goal: %s",
                 round_error[:300],
             )
-            await manager.apply_assessment(
+            await driver.finish(
                 goal_id=str(self._current_goal_id),
                 revision=int(self._current_revision),
-                assessment=GoalAssessment(
-                    status=GoalAssessmentStatus.BLOCKED,
-                    evidence=f"round_execution_error: {round_error}",
-                    remaining_work=(
-                        "Resolve the execution error before resuming the goal."
-                    ),
-                    next_instruction=(
-                        "Fix the underlying failure (for example model or API "
-                        "configuration), then resume the goal."
-                    ),
-                ),
+                attempt_index=self._current_attempt_index,
+                outcome="failed",
+                execution_error=round_error,
             )
             return
 
@@ -561,16 +561,13 @@ class TaskCompletionRail(DeepAgentRail):
             logger.warning("[GoalLifecycle] Goal evaluator unavailable")
             return
 
-        assessment = self._goal_evaluator.assess(
-            record=record,
-            agent_report=agent_report,
-            transcript_response=transcript_response,
-        )
-
-        await manager.apply_assessment(
+        await driver.finish(
             goal_id=str(self._current_goal_id),
             revision=int(self._current_revision),
-            assessment=assessment,
+            attempt_index=self._current_attempt_index,
+            outcome="completed",
+            agent_report=agent_report,
+            transcript_response=transcript_response,
         )
 
     @staticmethod
