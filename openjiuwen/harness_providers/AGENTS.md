@@ -125,6 +125,19 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
     Native replies are scoped to the locally claimed request; disconnects never
     replay unknown input. Stable native data is scope-private across managed service generations, while sealed
     configuration and logs remain generation-specific. OC3 product wiring is separate.
+12. **OpenCode native plugins are explicit fixed snapshots.** A non-null
+    `OpenCodeHarnessConfig.native_plugins` is a Provider-private allow-list of
+    prepared local JS/TS packages. Shared code may provide only deterministic
+    tree/path checks; OpenCode owns its module/export/hook schema. Packages are
+    copied into the generation root, loaded only through the native loader, and
+    admitted only after the generated wrapper reports the exact allowed hook
+    and custom-tool inventory. Ambient/default/npm plugins and dependency
+    installation stay disabled; `permission.ask`, `shell.env`, unknown hooks or
+    undeclared tools fail startup. Every admitted custom tool is wrapped so its
+    native `context.ask` request reaches the existing host permission ledger
+    before plugin code executes. Source and staged bytes are rechecked before
+    each Turn, the snapshot fingerprint is checkpoint-bound, and cgroup
+    emptiness—not the optional plugin `dispose` callback—is the cleanup authority.
 
 ## Change requirements
 

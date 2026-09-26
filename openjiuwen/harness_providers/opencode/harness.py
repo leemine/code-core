@@ -34,6 +34,7 @@ from openjiuwen.harness_providers.skills import install_skills, isolated_skill_s
 from .config import CLI_VERSION, OpenCodeHarnessConfig
 from .errors import OpenCodeError
 from .mapping import Accumulator, native_id
+from .native_plugins import validate_native_plugin_packages
 from .options import validate_readback
 
 
@@ -64,6 +65,7 @@ class OpenCodeHarness(SerializedTurnHarness):
         super().__init__(event_buffer_capacity=self._config.event_buffer_capacity)
         self._server = self._transport = None
         self._poisoned = False
+        self._native_plugin_fingerprint = None
 
     def _validate_context(self, context: HarnessContext) -> None:
         super()._validate_context(context)
@@ -91,6 +93,11 @@ class OpenCodeHarness(SerializedTurnHarness):
             from .transport import Transport
 
             async with asyncio.timeout(self._config.startup_timeout_s):
+                self._native_plugin_fingerprint = (
+                    await asyncio.to_thread(validate_native_plugin_packages, self._config.native_plugins)
+                    if self._config.native_plugins is not None
+                    else None
+                )
                 skill_path = None
                 if self._config.skills:
                     skill_path = isolated_skill_scan_directory(
@@ -160,6 +167,8 @@ class OpenCodeHarness(SerializedTurnHarness):
         session_id = native_id(session_id, "ses")
         if restored.get("resumable") is not True or restored.get("state") != "idle":
             raise HarnessProtocolError("OpenCode checkpoint does not describe a confirmed idle session")
+        if restored.get("native_plugin_fingerprint") != self._native_plugin_fingerprint:
+            raise HarnessProtocolError("OpenCode native plugin snapshot changed since session activation")
         await self._validate_resumable_session(session_id)
         return session_id, True
 
@@ -207,6 +216,7 @@ class OpenCodeHarness(SerializedTurnHarness):
                 "state": state,
                 "resumed": resumed,
                 "turn_id": turn_id,
+                "native_plugin_fingerprint": self._native_plugin_fingerprint,
             },
             reason=reason,
         )
@@ -214,6 +224,7 @@ class OpenCodeHarness(SerializedTurnHarness):
     async def _verify(self):
         await self._server.verify_running()
         validate_readback(await self._transport.request("GET", "/config"), self._server.native_config)
+        await self._server.verify_native_plugin_inventory()
 
     async def _close_session(self) -> None:
         self._poisoned = True
@@ -233,6 +244,13 @@ class OpenCodeHarness(SerializedTurnHarness):
             async with asyncio.timeout(self._config.turn_timeout_s):
                 if self._poisoned or transport is None:
                     raise OpenCodeError("session_requires_restart", category="server_unavailable")
+                if self._config.native_plugins is not None:
+                    current_plugins = await asyncio.to_thread(
+                        validate_native_plugin_packages,
+                        self._config.native_plugins,
+                    )
+                    if current_plugins != self._native_plugin_fingerprint:
+                        raise OpenCodeError("native_plugin_source_drift", category="process_start_failed")
                 await self._verify()
                 await self._publish_session_checkpoint(
                     reason=CheckpointReason.STATE_CHANGED,

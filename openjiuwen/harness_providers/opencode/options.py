@@ -126,8 +126,15 @@ def _native_mcp_config(mcp_servers, *, include_product=True):
     return result
 
 
-def native_config(config, host_capabilities=frozenset(), mcp_servers=(), *, skill_path: Path | None = None,
-                  include_product_mcp=True):
+def native_config(
+    config,
+    host_capabilities=frozenset(),
+    mcp_servers=(),
+    *,
+    skill_path: Path | None = None,
+    plugin_specs: tuple[str, ...] = (),
+    include_product_mcp=True,
+):
     model = config.model
     if model is None:
         raise OpenCodeError("explicit_model_required", category="process_start_failed")
@@ -165,10 +172,11 @@ def native_config(config, host_capabilities=frozenset(), mcp_servers=(), *, skil
             if config.skills and skill_path is not None
             else {}
         ),
+        **({"plugin": list(plugin_specs)} if config.native_plugins is not None else {}),
     }
 
 
-def environment(root, config, password, *, persistent_root=None):
+def environment(root, config, password, *, persistent_root=None, allow_native_plugins=False):
     persistent_root = persistent_root or root
     return {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
@@ -189,10 +197,14 @@ def environment(root, config, password, *, persistent_root=None):
                 "OPENCODE_DISABLE_EXTERNAL_SKILLS",
                 "OPENCODE_DISABLE_LSP_DOWNLOAD",
                 "OPENCODE_DISABLE_FFF",
-                "OPENCODE_PURE",
                 "OPENCODE_DISABLE_CLAUDE_CODE",
             )
         },
+        **(
+            {}
+            if allow_native_plugins
+            else {"OPENCODE_PURE": "true"}
+        ),
         "OPENCODE_SERVER_PASSWORD": password,
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
         "npm_config_registry": "http://127.0.0.1:1",
@@ -203,9 +215,13 @@ def environment(root, config, password, *, persistent_root=None):
 
 def validate_readback(actual, expected):
     normalized = {**expected, "agent": {"title": {"disable": True, "options": {}, "permission": {}}}}
-    if not isinstance(actual, dict) or any(actual.get(key) != value for key, value in normalized.items()):
+    if not isinstance(actual, dict) or any(
+        actual.get(key) != value for key, value in normalized.items() if key != "plugin"
+    ):
         raise OpenCodeError("effective_config_mismatch", category="process_start_failed")
     if actual.get("skills") != expected.get("skills"):
         raise OpenCodeError("effective_skill_config_mismatch", category="process_start_failed")
-    if any(actual.get(key) for key in ("plugin", "instructions", "command")):
+    if actual.get("plugin", []) != expected.get("plugin", []):
+        raise OpenCodeError("effective_plugin_config_mismatch", category="process_start_failed")
+    if any(actual.get(key) for key in ("instructions", "command")):
         raise OpenCodeError("unadmitted_effective_source", category="process_start_failed")

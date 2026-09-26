@@ -19,6 +19,10 @@ from typing import Any, Mapping
 from pydantic import BaseModel, ConfigDict
 
 from openjiuwen.harness_protocol import HarnessProtocolError
+from openjiuwen.harness_providers.native_plugin_snapshot import (
+    NativePluginSnapshotError,
+    native_plugin_tree_digest,
+)
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _IDENTITY_PART_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -124,20 +128,10 @@ def _package_root(codex_home: Path, plugin: CodexNativePluginConfig) -> Path:
 
 
 def _tree_digest(root: Path) -> str:
-    digest = hashlib.sha256()
-    files = sorted(path for path in root.rglob("*") if path.is_file() or path.is_symlink())
-    if not files:
-        raise HarnessProtocolError(f"Codex native plugin package is empty: {root}")
-    for path in files:
-        if path.is_symlink():
-            raise HarnessProtocolError(f"Codex native plugin package contains a symlink: {path}")
-        relative = path.relative_to(root).as_posix().encode()
-        digest.update(len(relative).to_bytes(8, "big"))
-        digest.update(relative)
-        data = path.read_bytes()
-        digest.update(len(data).to_bytes(8, "big"))
-        digest.update(data)
-    return digest.hexdigest()
+    try:
+        return native_plugin_tree_digest(root)
+    except NativePluginSnapshotError as exc:
+        raise HarnessProtocolError(f"invalid Codex native plugin package: {exc}") from exc
 
 
 def native_plugin_content_digest(root: str | Path) -> str:

@@ -19,6 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .errors import OpenCodeError
+from .native_plugins import stage_native_plugins, validate_native_plugin_packages
 from .options import environment, native_config
 from .source import Sources, private_directory
 
@@ -57,12 +58,7 @@ class ManagedServer:
         self.skill_path = skill_path
         self.lock = self.process = self.log = self.owner = self.scope = None
         self._stop_lock = asyncio.Lock()
-        self.native_config = native_config(
-            config,
-            context.host_capabilities,
-            context.mcp_servers,
-            skill_path=skill_path,
-        )
+        self.native_config = self.plugin_stage = self.plugin_fingerprint = None
 
     async def control(self, *args):
         process = await asyncio.create_subprocess_exec(
@@ -174,7 +170,14 @@ class ManagedServer:
             self.lock = lease(self.scope / "host.lock")
         except BlockingIOError:
             raise OpenCodeError("storage_already_owned", category="process_start_failed") from None
-        # Product MCP endpoints have per-generation ports and bearer tokens.
+        self.plugin_fingerprint = (
+            await asyncio.to_thread(validate_native_plugin_packages, self.config.native_plugins)
+            if self.config.native_plugins is not None
+            else None
+        )
+        # Product MCP endpoints and staged plugin wrapper paths are generation
+        # local.  The frozen provider config already carries the stable plugin
+        # source/version/digest/hook identity.
         # Keep the pre-OC4 stable identity byte-for-byte compatible while the
         # full generated config remains sealed and verified for this service.
         stable_native_config = native_config(
@@ -182,11 +185,17 @@ class ManagedServer:
             self.context.host_capabilities,
             self.context.mcp_servers,
             skill_path=self.skill_path,
+            plugin_specs=(),
             include_product_mcp=False,
         )
+        config_identity = asdict(self.config)
+        if config_identity.get("native_plugins") is None:
+            # Preserve the OC1-OC6 storage identity for configurations that do
+            # not opt into the new provider-private plugin surface.
+            config_identity.pop("native_plugins")
         fingerprint = hashlib.sha256(
             json.dumps(
-                {"config": asdict(self.config), "native": stable_native_config},
+                {"config": config_identity, "native": stable_native_config},
                 sort_keys=True,
             ).encode()
         ).hexdigest()
@@ -213,6 +222,19 @@ class ManagedServer:
             self.persistent_root = self.scope / "persistent"
             self.sources = Sources(self.root, self.cli, persistent_root=self.persistent_root)
             await asyncio.to_thread(self.sources.verify)
+            self.plugin_stage = await asyncio.to_thread(
+                stage_native_plugins,
+                self.root,
+                self.config.native_plugins,
+                fingerprint=self.plugin_fingerprint,
+            )
+            self.native_config = native_config(
+                self.config,
+                self.context.host_capabilities,
+                self.context.mcp_servers,
+                skill_path=self.skill_path,
+                plugin_specs=self.plugin_stage.specs,
+            )
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
                 port = sock.getsockname()[1]
@@ -232,6 +254,7 @@ class ManagedServer:
                         self.native_config,
                         self.password,
                         persistent_root=self.persistent_root,
+                        allow_native_plugins=bool(self.plugin_stage.specs),
                     ),
                 },
             )
@@ -277,6 +300,18 @@ class ManagedServer:
         ):
             raise OpenCodeError("supervisor_ownership_unverified", category="process_start_failed")
         await asyncio.to_thread(self.sources.verify)
+        if self.plugin_stage is not None:
+            await asyncio.to_thread(self.plugin_stage.verify_files)
+
+    async def verify_native_plugin_inventory(self):
+        if self.plugin_stage is None or not self.plugin_stage.inventories:
+            return
+        async with asyncio.timeout(self.config.startup_timeout_s):
+            while not self.plugin_stage.inventory_ready():
+                if self.process is None or self.process.returncode is not None:
+                    raise OpenCodeError("server_exited", category="process_start_failed")
+                await asyncio.sleep(0.05)
+        await asyncio.to_thread(self.plugin_stage.verify_inventory)
 
     async def stop(self):
         async with self._stop_lock:

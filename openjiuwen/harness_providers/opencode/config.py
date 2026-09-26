@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from openjiuwen.harness_providers.opencode.native_plugins import OpenCodeNativePluginConfig
 from openjiuwen.harness_providers.skills import SkillSource, normalize_skills
 
 CLI_VERSION = "1.18.18"
@@ -58,6 +59,7 @@ class OpenCodeHarnessConfig:
     full_access: bool = False
     skills: tuple[SkillSource, ...] = ()
     skill_conflict: str = "skip"
+    native_plugins: tuple[OpenCodeNativePluginConfig, ...] | None = field(default=None, repr=False)
     startup_timeout_s: float = 30
     request_timeout_s: float = 15
     turn_timeout_s: float = 180
@@ -71,6 +73,15 @@ class OpenCodeHarnessConfig:
     def __post_init__(self):
         object.__setattr__(self, "model", OpenCodeModelConfig.from_mapping(self.model))
         object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
+        plugins = self.native_plugins
+        if plugins is not None:
+            if not isinstance(plugins, (list, tuple)) or any(
+                not isinstance(plugin, OpenCodeNativePluginConfig) for plugin in plugins
+            ):
+                raise TypeError(
+                    "OpenCode native_plugins must be an array of OpenCodeNativePluginConfig values or null"
+                )
+            object.__setattr__(self, "native_plugins", tuple(plugins))
         for name in ("cli_path", "runtime_root"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not Path(value).is_absolute()):
@@ -98,4 +109,15 @@ class OpenCodeHarnessConfig:
     def from_mapping(cls, config):
         if not isinstance(config, Mapping) or set(config) - {f.name for f in fields(cls)}:
             raise ValueError("unknown OpenCode configuration fields")
-        return cls(**dict(config))
+        values = dict(config)
+        if "native_plugins" in values and values["native_plugins"] is not None:
+            raw_plugins = values["native_plugins"]
+            if not isinstance(raw_plugins, (list, tuple)):
+                raise TypeError("OpenCode native_plugins must be an array or null")
+            values["native_plugins"] = tuple(
+                plugin
+                if isinstance(plugin, OpenCodeNativePluginConfig)
+                else OpenCodeNativePluginConfig.from_mapping(plugin)
+                for plugin in raw_plugins
+            )
+        return cls(**values)
