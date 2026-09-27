@@ -57,6 +57,7 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     RunContext,
     RunKind,
+    TaskIterationInputs,
     init_rail,
     log_rail_init_breakdown,
 )
@@ -3434,11 +3435,37 @@ class DeepAgent(BaseAgent):
             ):
                 await self._sync_expert_role_attachment(invoke_inputs, session)
                 if is_resume_input:
-                    result = await self._run_single_round_invoke(
-                        ctx,
-                        session,
-                        streaming=True,
-                    )
+                    if work.kind == "goal":
+                        iteration_inputs = TaskIterationInputs(
+                            iteration=coordinator.current_iteration + 1,
+                            loop_event=None,
+                            conversation_id=session.get_session_id(),
+                            query=invoke_inputs.query,
+                            run_kind="goal",
+                            run_context=work.context,
+                        )
+                        iteration_ctx = AgentCallbackContext(
+                            agent=self, inputs=iteration_inputs, session=session,
+                        )
+                        async with iteration_ctx.lifecycle(
+                            AgentCallbackEvent.BEFORE_TASK_ITERATION,
+                            AgentCallbackEvent.AFTER_TASK_ITERATION,
+                        ):
+                            try:
+                                result = await self._run_single_round_invoke(
+                                    ctx, session, streaming=True,
+                                )
+                            except asyncio.CancelledError:
+                                # The generic lifecycle still fires its after
+                                # callbacks on cancellation; this is not a
+                                # completed attempt and must not consume a report.
+                                iteration_inputs.result = {"result_type": "interrupt"}
+                                raise
+                            iteration_inputs.result = result
+                    else:
+                        result = await self._run_single_round_invoke(
+                            ctx, session, streaming=True,
+                        )
                 else:
                     await controller.submit_round(
                         session,
@@ -3470,7 +3497,9 @@ class DeepAgent(BaseAgent):
 
             self.save_state(session)
             self.clear_state(session)
-            return RoundOutcome(next_work=next_work)
+            return RoundOutcome(
+                next_work=next_work, interrupted=result.get("result_type") == "interrupt",
+            )
         except Exception:
             logger.exception("[DeepAgent] interaction round execution failed")
             return RoundOutcome(
@@ -3763,7 +3792,8 @@ class DeepAgent(BaseAgent):
             except ValueError as exc:
                 raise ValueError(f"unsupported input dispatch mode: {request.mode}") from exc
 
-            if mode is InputDispatchMode.STEER and self._active_interaction_round is not None:
+            if (mode is InputDispatchMode.STEER and self._active_interaction_round is not None
+                    and not self._active_interaction_round.waiting_for_input):
                 if loop is None:
                     raise RuntimeError("active interaction round cannot accept steer without loop_controller")
                 loop.enqueue_steer(str(inputs["query"]))
@@ -3970,6 +4000,15 @@ class DeepAgent(BaseAgent):
                     with suppress(asyncio.CancelledError, Exception):
                         await cancel_wait
 
+        if (round_task is None or round_task.done()) and self._active_interaction_round is active:
+            if active.waiting_for_input and self._interaction_session is not None:
+                from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+
+                self._interaction_session.update_state({INTERRUPTION_KEY: None})
+            self._event_manager.mark_finished(active.work)
+            self._active_interaction_round = None
+            self._notify_work()
+
     def _notify_work(self) -> None:
         self._interaction_wakeup.set()
         self._ensure_supervisor_running()
@@ -3988,8 +4027,10 @@ class DeepAgent(BaseAgent):
                     await self._interaction_wakeup.wait()
                     continue
 
-                work = self._event_manager.next_work()
-                if work is None:
+                waiting = bool(self._active_interaction_round is not None
+                               and self._active_interaction_round.waiting_for_input)
+                work = self._event_manager.next_work(resume_only=waiting)
+                if work is None and not waiting:
                     if not self._is_interaction_running():
                         return
                     await self._promote_loop_follow_ups()
@@ -4001,7 +4042,7 @@ class DeepAgent(BaseAgent):
                     if not self._try_transition_interaction_phase(InteractionPhase.IDLE):
                         return
                     self._interaction_wakeup.clear()
-                    if self._event_manager.has_pending_work():
+                    if self._event_manager.has_pending_work() and not waiting:
                         continue
                     await self._interaction_wakeup.wait()
                     continue
@@ -4102,16 +4143,31 @@ class DeepAgent(BaseAgent):
             return
         if not self._try_transition_interaction_phase(InteractionPhase.RUNNING):
             return
+        # A question parks the original Goal attempt in the existing owner
+        # slot. Its explicit answer is a continuation, never another begin.
+        suspended = self._active_interaction_round
+        resuming_goal = (
+            suspended is not None and suspended.work.kind == "goal"
+            and suspended.waiting_for_input and isinstance(work.query, InteractiveInput)
+        )
+        if resuming_goal:
+            # Clear the dequeued answer before replacing its execution context.
+            self._event_manager.mark_started(work)
+            work = RoundWorkItem(
+                kind="goal", request_id=work.request_id, inputs=work.inputs,
+                context={**suspended.work.context, "reset_loop": False},
+            )
         session = self._interaction_session
         task_id = uuid.uuid4().hex
         forwarded = asyncio.Event()
         self._interaction_round_forwarded = forwarded
         self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
         self._event_manager.mark_started(work)
+        interrupted = False
         try:
             if session is None or not self._interaction_output.has_consumer():
                 return
-            if work.kind == "goal":
+            if work.kind == "goal" and not resuming_goal:
                 if self.goal_manager is None:
                     return
                 started = await self.goal_manager.begin_attempt(
@@ -4124,6 +4180,8 @@ class DeepAgent(BaseAgent):
             outcome: RoundOutcome = await self.run_one_round(
                 work, task_id, session
             )
+            interrupted = work.kind == "goal" and outcome.interrupted
+            self._active_interaction_round.waiting_for_input = interrupted
             if not self._is_interaction_running():
                 return
             if outcome.next_work is not None:
@@ -4147,12 +4205,14 @@ class DeepAgent(BaseAgent):
                 )
             )
         finally:
-            self._event_manager.mark_finished(work)
+            if not interrupted:
+                self._event_manager.mark_finished(work)
             if session is not None:
                 emitted = await self._emit_round_boundary(session)
                 if not emitted:
                     forwarded.set()
-            self._active_interaction_round = None
+            if not interrupted:
+                self._active_interaction_round = None
             self._try_transition_interaction_phase(InteractionPhase.IDLE)
 
     def _load_goal_record_locked(self) -> Optional[GoalRecord]:

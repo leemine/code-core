@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
@@ -63,6 +65,20 @@ from openjiuwen.harness_providers.skills import install_skills
 
 ADAPTER_VERSION = "0.1.0"
 _INTERRUPT_TIMEOUT_S = 5.0
+_DRAIN_TIMEOUT_S = 5.0
+
+
+@dataclass
+class _NativeTurnDrain:
+    """Ownership of one physical SDK turn, including an outstanding start."""
+
+    client: Any
+    failure: asyncio.Future[Exception]
+    handle: Any = None
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    reader: asyncio.Task[None] | None = None
+    confirmed: bool = False
+    project_events: bool = True
 _APPROVAL_WAIT_TIMEOUT_S = 600.0
 # A human answering a question has no natural deadline; the reader thread
 # re-checks the event loop between slices instead of giving up.
@@ -158,6 +174,13 @@ class CodexHarness(SerializedTurnHarness):
         self._startup_source_fingerprint: str | None = None
         self._native_plugin_fingerprint: str | None = None
         self._active_handle: Any = None
+        self._native_turn: _NativeTurnDrain | None = None
+        self._closing_process: Any = None
+        self._closing_process_scoped = False
+        self._closing_client: Any = None
+        self._connecting: asyncio.Future[None] | None = None
+        self._session_close_lock = asyncio.Lock()
+        self._client_close_lock = asyncio.Lock()
         self._pending_steers: list[str] = []
         self._active_model: CodexModelConfig | None = self._config.model
         self._fallback_activated = False
@@ -245,6 +268,19 @@ class CodexHarness(SerializedTurnHarness):
         return self._thread_id
 
     async def _connect(
+        self, context: HarnessContext, *, model: CodexModelConfig | None,
+        resume_thread_id: str | None,
+    ) -> None:
+        if self._stopping:
+            raise HarnessStateError("Codex stopped before connecting")
+        connecting = asyncio.get_running_loop().create_future()
+        self._connecting = connecting
+        try:
+            await self._connect_session(context, model=model, resume_thread_id=resume_thread_id)
+        finally:
+            connecting.set_result(None)
+
+    async def _connect_session(
         self,
         context: HarnessContext,
         *,
@@ -285,7 +321,7 @@ class CodexHarness(SerializedTurnHarness):
         try:
             if context.host_capabilities & _INTERACTIVE_HOST_CAPABILITIES:
                 _install_approval_handler(client, self._approval_handler)
-            if not self._config.inherit_process_env:
+            if not self._config.inherit_process_env or sys.platform == "linux":
                 isolate_process_environment(client, sdk)
             await validate_native_plugin_inventory(client, self._config.native_plugins, cwd=cwd)
             if self._config.system_prompt_mode == "append" and context.system_prompt:
@@ -323,13 +359,16 @@ class CodexHarness(SerializedTurnHarness):
             )
         except BaseException:
             try:
-                await client.close()
+                await self._close_client(client)
             except Exception:
                 # Keep the only process handle reachable when close itself
                 # fails; startup rollback will retry this exact client.
                 self._client = client
                 raise
             raise
+        if self._stopping:
+            await self._close_client(client)
+            raise HarnessStateError("Codex stopped while connecting")
         self._client = client
         self._thread = thread
         self._thread_id = str(thread.id)
@@ -341,18 +380,52 @@ class CodexHarness(SerializedTurnHarness):
         self._confirmed_model = confirmed_model
 
     async def _close_session(self) -> None:
-        handle = self._active_handle
-        if handle is not None:
-            await self._interrupt_handle(handle)
-            if self._active_handle is handle:
-                self._active_handle = None
-        client = self._client
-        if client is not None:
-            await client.close()
+        async with self._session_close_lock:
+            connecting = self._connecting
+            if connecting is not None:
+                await asyncio.wait_for(asyncio.shield(connecting), _DRAIN_TIMEOUT_S)
+            client = self._client if self._client is not None else self._closing_client
+            native = self._native_turn
+            if native is not None:
+                await self._drain_native_turn(native, interrupt=True)
+            if client is not None:
+                await self._close_client(client)
             if self._client is client:
                 self._client = None
-        self._thread = None
-        self._confirmed_model = ""
+                self._thread = None
+                self._confirmed_model = ""
+            if self._native_turn is native:
+                self._native_turn = None
+
+    async def _close_client(self, client: Any) -> None:
+        # SDK 0.144.4 clears _proc before closing and does not wait after its
+        # kill fallback. Keep the exact process reachable across close retries.
+        async with self._client_close_lock:
+            if self._closing_client is not client:
+                transport = getattr(getattr(client, "_client", None), "_sync", None)
+                self._closing_client = client
+                self._closing_process = getattr(transport, "_proc", None)
+                self._closing_process_scoped = bool(getattr(transport, "_jiuwen_process_scope", False))
+            await client.close()
+            process = self._closing_process
+            if process is not None:
+                exit_code = await asyncio.to_thread(process.wait, timeout=2)
+                if self._closing_process_scoped and exit_code != 0:
+                    raise HarnessProtocolError("Codex owned process tree exit is unconfirmed")
+            self._closing_process = None
+            self._closing_process_scoped = False
+            self._closing_client = None
+
+    async def _drain_native_turn(self, native: _NativeTurnDrain, *, interrupt: bool) -> None:
+        # Neither a cancelled waiter nor an SDK error may discard the original
+        # reader/client. A later stop retries this same owner.
+        await asyncio.wait_for(native.started.wait(), _DRAIN_TIMEOUT_S)
+        if interrupt and not native.confirmed and native.handle is not None:
+            await self._interrupt_handle(native.handle)
+        if native.reader is not None:
+            await asyncio.wait_for(asyncio.shield(native.reader), _DRAIN_TIMEOUT_S)
+        if not native.confirmed:
+            raise HarnessProtocolError("Codex native turn exit is unconfirmed")
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
@@ -446,11 +519,19 @@ class CodexHarness(SerializedTurnHarness):
                     error = classify_codex_exception(exc)
                     if await self._maybe_activate_fallback(error, accumulator, turn):
                         continue
+                if turn.abort_requested:
+                    return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
                 return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
             kind, result = accumulator.build_terminal_result(turn=turn, timing=timing)
             if kind is TurnEventKind.FAILED and await self._maybe_activate_fallback(result.error, accumulator, turn):
                 accumulator = CodexTurnAccumulator(turn_id=turn.turn_id)
                 continue
+            if turn.abort_requested:
+                return TurnEventKind.ABORTED, interrupted_result(
+                    turn, provider_name=PROVIDER_NAME, timing=timing,
+                    messages=tuple(accumulator.messages), final_output=accumulator.last_text_output,
+                    usage=accumulator.total_usage,
+                )
             return kind, result
         error = TurnError(
             message="Codex authentication fallback did not recover the turn",
@@ -460,43 +541,97 @@ class CodexHarness(SerializedTurnHarness):
         return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
 
     async def _run_turn(self, turn: PendingTurn, text: str, accumulator: CodexTurnAccumulator) -> None:
+        previous = self._native_turn
+        if previous is not None:
+            await self._drain_native_turn(previous, interrupt=False)
+        if turn.abort_requested:
+            raise HarnessStateError("Codex turn was cancelled before dispatch")
         thread = self._thread
         if thread is None:
             raise HarnessProtocolError("Codex thread disappeared during an active cycle")
-        handle = await thread.turn(text)
-        self._active_handle = handle
-        if turn.abort_requested:
-            await self._interrupt_handle(handle)
-        # A steer accepted between the external STARTED event and turn/start
-        # returning has no handle yet; deliver it now that the turn exists.
-        pending_steers, self._pending_steers = self._pending_steers, []
-        for steer_text in pending_steers:
-            await self._steer_handle(handle, steer_text)
-        will_retry_count = 0
+        native = _NativeTurnDrain(client=self._client, failure=asyncio.get_running_loop().create_future())
+        self._native_turn = native
+        native.reader = asyncio.create_task(
+            self._read_native_turn(native, thread, turn, text, accumulator),
+            name=f"codex_native_turn[{turn.turn_id}]",
+        )
         try:
+            await asyncio.wait((native.reader, native.failure), return_when=asyncio.FIRST_COMPLETED)
+            if native.failure.done():
+                await self._drain_native_turn(native, interrupt=False)
+                raise native.failure.result()
+            await native.reader
+            if not native.confirmed:
+                raise HarnessProtocolError("Codex turn stream ended without matching native completion")
+        finally:
+            if not native.confirmed:
+                native.project_events = False
+
+    async def _read_native_turn(
+        self, native: _NativeTurnDrain, thread: Any, turn: PendingTurn,
+        text: str, accumulator: CodexTurnAccumulator,
+    ) -> None:
+        handle = None
+        try:
+            handle = await thread.turn(text)
+            native.handle = handle
+            self._active_handle = handle
+            native.started.set()
+            if turn.abort_requested:
+                await self._interrupt_handle(handle)
+            pending_steers, self._pending_steers = self._pending_steers, []
+            for steer_text in pending_steers:
+                try:
+                    await self._steer_handle(handle, steer_text)
+                except Exception as exc:
+                    # Reject the accepted steer without abandoning the only
+                    # reader that can prove native cleanup has finished.
+                    native.failure.set_result(exc)
+                    await self._interrupt_handle(handle)
+                    break
+            will_retry_count = 0
+            terminal_seen = False
             stream = handle.stream().__aiter__()
             while True:
+                pending = asyncio.create_task(anext(stream))
                 try:
-                    notification = await asyncio.wait_for(anext(stream), timeout=self._config.turn_idle_timeout_s)
+                    if native.failure.done():
+                        notification = await pending
+                    else:
+                        try:
+                            notification = await asyncio.wait_for(
+                                asyncio.shield(pending), timeout=self._config.turn_idle_timeout_s,
+                            )
+                        except asyncio.TimeoutError:
+                            interrupted = await self._interrupt_handle(handle)
+                            native.failure.set_result(_TurnIdleTimeout(
+                                notifications_seen=accumulator.notifications_seen, interrupted=interrupted,
+                            ))
+                            # Keep the same SDK read alive: cancelling anext
+                            # unregisters its queue while to_thread can keep
+                            # consuming the only terminal notification.
+                            notification = await pending
                 except StopAsyncIteration:
+                    native.confirmed = terminal_seen
                     break
-                except asyncio.TimeoutError as exc:
-                    interrupted = await self._interrupt_handle(handle)
-                    raise _TurnIdleTimeout(
-                        notifications_seen=accumulator.notifications_seen,
-                        interrupted=interrupted,
-                    ) from exc
                 self._observe(notification)
+                if str(getattr(notification, "method", "")) == "turn/completed":
+                    completed = getattr(getattr(notification, "payload", None), "turn", None)
+                    if str(getattr(completed, "id", "")) != str(handle.id):
+                        continue
+                    terminal_seen = True
                 mapped_events, retrying = accumulator.consume(notification)
                 for mapped in mapped_events:
-                    await self._emit(mapped.payload, turn=turn, item_id=mapped.item_id)
+                    if native.project_events:
+                        await self._emit(mapped.payload, turn=turn, item_id=mapped.item_id)
                 if retrying is not None:
                     will_retry_count += 1
-                    if will_retry_count > self._config.max_will_retry_count:
+                    if will_retry_count > self._config.max_will_retry_count and not native.failure.done():
                         await self._interrupt_handle(handle)
-                        raise _RetryBudgetExceeded(retrying.error)
+                        native.failure.set_result(_RetryBudgetExceeded(retrying.error))
         finally:
-            if self._active_handle is handle:
+            native.started.set()
+            if native.confirmed and self._active_handle is handle:
                 self._active_handle = None
             self._pending_steers.clear()
 
@@ -614,24 +749,37 @@ class CodexHarness(SerializedTurnHarness):
             return False
         thread_id = self._thread_id
         await self._close_session()
+        if turn.abort_requested:
+            return False
         try:
             await self._connect(context, model=fallback, resume_thread_id=thread_id)
         except Exception as exc:
             logger.warning("[codex] authentication fallback activation failed: %s", exc)
             return False
+        if turn.abort_requested:
+            await self._close_session()
+            return False
         ratified = await self._confirm_provider_extension(
             AUTH_FALLBACK_REQUEST_TYPE,
             {"model": fallback.model, "provider": fallback.provider, "api_base": fallback.api_base},
         )
+        if turn.abort_requested:
+            await self._close_session()
+            return False
         if not ratified:
             # The host could not persist the switch; resume the thread on the
             # native endpoint so the member does not run on an unrecorded one.
             logger.warning("[codex] host declined the authentication fallback; restoring the native endpoint")
             await self._close_session()
+            if turn.abort_requested:
+                return False
             try:
                 await self._connect(context, model=self._config.model, resume_thread_id=thread_id)
             except Exception as exc:
                 logger.warning("[codex] restoring the native endpoint failed: %s", exc)
+                return False
+            if turn.abort_requested:
+                await self._close_session()
                 return False
             self._active_model = self._config.model
             self._fallback_activated = False

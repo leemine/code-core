@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
+from pathlib import Path
 from types import MethodType
 from typing import Any
 
@@ -23,6 +25,8 @@ def isolate_process_environment(client: Any, sdk: Any) -> None:
     SDK 0.144.4 always merges os.environ in CodexClient.start(). Replace only
     that instance's launcher; retain its binary resolver, pipes, reader, router
     and close implementation. Never mutate os.environ or SDK module globals.
+    On Linux a private subreaper process owns this client's descendants; its
+    zero exit status proves cleanup of tools that outlive the App Server.
     """
     transport = getattr(getattr(client, "_client", None), "_sync", None)
     module = getattr(sdk, "client", None)
@@ -57,6 +61,9 @@ def isolate_process_environment(client: Any, sdk: Any) -> None:
         # The SDK must not fall back to the parent's PATH when env omitted it.
         env.setdefault("PATH", "")
         module._prepend_path_dirs(env, path_dirs)
+        if sys.platform == "linux":
+            args = [sys.executable, str(Path(__file__).with_name("process_scope.py")), "--", *args]
+            self._jiuwen_process_scope = True
         self._proc = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", cwd=config.cwd, env=env, bufsize=1,
