@@ -1,0 +1,95 @@
+name: Codex local process exit regression
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  codex-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HOME: ${{ runner.temp }}/codex-local/home
+      CODEX_HOME: ${{ runner.temp }}/codex-local/codex
+      XDG_CONFIG_HOME: ${{ runner.temp }}/codex-local/config
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: '0.12.5'
+      - name: Prepare isolated directories
+        run: mkdir -p "$HOME" "$CODEX_HOME" "$XDG_CONFIG_HOME" artifacts/test-runs/codex-local
+      - name: Install locked Codex test dependencies
+        run: uv sync --locked --group test --extra codex --python 3.13
+      - name: Require real bundled Codex and record source
+        run: |
+          .venv/bin/python - <<'PY'
+          import hashlib
+          import importlib.metadata
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+          import openai_codex
+          import openjiuwen
+
+          binary = Path(openai_codex.client._resolve_codex_bin(openai_codex.CodexConfig()))
+          version = subprocess.check_output([str(binary), "--version"], text=True, timeout=15).strip()
+          source = {
+              "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "git_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], text=True).strip()),
+              "lock_sha256": hashlib.sha256(Path("uv.lock").read_bytes()).hexdigest(),
+              "python": sys.version,
+              "core_import": openjiuwen.__file__,
+              "sdk_version": importlib.metadata.version("openai-codex"),
+              "binary": str(binary),
+              "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+              "cli_version": version,
+          }
+          Path("artifacts/test-runs/codex-local/source.json").write_text(json.dumps(source, indent=2))
+          assert not source["git_dirty"], "CLI regression requires a clean checkout"
+          PY
+      - name: Run loopback-only tool tree exit regression
+        run: |
+          .venv/bin/python -m pytest tests/system_tests/harness_providers/test_codex_stop_tool_tree_local.py \
+            -q -o addopts= -p no:cacheprovider --timeout=90 --timeout-method=signal \
+            --basetemp="$RUNNER_TEMP/codex-local/pytest" \
+            --junitxml=artifacts/test-runs/codex-local/junit.xml
+      - name: Require both real cases to pass without skips
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          archive = Path("artifacts/test-runs/codex-local")
+          temporary = Path(os.environ["RUNNER_TEMP"]) / "codex-local" / "pytest"
+          for filename in ("stop-evidence.json", "owned-cleanup.json"):
+              for source in temporary.rglob(filename):
+                  target = archive / "process-evidence" / source.relative_to(temporary)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copyfile(source, target)
+          cases = list(ET.parse(archive / "junit.xml").iter("testcase"))
+          counts = {state: sum(case.find(state) is not None for case in cases)
+                    for state in ("failure", "error", "skipped")}
+          counts["cases"] = len(cases)
+          (archive / "counts.json").write_text(json.dumps(counts, indent=2))
+          assert len(cases) == 2 and not any(counts[state] for state in ("failure", "error", "skipped")), counts
+          PY
+      - name: Upload local CLI evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: code-core-codex-local-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/test-runs/codex-local/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove isolated CLI configuration
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/codex-local"
