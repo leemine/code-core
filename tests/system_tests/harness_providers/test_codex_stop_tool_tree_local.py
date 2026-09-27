@@ -5,6 +5,7 @@
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
@@ -19,7 +20,10 @@ from openjiuwen.harness_protocol import HarnessContext, HarnessInput
 from openjiuwen.harness_providers.codex import CodexHarness, CodexHarnessConfig, CodexModelConfig
 from tests.system_tests.harness_providers._codex_response_fixture import ResponsesFixture
 
-pytest.importorskip("openai_codex", reason="optional real bundled Codex CLI is required")
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("openai_codex") is None,
+    reason="optional real bundled Codex CLI is required",
+)
 
 
 def _process(pid):
