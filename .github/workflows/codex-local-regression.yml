@@ -11,9 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      HOME: ${{ runner.temp }}/codex-local/home
-      CODEX_HOME: ${{ runner.temp }}/codex-local/codex
-      XDG_CONFIG_HOME: ${{ runner.temp }}/codex-local/config
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@v7.0.1
@@ -21,7 +18,12 @@ jobs:
         with:
           version: '0.12.5'
       - name: Prepare isolated directories
-        run: mkdir -p "$HOME" "$CODEX_HOME" "$XDG_CONFIG_HOME" artifacts/test-runs/codex-local
+        run: |
+          mkdir -p "$RUNNER_TEMP/codex-local/home" "$RUNNER_TEMP/codex-local/codex" \
+            "$RUNNER_TEMP/codex-local/config" artifacts/test-runs/codex-local
+          printf 'HOME=%s\nCODEX_HOME=%s\nXDG_CONFIG_HOME=%s\n' \
+            "$RUNNER_TEMP/codex-local/home" "$RUNNER_TEMP/codex-local/codex" \
+            "$RUNNER_TEMP/codex-local/config" >> "$GITHUB_ENV"
       - name: Install locked Codex test dependencies
         run: uv sync --locked --group test --extra codex --python 3.13
       - name: Require real bundled Codex and record source
