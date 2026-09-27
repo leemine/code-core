@@ -32,6 +32,7 @@ import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
 )
@@ -452,9 +453,18 @@ class TaskCompletionRail(DeepAgentRail):
         store = manager.get_store(session_id)
         record = store.load()
 
-        if not self._validate_goal_state(record, goal_id, revision):
+        resuming = isinstance(getattr(ctx.inputs, "query", None), InteractiveInput)
+        if not self._validate_goal_state(record, goal_id, revision, allow_paused=resuming):
             self._is_goal_round = False
             self._current_attempt_messages = []
+            return
+
+        if (resuming and self._current_goal_id == goal_id
+                and self._current_revision == record.revision
+                and self._current_attempt_index == record.attempt_count):
+            # Keep the current report/transcript and InteractiveInput intact.
+            # Resuming a pending tool is still this exact attempt.
+            self._is_goal_round = True
             return
 
         self._is_goal_round = True

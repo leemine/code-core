@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/goal/` |
-| 最近一次修订日期 | 2026-09-26 |
+| 最近一次修订日期 | 2026-09-27 |
 | 关联 feature | `F_10_provider-neutral-goal-driver.md` |
 
 ## 范围 / 边界
@@ -37,6 +37,9 @@ Native 的工具、报告/消息采集和 transcript 模型调用仍由 TaskComp
    由公共驱动结算；流关闭不得自动构造 assessment。
    finish 的 usage 参数仅接受 completed/failed 结算；其它 outcome 携带 usage 明确
    抛 ValueError，宿主应将去重后的这部分用量先交原 accumulate_usage 通道，不静默丢弃。
+   Native supervisor 在中断时保留原在途 Goal owner；ACTIVE 不得触发新的 attempt。
+   显式 InteractiveInput 在原 goal/revision/attempt 下恢复，并通过原 rail 结算；
+   待答期间 pause/resume 不增加 revision，clear/overwrite/stop 清理旧 owner。
 8. ensure_work 仅委托原宿主准入与去重；Native 继续要求输出消费者。冷恢复构造
    Manager 不启动工作；宿主先以原 registry/checkpoint 确认关联与续接性。
 9. 端口不接管审批、用户/Team/Heartbeat 优先级、Provider generation 或 usage 事件

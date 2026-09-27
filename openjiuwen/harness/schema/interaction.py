@@ -122,6 +122,7 @@ class ActiveInteractionRound:
 
     work: RoundWorkItem
     task_id: Optional[str] = None
+    waiting_for_input: bool = False
 
     @property
     def run_kind(self) -> Literal["user", "goal"]:
@@ -189,6 +190,7 @@ class RoundOutcome:
     next_work: Optional[RoundWorkItem] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    interrupted: bool = False
 
 
 @dataclass

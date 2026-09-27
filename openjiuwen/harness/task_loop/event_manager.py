@@ -7,6 +7,7 @@ import logging
 from collections import deque
 from typing import Optional
 
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.harness.schema.interaction import RoundWorkItem
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,16 @@ class EventManager:
         logger.debug("[EventManager] goal work queued: goal_id=%s revision=%s", goal_id, revision)
         return True
 
-    def next_work(self) -> Optional[RoundWorkItem]:
+    def next_work(self, *, resume_only: bool = False) -> Optional[RoundWorkItem]:
+        if resume_only:
+            # A parked Goal still owns its original attempt. Only explicit
+            # interaction answers may resume it; retain ordinary user FIFO.
+            for index, work in enumerate(self._user_queue):
+                if isinstance(work.query, InteractiveInput):
+                    del self._user_queue[index]
+                    self._dequeued = work
+                    return work
+            return None
         if self._user_queue:
             self._dequeued = self._user_queue.popleft()
             return self._dequeued
