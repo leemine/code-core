@@ -23,6 +23,9 @@
       "suites": [
         "code-core.python.execution-construction",
         "code-core.python.native-output",
+        "code-core.python.goal-control",
+        "code-core.python.native-interaction",
+        "code-core.python.codex-lifecycle",
         "code-core.python.agent-builder",
         "code-core.python.dev-tools",
         "code-core.python.harness-protocol",
@@ -174,6 +177,149 @@
         "tests/unit_tests/harness_providers/test_native_rendered_result.py",
         "tests/unit_tests/harness_providers/test_io_adapter.py",
         "tests/unit_tests/harness_providers/test_base.py",
+        "-q",
+        "-o",
+        "addopts=",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
+    },
+    {
+      "id": "code-core.python.goal-control",
+      "owner": "harness",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 180,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/harness/goal",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 60
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/harness/goal",
+        "-q",
+        "-o",
+        "addopts=",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
+    },
+    {
+      "id": "code-core.python.native-interaction",
+      "owner": "harness",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 180,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/harness/test_task_completion_extensions.py",
+          "tests/unit_tests/harness/test_deep_agent_interaction.py",
+          "tests/unit_tests/harness/test_deep_agent_event_executor.py",
+          "tests/unit_tests/harness/test_deep_agent_rail_event_routing.py",
+          "tests/unit_tests/harness/test_deep_agent_stream_aclose.py",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 60
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/harness/test_task_completion_extensions.py",
+        "tests/unit_tests/harness/test_deep_agent_interaction.py",
+        "tests/unit_tests/harness/test_deep_agent_event_executor.py",
+        "tests/unit_tests/harness/test_deep_agent_rail_event_routing.py",
+        "tests/unit_tests/harness/test_deep_agent_stream_aclose.py",
+        "-q",
+        "-o",
+        "addopts=",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
+    },
+    {
+      "id": "code-core.python.codex-lifecycle",
+      "owner": "harness-providers",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 180,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/harness_providers/test_codex.py",
+          "tests/unit_tests/harness_providers/test_codex_security.py",
+          "tests/unit_tests/harness_providers/test_codex_stop_confirmation.py",
+          "tests/unit_tests/harness_providers/test_codex_process_scope.py",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 60
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/harness_providers/test_codex.py",
+        "tests/unit_tests/harness_providers/test_codex_security.py",
+        "tests/unit_tests/harness_providers/test_codex_stop_confirmation.py",
+        "tests/unit_tests/harness_providers/test_codex_process_scope.py",
         "-q",
         "-o",
         "addopts=",
