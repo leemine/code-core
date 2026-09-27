@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 from enum import Enum
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -872,15 +873,24 @@ def test_error_additional_details_are_kept_and_bounded() -> None:
 async def test_auth_retries_are_reported_before_the_fallback_activates(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every auth retry reaches the host as a diagnostic; only then does the fallback run."""
     sdk, state = _install_fake_sdk(monkeypatch)
-    auth_error = SimpleNamespace(message="unauthorized", codex_error_info=SimpleNamespace(http_status=401))
+    auth_error = SimpleNamespace(message="unauthorized", codex_error_info="unauthorized")
+
+    async def interrupted(handle: _FakeHandle) -> Any:
+        assert handle.interrupts == 1
+        return _turn_completed(handle.id, _Status.interrupted)
+
+    async def completed(handle: _FakeHandle) -> Any:
+        return _turn_completed(handle.id, _Status.completed)
+
     state.scripts.append(
         [
             _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
             _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
             _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
+            interrupted,
         ]
     )
-    state.scripts.append([_turn_completed("turn-2", _Status.completed)])
+    state.scripts.append([completed])
     config = CodexHarnessConfig(
         inherit_process_env=False,
         max_will_retry_count=2,
@@ -896,6 +906,9 @@ async def test_auth_retries_are_reported_before_the_fallback_activates(monkeypat
         if isinstance(event.event, DiagnosticEvent) and event.event.data.get("kind") == "retrying"
     ]
     assert len(retrying) == 3, "every auth retry must be reported before the fallback"
+    assert _terminal(events).kind is TurnEventKind.FINISHED
+    assert harness.fallback_activated
+    assert [call[0] for call in state.thread_calls] == ["start", "resume"]
     await harness.stop()
     logger.info("codex auth retries are reported before the fallback")
 
@@ -927,6 +940,10 @@ async def test_unconfigured_model_is_reported_from_thread_response(monkeypatch: 
 @pytest.mark.asyncio
 async def test_model_rerouted_updates_the_reported_model(monkeypatch: pytest.MonkeyPatch) -> None:
     sdk, state = _install_fake_sdk(monkeypatch)
+
+    async def completed(handle: _FakeHandle) -> Any:
+        return _turn_completed(handle.id, _Status.completed)
+
     state.scripts.append(
         [
             _notification(
@@ -937,7 +954,7 @@ async def test_model_rerouted_updates_the_reported_model(monkeypatch: pytest.Mon
                 to_model="gpt-5.6-codex",
                 reason="fallback",
             ),
-            _turn_completed("turn-1", _Status.completed),
+            completed,
         ]
     )
     harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
@@ -970,6 +987,11 @@ async def test_exhausted_auth_retries_keep_auth_category_when_fallback_connect_f
     """
     sdk, state = _install_fake_sdk(monkeypatch)
     auth_error = SimpleNamespace(message="unauthorized", codex_error_info="unauthorized")
+
+    async def interrupted(handle: _FakeHandle) -> Any:
+        assert handle.interrupts == 1
+        return _turn_completed(handle.id, _Status.interrupted)
+
     state.scripts.append(
         [
             _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
@@ -977,9 +999,10 @@ async def test_exhausted_auth_retries_keep_auth_category_when_fallback_connect_f
             _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
             _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
             _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
+            interrupted,
         ]
     )
-    harness = CodexHarness(_fallback_config())
+    harness = CodexHarness(replace(_fallback_config(), max_will_retry_count=4))
     original_connect = CodexHarness._connect
 
     async def dead_fallback_connect(harness_self, context, *, model, resume_thread_id):
@@ -1010,14 +1033,21 @@ async def test_generic_final_error_does_not_replace_retrying_auth_failure(
         message="unexpected status 401 Unauthorized: Authentication Error",
         codex_error_info="other",
     )
+
+    async def failed(handle: _FakeHandle) -> Any:
+        return _turn_completed(handle.id, _Status.failed, error=generic_error)
+
+    async def completed(handle: _FakeHandle) -> Any:
+        return _turn_completed(handle.id, _Status.completed)
+
     state.scripts.append(
         [
             _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
             _notification("error", error=generic_error, will_retry=False, thread_id="t", turn_id="x"),
-            _turn_completed("turn-1", _Status.failed, error=generic_error),
+            failed,
         ]
     )
-    state.scripts.append([_turn_completed("turn-2", _Status.completed)])
+    state.scripts.append([completed])
 
     harness = CodexHarness(_fallback_config())
     await harness.start(_context())

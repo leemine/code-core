@@ -137,7 +137,9 @@ async def test_policy_negotiation_failure_closes_client_before_any_turn(monkeypa
     assert not state.thread_calls
 
 
-def test_isolated_launch_uses_only_selected_environment_and_is_instance_local(monkeypatch):
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_isolated_launch_uses_only_selected_environment_and_is_instance_local(monkeypatch, platform):
+    monkeypatch.setattr("openjiuwen.harness_providers.codex.sdk_compat.sys.platform", platform)
     monkeypatch.setenv("A0_UNAUTHORIZED_SECRET", "must-not-be-inherited")
     sdk = SimpleNamespace(client=SimpleNamespace(
         _resolve_codex_bin=lambda config: "/bundled/codex",
@@ -160,7 +162,14 @@ def test_isolated_launch_uses_only_selected_environment_and_is_instance_local(mo
     transport.start()  # Already running; no duplicate process or readers.
     assert popen.call_count == 1
     assert popen.call_args.kwargs["env"] == {"SELECTED": "allowed", "PATH": ""}
-    assert popen.call_args.args[0] == ["/bundled/codex", "--config", 'model="test"', "app-server", "--listen", "stdio://"]
+    launched = popen.call_args.args[0]
+    if platform == "linux":
+        assert launched[1].endswith("/codex/process_scope.py") and launched[2] == "--"
+        assert transport._jiuwen_process_scope is True
+        launched = launched[3:]
+    else:
+        assert not getattr(transport, "_jiuwen_process_scope", False)
+    assert launched == ["/bundled/codex", "--config", 'model="test"', "app-server", "--listen", "stdio://"]
     assert other_transport.start is original_start
     original_start.assert_not_called()
     transport._start_reader_thread.assert_called_once()
