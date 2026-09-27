@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-09-15 |
+| 最近一次修订日期 | 2026-09-27 |
 | 关联 feature | `F_04_authoritative-terminal-stream.md` |
 
 ## 范围 / 边界
@@ -58,6 +58,11 @@
 8. `EventManager` 是 supervisor 的唯一工作队列：`push_user` / `push_goal` 分工，
    `push_goal` 在 goal 已 running 时返回 `False`（去重）；`next_work` 只弹一个
    `RoundWorkItem`。见 `S_11` goal 语义。
+   Goal 返回 interrupt 时 ActiveInteractionRound/EventManager 保留在途身份，
+   supervisor 等显式 InteractiveInput；输出 attach 或 idle 不得安排下一尝试。
+   回答复用原 goal/revision/attempt，并走原 task-iteration rail 完成结算。
+   EventManager.next_work(resume_only=True) 只从原 user 队列取 InteractiveInput；
+   普通用户 FIFO 在待答解除前保留，不将普通字符串或 Goal 指令当权限答复。
 9. 状态持久化：`load_state(session)` 从 session 读 `DeepAgentState`（`_SESSION_STATE_KEY`）；
    `save_state` 写回；`clear_state` 清空并移除 session 运行时属性。`DeepAgentState` 字段：`iteration` / `task_plan` / `stop_condition_state` /
    `pending_follow_ups` / `plan_mode: PlanModeState`（`schema/state.py`，`to_session_dict` /

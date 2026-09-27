@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
-| 最近一次修订日期 | 2026-09-24 |
+| 最近一次修订日期 | 2026-09-27 |
 | 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md |
 
 ## 范围 / 边界
@@ -138,6 +138,16 @@
     头和禁用 OAuth 的远端 MCP；
     完整有效配置逐 generation 封存和回读，但稳定 scope 身份继续按无临时 MCP 的既有算法计算，使旧 Session 可冷恢复。
     Provider 不复制产品工具、不启动通用 MCP 注册中心，也不把 Team operator 权限用于 Single。
+
+18. **Codex 停止等待原生退出确认**：interrupt RPC 应答不等于工具退出。每次物理 Turn 在
+    turn/start 发出前保留独立的 client、启动回执及唯一 SDK reader；只有相同原生 turn id 的
+    turn/completed 且该 reader 排空才允许关闭 App Server 或重试输入。idle timeout 不取消正在
+    消费的 SDK anext；等待超时、错误或无匹配 terminal 的 EOF 均保留原所有者供停止重试。
+    停止同时等待在途连接清理，禁止迟到连接发布新 client 或派发输入；关闭 client 后保留并
+    等待 SDK 子进程句柄，确认失败不能发布 TERMINATED。Linux 启动器以独立私有 subreaper
+    包装 App Server，不修改宿主进程；CLI 退出后继续回收被收养的工具后代，直到无自有子进程
+    才以 0 退出。包装器被强杀或清理失败不是退出确认。其它平台不宣称该 Linux 进程树保证。
+    清理锁只串行资源释放，不另建 Turn 队列。
 
 ## 接口契约
 
