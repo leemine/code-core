@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-09-03 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-09-28 |
+| 关联 feature | `F_15_browser-execution-identity.md` |
 
 ## 范围 / 边界
 
@@ -69,6 +69,11 @@
     当前结果限制在 12 KB 内，再统一交给 `ToolResultWindowProcessor`；模型只保留最近一个有界结果，
     并发只读结果的合并结构由 PageState 提供。WorkingContext 默认只投影 runtime 权威状态，
     不再要求模型维护第二份记忆。
+11. **External Browser child 不嵌套 Native worker**：同 Provider Browser child 通过
+    `BrowserExecutionToolGateway` 使用同一个身份绑定的 `BrowserAgentRuntime` 工具内核；不得在
+    External Turn 内调用 `run_browser_task()` 再创建 Native `ReActAgent`，也不得绕过 gateway
+    直接取得 raw Playwright MCP。gateway close 只释放当前 Task 资源，授权 Profile 的保留/重置
+    仍由 Browser lifecycle owner 决定。
 
 ## 接口契约
 
@@ -123,3 +128,5 @@ async def cleanup_subagent_task_resources(subagent: Any) -> None
   字段 —— `S_01`（`SubAgentSpec` 解析成 `SubAgentConfig`，装配见 `S_13`）。
 - `SubagentRail` 挂载 / `create_subagent` 装配 —— `S_04` / `S_02`。
 - `create_*_agent` 复用 `create_deep_agent` 构造流 —— `S_01`。
+- Browser preset 后续接入 Profile/Instance/Task 身份时必须复用 `S_20`，不得把 legacy
+  `browser_key`、Profile 名或 user-data-dir 当作授权主体。

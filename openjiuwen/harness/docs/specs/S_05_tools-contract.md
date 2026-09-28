@@ -5,14 +5,14 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-09-22 |
+| 关联模块 | `openjiuwen/harness/tools/`（131 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
+| 最近一次修订日期 | 2026-09-28 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_provider-neutral-subagent-execution.md` |
 
 ## 范围 / 边界
 
 本规约定义 harness 的工具（tools）子系统契约：工具形态、注册/发现、分组工具、描述与
-i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件），但每类只钉**契约**，
+i18n、工具生命周期。`tools/` 是 harness 最大的子模块（131 文件），但每类只钉**契约**，
 具体工具的 docstring / 实现细节不在此展开。
 
 具体覆盖：
@@ -92,7 +92,12 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 10. **Browser 可恢复错误不消耗模型回合**：generation 刷新、单步骤 Batch primitive 改写、
     primary link 导航、Probe JSON 一次重试和新标签页 URL 等待由 runtime 确定性处理；只有
     无法唯一解析目标或页面语义确实不充分时才把紧凑错误返回模型。
-11. **模型读到的工具结果文本只来自 `Tool.render_for_llm`**：`AbilityManager` 构造工具结果
+11. **External Browser 工具只走身份绑定网关**：`BrowserExecutionToolGateway` 实现公共
+    `harness_protocol.ToolGateway`，只公开冻结 allowlist 中存在于 MCP catalog 的 primitive，外加
+    core 已有的 Probe/Batch 确定性 helper。它不启动第二个 Browser worker 模型；每次调用先验证
+    schema、task/request 归属、PageState ref 与可选宿主准入，再串行委托同一个
+    `BrowserAgentRuntime`。Provider 不得获得私有 MCP client、任意工具名或扩大后的 schema。
+12. **模型读到的工具结果文本只来自 `Tool.render_for_llm`**：`AbilityManager` 构造工具结果
     `ToolMessage` 时对工具实例调用 `render_for_llm(result)`；结构化结果原样留在
     `ToolCallInputs.tool_result` 给 rail / 事件 / 日志。默认实现（`render_tool_output`）：成功取
     `data["content"]`（`data` 为字符串直接用，无 `content` 的其它载荷序列化为 JSON），失败取
@@ -242,6 +247,7 @@ class WorktreeLifecyclePolicy(str, Enum): ...
 - 子代理工具（spawn/wait/send_input/close/resume）消费 `subagent_runtime` —— `S_10`。
 - 任务计划模型（`TaskPlan` / `TodoItem` / `TodoStatus`）—— 本 spec（`schema/task.py`）。
 - goal 工具接 `GoalManager` —— `S_11`；LSP 工具接 `lsp/` —— `S_14`。
+- Browser Profile/Instance/Task 的非敏感身份与副作用前 scope 校验 —— `S_20`。
 - 工具描述的文本归属 `prompts/tools/` —— `S_06`。
 
 
