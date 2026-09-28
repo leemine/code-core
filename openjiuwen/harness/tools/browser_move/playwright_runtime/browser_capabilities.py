@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Iterable
-
 
 CORE_BROWSER_CAPABILITY_NAME = "core"
 
@@ -213,6 +214,17 @@ def _stable_unique(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def browser_tool_allowlist_fingerprint(tool_names: Iterable[str]) -> str:
+    """Return a canonical digest for the effective Browser tool allowlist."""
+    normalized = sorted(_stable_unique(tool_names))
+    encoded = json.dumps(
+        normalized,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
 def _build_capability_index(
     available_capabilities: Iterable[BrowserCapability],
 ) -> dict[str, BrowserCapability]:
@@ -285,5 +297,6 @@ __all__ = [
     "VISION_BROWSER_TOOL_NAMES",
     "BrowserCapability",
     "ResolvedBrowserCapabilities",
+    "browser_tool_allowlist_fingerprint",
     "resolve_browser_capabilities",
 ]

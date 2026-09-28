@@ -24,15 +24,24 @@ from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVSto
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
+from openjiuwen.core.single_agent.schema.agent_result import Artifact
 
 from ..drivers.managed_browser import ManagedBrowserDriver, _default_chrome_user_data_dir
 from ..utils.parsing import extract_json_object
 from .agents import build_browser_worker_agent
+from .artifact_projection import BrowserArtifactKind, project_browser_output_artifact
+from .browser_capabilities import browser_tool_allowlist_fingerprint
 from .config import BrowserInstanceConfig, BrowserRunGuardrails, parse_command_args, resolve_playwright_mcp_cwd
+from .identity import BrowserExecutionFileRoots, BrowserExecutionIdentity
 from .profiles import BrowserProfile, BrowserProfileStore
 from .service_registry import BROWSER_SERVICE_REGISTRY, BrowserServiceIdentity
 
 MAX_ITERATION_MESSAGE = "Max iterations reached without completion"
+
+
+class BrowserLifecycleCleanupError(RuntimeError):
+    """Raised when reset cannot prove that detached resources stopped."""
+
 _ctx_observer_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "playwright_runtime_observer_session_id",
     default="",
@@ -218,6 +227,8 @@ class BrowserService:
         cancel_store: Optional[BaseKVStore] = None,
         instance: Optional[BrowserInstanceConfig] = None,
         allowed_tool_names: Optional[Iterable[str]] = None,
+        execution_identity: Optional[BrowserExecutionIdentity] = None,
+        file_roots: Optional[BrowserExecutionFileRoots] = None,
     ) -> None:
         self.provider = provider
         self.api_key = api_key
@@ -232,20 +243,21 @@ class BrowserService:
             else tuple(dict.fromkeys(allowed_tool_names))
         )
         self._cancel_store: BaseKVStore = cancel_store or InMemoryKVStore()
+        self._execution_identity = execution_identity
+        self._file_roots = file_roots
 
         self.started = False
         self._browser_agent: Optional[ReActAgent] = None
         self._locks: Dict[str, asyncio.Lock] = {}
         self._sessions: set[str] = set()
         self._inflight_tasks: Dict[str, set[asyncio.Task[Any]]] = {}
-        self._screenshot_subdir = "screenshots"
-        self._artifacts_subdir = "artifacts"
+        self._inflight_cancel_reasons: dict[asyncio.Task[Any], str] = {}
         self._mcp_cwd = self._resolve_mcp_cwd()
-        self._screenshots_dir = self._mcp_cwd / self._screenshot_subdir
-        self._artifacts_dir = self._mcp_cwd / self._artifacts_subdir
-        self._profile_store = BrowserProfileStore(self._resolve_profile_store_path())
+        self._configure_file_roots()
         self._profile_name = self._resolve_profile_name()
         self._driver_mode = self._resolve_driver_mode()
+        self._validate_execution_identity_binding()
+        self._profile_store = BrowserProfileStore(self._resolve_profile_store_path())
         self._active_profile: Optional[BrowserProfile] = None
         self._managed_driver: Optional[ManagedBrowserDriver] = None
         self._registered_cdp_endpoint: str = ""
@@ -273,8 +285,43 @@ class BrowserService:
         return self._allowed_tool_names
 
     @property
+    def execution_identity(self) -> Optional[BrowserExecutionIdentity]:
+        """Return the authorized product identity bound to this service."""
+        return self._execution_identity
+
+    @property
+    def file_roots(self) -> Optional[BrowserExecutionFileRoots]:
+        """Return explicit task roots for an identity-bound service."""
+        return self._file_roots
+
+    @property
     def artifacts_subdir(self) -> str:
         return self._artifacts_subdir
+
+    def project_output_artifact(
+        self,
+        file_path: str | os.PathLike[str],
+        *,
+        kind: BrowserArtifactKind | str,
+        source_url: str,
+        tool_name: str,
+        permission_decision_id: str,
+    ) -> Artifact:
+        """Map one authorized output file to the existing product Artifact model."""
+
+        if self._execution_identity is None or self._file_roots is None:
+            raise ValueError(
+                "browser Artifact projection requires execution identity and file roots"
+            )
+        return project_browser_output_artifact(
+            file_path,
+            execution_identity=self._execution_identity,
+            file_roots=self._file_roots,
+            kind=kind,
+            source_url=source_url,
+            tool_name=tool_name,
+            permission_decision_id=permission_decision_id,
+        )
 
     @property
     def connection_healthy(self) -> bool:
@@ -289,6 +336,41 @@ class BrowserService:
         if configured:
             return Path(configured).expanduser()
         return self._mcp_cwd / ".browser" / "profiles.json"
+
+    def _configure_file_roots(self) -> None:
+        roots = self._file_roots
+        if roots is None:
+            if self._execution_identity is not None:
+                raise ValueError(
+                    "browser execution identity requires explicit file roots"
+                )
+            self._screenshot_subdir = "screenshots"
+            self._artifacts_subdir = "artifacts"
+            self._screenshots_dir = self._mcp_cwd / self._screenshot_subdir
+            self._artifacts_dir = self._mcp_cwd / self._artifacts_subdir
+            return
+        if not isinstance(roots, BrowserExecutionFileRoots):
+            raise ValueError("file_roots must be a BrowserExecutionFileRoots")
+        runtime_workspace = os.path.realpath(
+            os.path.abspath(os.path.normpath(str(self._mcp_cwd.expanduser())))
+        )
+        if os.path.normcase(roots.workspace) != os.path.normcase(runtime_workspace):
+            raise ValueError("browser file roots workspace does not match MCP cwd")
+        if (
+            self._execution_identity is not None
+            and roots.workspace != self._execution_identity.instance.workspace
+        ):
+            raise ValueError(
+                "browser file roots workspace does not match execution identity"
+            )
+        self._screenshots_dir = Path(roots.outputs_root) / "screenshots"
+        self._artifacts_dir = Path(roots.outputs_root) / "artifacts"
+        self._screenshot_subdir = self._screenshots_dir.relative_to(
+            self._mcp_cwd.resolve()
+        ).as_posix()
+        self._artifacts_subdir = self._artifacts_dir.relative_to(
+            self._mcp_cwd.resolve()
+        ).as_posix()
 
     @staticmethod
     def _legacy_profile_store_path() -> Path:
@@ -328,6 +410,37 @@ class BrowserService:
             return explicit
         return "remote"
 
+    def _validate_execution_identity_binding(self) -> None:
+        identity = self._execution_identity
+        if identity is None:
+            return
+        if not isinstance(identity, BrowserExecutionIdentity):
+            raise ValueError("execution_identity must be a BrowserExecutionIdentity")
+        if identity.profile.backend.value != self._driver_mode:
+            raise ValueError("browser execution backend does not match driver mode")
+        if identity.profile.profile_id != self._profile_name:
+            raise ValueError("browser execution profile does not match runtime profile")
+        instance_key = self._instance.sanitized_key()
+        if not instance_key or instance_key != identity.instance.instance_id:
+            raise ValueError("browser execution instance does not match runtime key")
+        runtime_workspace = os.path.normcase(
+            os.path.abspath(os.path.normpath(str(self._mcp_cwd.expanduser())))
+        )
+        identity_workspace = os.path.normcase(identity.instance.workspace)
+        if runtime_workspace != identity_workspace:
+            raise ValueError("browser execution workspace does not match MCP cwd")
+        if self._allowed_tool_names is None:
+            raise ValueError(
+                "browser execution identity requires an explicit tool allowlist"
+            )
+        expected_fingerprint = browser_tool_allowlist_fingerprint(
+            self._allowed_tool_names
+        )
+        if identity.task.capability_fingerprint != expected_fingerprint:
+            raise ValueError(
+                "browser execution capability fingerprint does not match tool allowlist"
+            )
+
     def _build_lifecycle_identity(self) -> BrowserServiceIdentity:
         """Build the process resource identity for this browser instance."""
         instance = self._instance
@@ -342,17 +455,11 @@ class BrowserService:
         else:
             display_mode = self._driver_mode
 
-        explicit_user_data_dir = str(
-            (instance.user_data_dir if instance else "")
-            or os.getenv("BROWSER_MANAGED_USER_DATA_DIR")
-            or ""
-        ).strip()
-        normalized_user_data_dir = (
-            os.path.normcase(
-                os.path.normpath(str(Path(explicit_user_data_dir).expanduser()))
+        managed_user_data_dir = self._managed_user_data_dir()
+        normalized_user_data_dir = os.path.normcase(
+            os.path.abspath(
+                os.path.normpath(str(Path(managed_user_data_dir).expanduser()))
             )
-            if explicit_user_data_dir
-            else f"profile:{self._profile_name}"
         )
         server_id = (self.mcp_cfg.server_id or "").strip() or self.mcp_cfg.server_name
         return BrowserServiceIdentity(
@@ -367,6 +474,16 @@ class BrowserService:
             user_data_dir=normalized_user_data_dir,
             cdp_endpoint=self._configured_cdp_endpoint(),
             server_id=server_id,
+            profile_generation=(
+                self._execution_identity.profile.generation
+                if self._execution_identity is not None
+                else 0
+            ),
+            instance_generation=(
+                self._execution_identity.instance.generation
+                if self._execution_identity is not None
+                else 0
+            ),
         )
 
     @property
@@ -381,8 +498,8 @@ class BrowserService:
 
     def acquire_task_binding(self) -> None:
         """Acquire one task reference to the shared browser process resources."""
-        self._task_binding_ref_count += 1
         self._acquire_registry_lease()
+        self._task_binding_ref_count += 1
 
     @staticmethod
     def _allocate_free_port() -> int:
@@ -421,6 +538,23 @@ class BrowserService:
             tasks.discard(task)
             if not tasks:
                 self._inflight_tasks.pop(key, None)
+
+    def _cancel_inflight_tasks(
+        self,
+        reason: str,
+        *,
+        preserve_task: Optional[asyncio.Task[Any]] = None,
+    ) -> None:
+        tasks = {
+            task
+            for registered in self._inflight_tasks.values()
+            for task in registered
+        }
+        for task in tasks:
+            if task is preserve_task or task.done():
+                continue
+            self._inflight_cancel_reasons[task] = reason
+            task.cancel()
 
     def _resolve_mcp_cwd(self) -> Path:
         params = getattr(self.mcp_cfg, "params", {}) or {}
@@ -528,22 +662,28 @@ class BrowserService:
             raise ValueError(f"Invalid BROWSER_MANAGED_PORT: {port_raw}") from exc
         return port
 
-    def _build_managed_profile(self) -> BrowserProfile:
+    def _managed_user_data_dir(self) -> str:
+        """Resolve the effective managed Chrome profile directory."""
         instance = self._instance
+        explicit = str(
+            (instance.user_data_dir if instance else "")
+            or os.getenv("BROWSER_MANAGED_USER_DATA_DIR")
+            or ""
+        ).strip()
+        if explicit:
+            return explicit
+        kill_existing_raw = (
+            os.getenv("BROWSER_MANAGED_KILL_EXISTING") or ""
+        ).strip().lower()
+        if kill_existing_raw in {"1", "true", "yes", "on"}:
+            return str(_default_chrome_user_data_dir())
+        return str(self._mcp_cwd / ".browser-profiles" / self._profile_name)
+
+    def _build_managed_profile(self) -> BrowserProfile:
         host = (os.getenv("BROWSER_MANAGED_HOST") or "127.0.0.1").strip() or "127.0.0.1"
         port = self._resolve_managed_port()
 
-        kill_existing_raw = (os.getenv("BROWSER_MANAGED_KILL_EXISTING") or "").strip().lower()
-        kill_existing = kill_existing_raw in {"1", "true", "yes", "on"}
-        explicit_user_data_dir = (
-            (instance.user_data_dir if instance else "") or (os.getenv("BROWSER_MANAGED_USER_DATA_DIR") or "")
-        ).strip()
-        if explicit_user_data_dir:
-            user_data_dir = explicit_user_data_dir
-        elif kill_existing:
-            user_data_dir = _default_chrome_user_data_dir()
-        else:
-            user_data_dir = str(self._mcp_cwd / ".browser-profiles" / self._profile_name)
+        user_data_dir = self._managed_user_data_dir()
         browser_binary = self._configured_browser_binary()
         extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
         cdp_url = f"http://{host}:{port}"
@@ -992,13 +1132,10 @@ class BrowserService:
         except asyncio.CancelledError:
             pass
 
-    def _clear_task_scoped_state(self) -> None:
+    def _clear_task_scoped_state(self, *, cancel_reason: str) -> None:
         """Drop observers and task/session state without touching the profile."""
         self._browser_agent = None
-        for tasks in self._inflight_tasks.values():
-            for task in tuple(tasks):
-                if not task.done():
-                    task.cancel()
+        self._cancel_inflight_tasks(cancel_reason)
         self._inflight_tasks.clear()
         self._locks.clear()
         self._sessions.clear()
@@ -1013,7 +1150,9 @@ class BrowserService:
             return False
         if not self._registry_acquired:
             await self._stop_heartbeat()
-            self._clear_task_scoped_state()
+            self._clear_task_scoped_state(
+                cancel_reason="browser_task_binding_released"
+            )
             self.started = False
             self._registered_cdp_endpoint = ""
             self._connection_healthy = False
@@ -1037,7 +1176,9 @@ class BrowserService:
         self._registered_cdp_endpoint = ""
         self._connection_healthy = False
         self._last_heartbeat_ok = None
-        self._clear_task_scoped_state()
+        self._clear_task_scoped_state(
+            cancel_reason="browser_task_binding_released"
+        )
 
         next_owner = release.next_heartbeat_owner
         if next_owner is not None and next_owner.started:
@@ -1054,9 +1195,23 @@ class BrowserService:
         if self.started:
             self._start_heartbeat()
 
-    async def detach_lifecycle_resources(self) -> Optional[ManagedBrowserDriver]:
+    async def detach_lifecycle_resources(
+        self,
+        *,
+        preserve_task: Optional[asyncio.Task[Any]] = None,
+    ) -> Optional[ManagedBrowserDriver]:
         """Detach this task binding while preserving the driver for reset."""
         driver = self._managed_driver
+        self._cancel_inflight_tasks(
+            "browser_lifecycle_reset",
+            preserve_task=preserve_task,
+        )
+        if preserve_task is None:
+            self._inflight_tasks.clear()
+            self._locks.clear()
+            self._sessions.clear()
+            self._failure_context_by_session.clear()
+            self._progress_by_session.clear()
         await self._stop_heartbeat()
         self.started = False
         self._registered_cdp_endpoint = ""
@@ -1069,8 +1224,15 @@ class BrowserService:
         """Remove this service's MCP binding during coordinated reset."""
         await self._remove_registered_mcp_server()
 
-    def clear_managed_browser_resources(self) -> None:
-        """Forget stopped managed resources after a coordinated reset."""
+    def clear_managed_browser_resources(
+        self,
+        failed_drivers: tuple[Any, ...] = (),
+    ) -> None:
+        """Forget only resources whose stop operation completed."""
+        if self._managed_driver is not None and any(
+            self._managed_driver is driver for driver in failed_drivers
+        ):
+            return
         self._managed_driver = None
         self._active_profile = None
 
@@ -1079,6 +1241,7 @@ class BrowserService:
         cls,
         identity: BrowserServiceIdentity,
         fallback_service: Optional["BrowserService"] = None,
+        preserve_task: Optional[asyncio.Task[Any]] = None,
     ) -> bool:
         """Stop all process resources associated with one browser identity."""
         snapshot = BROWSER_SERVICE_REGISTRY.begin_reset(identity)
@@ -1087,29 +1250,51 @@ class BrowserService:
             services = (fallback_service,)
         drivers = list(snapshot.managed_drivers)
         for service in services:
-            driver = await service.detach_lifecycle_resources()
+            driver = await service.detach_lifecycle_resources(
+                preserve_task=preserve_task,
+            )
             if driver is not None and all(existing is not driver for existing in drivers):
                 drivers.append(driver)
 
         representative = services[0] if services else fallback_service
+        cleanup_errors: list[str] = []
+        if (
+            snapshot.cleanup_error
+            and representative is None
+            and not drivers
+        ):
+            cleanup_errors.append("cleanup_owner_unavailable")
         if representative is not None:
             try:
                 await representative.remove_registered_mcp_binding()
-            except Exception:
-                pass
+            except Exception as exc:
+                cleanup_errors.append(
+                    f"mcp_binding_remove_failed:{type(exc).__name__}"
+                )
 
+        failed_drivers: list[Any] = []
         for driver in drivers:
             try:
                 await asyncio.to_thread(driver.stop)
-            except Exception:
-                pass
-            finally:
-                BROWSER_SERVICE_REGISTRY.unregister_managed_driver(
-                    identity,
-                    driver,
+            except Exception as exc:
+                failed_drivers.append(driver)
+                cleanup_errors.append(
+                    f"managed_driver_stop_failed:{type(exc).__name__}"
                 )
         for service in services:
-            service.clear_managed_browser_resources()
+            service.clear_managed_browser_resources(tuple(failed_drivers))
+        if cleanup_errors:
+            error = ",".join(dict.fromkeys(cleanup_errors))
+            BROWSER_SERVICE_REGISTRY.restore_failed_reset(
+                identity,
+                tuple(failed_drivers),
+                error,
+            )
+            raise BrowserLifecycleCleanupError(
+                "browser lifecycle cleanup failed; identity remains blocked: "
+                f"{identity.profile_name} ({error})"
+            )
+        BROWSER_SERVICE_REGISTRY.complete_reset(identity)
         return bool(services or drivers)
 
     async def reset(self) -> None:
@@ -1142,7 +1327,11 @@ class BrowserService:
         return reset_count
 
     async def _restart_browser_runtime(self) -> None:
-        await self.reset()
+        await self._reset_lifecycle_resources(
+            self._lifecycle_identity,
+            fallback_service=self,
+            preserve_task=asyncio.current_task(),
+        )
         await self.ensure_started()
 
     @staticmethod
@@ -1591,6 +1780,27 @@ class BrowserService:
         return await self._run_task_once(task=task, session_id=session_id, request_id=request_id)
 
     @staticmethod
+    def _cancelled_task_result(
+        *,
+        session_id: str,
+        request_id: str,
+        attempt: int,
+        error: str = "cancelled_by_frontend",
+    ) -> Dict[str, Any]:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "request_id": request_id,
+            "final": "",
+            "page": {"url": "", "title": ""},
+            "screenshot": None,
+            "error": error,
+            "attempt": attempt,
+            "failure_summary": None,
+            "progress_state": None,
+        }
+
+    @staticmethod
     def _is_max_iteration_result(parsed: Dict[str, Any]) -> bool:
         if not isinstance(parsed, dict):
             return False
@@ -1694,9 +1904,18 @@ class BrowserService:
         request_id: Optional[str] = None,
         timeout_s: Optional[int] = None,
     ) -> Dict[str, Any]:
+        supplied_request_id = (request_id or "").strip()
+        if self._execution_identity is not None:
+            bound_request_id = self._execution_identity.task.request_id
+            if supplied_request_id and supplied_request_id != bound_request_id:
+                raise ValueError(
+                    "browser task request_id does not match execution identity"
+                )
+            rid = bound_request_id
+        else:
+            rid = supplied_request_id or uuid.uuid4().hex
         await self.ensure_started()
         sid = self.session_new(session_id)
-        rid = (request_id or "").strip() or uuid.uuid4().hex
         effective_timeout = int(timeout_s) if (timeout_s is not None and timeout_s > 0) else self.guardrails.timeout_s
         timeout_deadline = (
             asyncio.get_running_loop().time() + float(effective_timeout)
@@ -1713,19 +1932,11 @@ class BrowserService:
                 if await self.is_cancelled(sid, rid):
                     await self.clear_cancel(sid, rid)
                     await self.clear_cancel(sid, None)
-                    result = {
-                        "ok": False,
-                        "session_id": sid,
-                        "request_id": rid,
-                        "final": "",
-                        "page": {"url": "", "title": ""},
-                        "screenshot": None,
-                        "error": "cancelled_by_frontend",
-                        "attempt": 0,
-                        "failure_summary": None,
-                        "progress_state": None,
-                    }
-                    return result
+                    return self._cancelled_task_result(
+                        session_id=sid,
+                        request_id=rid,
+                        attempt=0,
+                    )
                 last_error: Optional[str] = None
                 used_max_iteration_resume = False
                 next_task = self._build_task_with_failure_context(base_task, previous_failure_summary)
@@ -1746,6 +1957,14 @@ class BrowserService:
                             self.run_task_once(task=next_task, session_id=sid, request_id=rid),
                             timeout=remaining_timeout,
                         )
+                        if await self.is_cancelled(sid, rid):
+                            await self.clear_cancel(sid, rid)
+                            await self.clear_cancel(sid, None)
+                            return self._cancelled_task_result(
+                                session_id=sid,
+                                request_id=rid,
+                                attempt=attempt_idx + 1,
+                            )
                         attempt_idx += 1
                         self._update_progress_from_worker_result(
                             session_id=sid,
@@ -1851,19 +2070,17 @@ class BrowserService:
                     except asyncio.CancelledError:
                         await self.clear_cancel(sid, rid)
                         await self.clear_cancel(sid, None)
-                        result = {
-                            "ok": False,
-                            "session_id": sid,
-                            "request_id": rid,
-                            "final": "",
-                            "page": {"url": "", "title": ""},
-                            "screenshot": None,
-                            "error": "cancelled_by_frontend",
-                            "attempt": attempt_idx + 1,
-                            "failure_summary": None,
-                            "progress_state": None,
-                        }
-                        return result
+                        lifecycle_reason = (
+                            self._inflight_cancel_reasons.pop(current_task, "")
+                            if current_task is not None
+                            else ""
+                        )
+                        return self._cancelled_task_result(
+                            session_id=sid,
+                            request_id=rid,
+                            attempt=attempt_idx + 1,
+                            error=lifecycle_reason or "cancelled_by_frontend",
+                        )
                     except Exception as exc:
                         attempt_idx += 1
                         last_error = str(exc) or repr(exc)
@@ -1907,6 +2124,7 @@ class BrowserService:
                 return result
             finally:
                 if current_task is not None:
+                    self._inflight_cancel_reasons.pop(current_task, None)
                     self._unregister_inflight_task(sid, rid, current_task)
 
     async def shutdown(self) -> None:

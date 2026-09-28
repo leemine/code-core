@@ -51,7 +51,7 @@ harness/
 ├── subagent_runtime/      # 子代理运行时：registry / instance / control / persistence（S_10）
 ├── subagents/             # 内置子代理：browser / code / explore / plan / research / verification（S_18）
 ├── task_loop/             # 任务循环：controller / event_handler / event_executor（S_03）
-├── tools/                 # 工具集合：shell / web / worktree / subagent / skills ...（S_05）
+├── tools/                 # 工具集合：shell / web / worktree / subagent / skills / browser ...（S_05 / S_20）
 └── workspace/             # 工作空间：workspace.py / directory_builder.py（S_09）
 ```
 
@@ -80,6 +80,9 @@ harness/
 | 个人上下文 | `personal_context/` | `S_17` |
 | 子代理与生命周期 | `subagents/` + `subagent_lifecycle.py` | `S_18` |
 | 协议 Harness 实现 / IO adapter / manifest 工厂 | `openjiuwen/harness_providers/`（同级包，见其 `AGENTS.md`） | `S_19` |
+| Browser 执行身份 | `tools/browser_move/playwright_runtime/identity.py` | `S_20` |
+| Browser 用户 Artifact 投影 | `tools/browser_move/playwright_runtime/artifact_projection.py` | `S_20` |
+| Browser Provider-neutral 工具网关 | `tools/browser_move/playwright_runtime/browser_gateway.py` | `S_05` / `S_20` |
 
 ## 架构铁律
 
