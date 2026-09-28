@@ -313,11 +313,14 @@ def test_shutdown_cancels_heartbeat_task() -> None:
             await asyncio.sleep(9999)
 
         svc._heartbeat_task = asyncio.create_task(_long())
-        with patch("playwright_runtime.service.Runner") as mock_runner:
-            mock_runner.stop = AsyncMock()
+        with patch.object(
+            svc,
+            "_remove_registered_mcp_server",
+            AsyncMock(),
+        ) as remove_binding:
             await svc.shutdown()
 
         assert svc._heartbeat_task is None
-        mock_runner.stop.assert_not_awaited()
+        remove_binding.assert_awaited_once()
 
     _run(_test())
