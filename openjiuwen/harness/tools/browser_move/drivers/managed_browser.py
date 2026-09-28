@@ -287,24 +287,41 @@ class ManagedBrowserDriver:
 
     def stop(self, wait_timeout_s: float = 5.0) -> None:
         process = self._process
-        self._process = None
         owns_process = self._owns_process
-        self._owns_process = False
         if process is None:
+            self._owns_process = False
             return
         if not owns_process:
+            self._process = None
             return
         if process.poll() is not None:
+            self._process = None
+            self._owns_process = False
             return
 
+        stop_error: Optional[BaseException] = None
         try:
             process.terminate()
             process.wait(timeout=max(0.5, float(wait_timeout_s)))
-        except Exception:
+        except Exception as exc:
+            stop_error = exc
+
+        if process.poll() is None:
             try:
                 process.kill()
-            except Exception:
-                pass
+                process.wait(timeout=max(0.5, float(wait_timeout_s)))
+            except Exception as exc:
+                stop_error = exc
+
+        if process.poll() is None:
+            self._process = process
+            self._owns_process = True
+            raise RuntimeError(
+                "Managed browser process did not exit after terminate/kill"
+            ) from stop_error
+
+        self._process = None
+        self._owns_process = False
 
     def clear(self):
         # Reap a Chrome child that exited (e.g. user closed the window) but

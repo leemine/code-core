@@ -26,6 +26,18 @@ __all__ = [
     "SRC_ROOT",
     "BrowserStateContextProcessor",
     "BrowserStateContextProcessorConfig",
+    "BrowserBackend",
+    "BrowserArtifactKind",
+    "BrowserArtifactProjectionError",
+    "BrowserExecutionFileRoots",
+    "BrowserExecutionIdentity",
+    "BrowserExecutionToolGateway",
+    "BrowserInstanceIdentity",
+    "BrowserLifecycleCleanupError",
+    "BrowserLifecycleResetInProgressError",
+    "BrowserProfileIdentity",
+    "BrowserTaskIdentity",
+    "BrowserToolAdmission",
     "BrowserWorkingContextProcessor",
     "BrowserWorkingContextProcessorConfig",
     "BrowserWorkingContextRail",
@@ -33,6 +45,7 @@ __all__ = [
     "browser_tools",
     "controller",
     "register_browser_runtime_mcp_server",
+    "project_browser_output_artifact",
     "reset_active_browser_runtimes",
     "reset_managed_browser_runtime",
     "restart_local_browser_runtime_server",
@@ -42,6 +55,42 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
+    if name in {"BrowserExecutionToolGateway", "BrowserToolAdmission"}:
+        module = import_module(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.browser_gateway"
+        )
+        return getattr(module, name)
+    if name in {
+        "BrowserArtifactKind",
+        "BrowserArtifactProjectionError",
+        "project_browser_output_artifact",
+    }:
+        module = import_module(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.artifact_projection"
+        )
+        return getattr(module, name)
+    if name in {
+        "BrowserBackend",
+        "BrowserExecutionFileRoots",
+        "BrowserExecutionIdentity",
+        "BrowserInstanceIdentity",
+        "BrowserProfileIdentity",
+        "BrowserTaskIdentity",
+    }:
+        module = import_module(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.identity"
+        )
+        return getattr(module, name)
+    if name == "BrowserLifecycleCleanupError":
+        module = import_module(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.service"
+        )
+        return getattr(module, name)
+    if name == "BrowserLifecycleResetInProgressError":
+        module = import_module(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.service_registry"
+        )
+        return getattr(module, name)
     if name in {"BrowserStateContextProcessor", "BrowserStateContextProcessorConfig"}:
         module = import_module(
             "openjiuwen.harness.tools.browser_move.playwright_runtime.browser_state_context_processor"

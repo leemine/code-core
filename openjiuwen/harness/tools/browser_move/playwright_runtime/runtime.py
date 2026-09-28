@@ -50,6 +50,7 @@ from .browser_working_context import (
     latest_browser_user_request,
 )
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
+from .identity import BrowserExecutionFileRoots, BrowserExecutionIdentity
 from .page_state import CARD_EVIDENCE_FIELDS, BrowserPageState, BrowserTarget
 from .probe_semantics import normalize_card_probe_payload
 from .probes import (
@@ -419,6 +420,8 @@ class BrowserAgentRuntime:
         guardrails: BrowserRunGuardrails,
         instance: Optional[BrowserInstanceConfig] = None,
         allowed_tool_names: Optional[Iterable[str]] = None,
+        execution_identity: Optional[BrowserExecutionIdentity] = None,
+        file_roots: Optional[BrowserExecutionFileRoots] = None,
     ) -> None:
         ensure_browser_runtime_client_patch()
         self._instance = instance
@@ -434,6 +437,8 @@ class BrowserAgentRuntime:
             guardrails=guardrails,
             instance=instance,
             allowed_tool_names=resolved_allowed_tool_names,
+            execution_identity=execution_identity,
+            file_roots=file_roots,
         )
         self._browser_custom_action_tool = None
         self._browser_list_actions_tool = None

@@ -10,6 +10,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
+class BrowserLifecycleResetInProgressError(RuntimeError):
+    """Raised when an identity already has an active lifecycle reset owner."""
+
+
 @dataclass(frozen=True)
 class BrowserServiceIdentity:
     """Stable process-level identity for one logical browser instance."""
@@ -23,6 +27,8 @@ class BrowserServiceIdentity:
     user_data_dir: str
     cdp_endpoint: str
     server_id: str
+    profile_generation: int = 0
+    instance_generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,7 @@ class BrowserServiceResetSnapshot:
 
     services: tuple[Any, ...]
     managed_drivers: tuple[Any, ...]
+    cleanup_error: str = ""
 
 
 @dataclass
@@ -47,6 +54,7 @@ class _BrowserServiceEntry:
     binding_services: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)
     heartbeat_owner: Optional[weakref.ReferenceType[Any]] = None
     managed_drivers: list[Any] = field(default_factory=list)
+    cleanup_error: str = ""
 
 
 class BrowserServiceRegistry:
@@ -63,12 +71,14 @@ class BrowserServiceRegistry:
 
     def acquire(self, identity: BrowserServiceIdentity, service: Any) -> None:
         with self._lock:
+            self._ensure_identity_available(identity)
             entry = self._entries.setdefault(identity, _BrowserServiceEntry())
             entry.services.add(service)
 
     def activate_binding(self, identity: BrowserServiceIdentity, service: Any) -> bool:
         """Mark an MCP binding active and return whether service owns heartbeat."""
         with self._lock:
+            self._ensure_identity_available(identity)
             entry = self._entries.setdefault(identity, _BrowserServiceEntry())
             entry.services.add(service)
             entry.binding_services.add(service)
@@ -109,7 +119,7 @@ class BrowserServiceRegistry:
                 # Chrome intentionally outlives the last task binding. Retain
                 # only its process handle so an explicit identity-scoped
                 # configuration restart can stop it after task collection.
-                if not entry.managed_drivers:
+                if not entry.managed_drivers and not entry.cleanup_error:
                     self._entries.pop(identity, None)
 
             return BrowserServiceRelease(
@@ -124,6 +134,7 @@ class BrowserServiceRegistry:
         driver: Any,
     ) -> None:
         with self._lock:
+            self._ensure_identity_available(identity)
             entry = self._entries.setdefault(identity, _BrowserServiceEntry())
             entry.services.add(service)
             if getattr(driver, "owns_process", False):
@@ -153,7 +164,11 @@ class BrowserServiceRegistry:
                 for existing in entry.managed_drivers
                 if existing is not driver
             ]
-            if not entry.services and not entry.managed_drivers:
+            if (
+                not entry.services
+                and not entry.managed_drivers
+                and not entry.cleanup_error
+            ):
                 self._entries.pop(identity, None)
 
     def begin_reset(
@@ -165,9 +180,14 @@ class BrowserServiceRegistry:
             entry = self._entries.get(identity)
             if entry is None:
                 return BrowserServiceResetSnapshot(services=(), managed_drivers=())
+            if entry.cleanup_error == "reset_in_progress":
+                raise BrowserLifecycleResetInProgressError(
+                    "browser lifecycle reset is already in progress"
+                )
 
             services = tuple(entry.services)
             drivers = list(entry.managed_drivers)
+            previous_cleanup_error = entry.cleanup_error
             for service in services:
                 driver = getattr(service, "managed_driver", None)
                 if driver is not None and all(existing is not driver for existing in drivers):
@@ -176,13 +196,37 @@ class BrowserServiceRegistry:
             entry.binding_services.clear()
             entry.heartbeat_owner = None
             entry.managed_drivers.clear()
-            if not entry.services:
-                self._entries.pop(identity, None)
+            entry.cleanup_error = "reset_in_progress"
 
             return BrowserServiceResetSnapshot(
                 services=services,
                 managed_drivers=tuple(drivers),
+                cleanup_error=previous_cleanup_error,
             )
+
+    def complete_reset(self, identity: BrowserServiceIdentity) -> None:
+        """Clear the reset barrier after all detached resources stopped."""
+        with self._lock:
+            entry = self._entries.get(identity)
+            if entry is None:
+                return
+            entry.cleanup_error = ""
+            if not entry.services and not entry.managed_drivers:
+                self._entries.pop(identity, None)
+
+    def restore_failed_reset(
+        self,
+        identity: BrowserServiceIdentity,
+        managed_drivers: tuple[Any, ...],
+        error: str,
+    ) -> None:
+        """Retain the exact owner after cleanup fails and block reacquisition."""
+        with self._lock:
+            entry = self._entries.setdefault(identity, _BrowserServiceEntry())
+            entry.cleanup_error = str(error or "cleanup_failed")
+            for driver in managed_drivers:
+                if all(existing is not driver for existing in entry.managed_drivers):
+                    entry.managed_drivers.append(driver)
 
     def is_heartbeat_owner(
         self,
@@ -199,7 +243,12 @@ class BrowserServiceRegistry:
             entry = self._entries.get(identity)
             if entry is None:
                 return
-            if not entry.services and not entry.binding_services and not entry.managed_drivers:
+            if (
+                not entry.services
+                and not entry.binding_services
+                and not entry.managed_drivers
+                and not entry.cleanup_error
+            ):
                 self._entries.pop(identity, None)
 
     def find_managed_driver_identities(
@@ -214,7 +263,7 @@ class BrowserServiceRegistry:
         with self._lock:
             matches: list[BrowserServiceIdentity] = []
             for identity, entry in self._entries.items():
-                if not entry.managed_drivers:
+                if not entry.managed_drivers and not entry.cleanup_error:
                     continue
                 if not isinstance(identity, BrowserServiceIdentity):
                     continue
@@ -236,6 +285,59 @@ class BrowserServiceRegistry:
         with self._lock:
             self._entries.clear()
 
+    def _find_managed_profile_conflict(
+        self,
+        identity: Any,
+    ) -> BrowserServiceIdentity | None:
+        if (
+            not isinstance(identity, BrowserServiceIdentity)
+            or identity.driver_mode != "managed"
+        ):
+            return None
+        for existing, entry in self._entries.items():
+            if existing == identity or not isinstance(existing, BrowserServiceIdentity):
+                continue
+            if existing.driver_mode != "managed":
+                continue
+            if existing.user_data_dir != identity.user_data_dir:
+                continue
+            if (
+                entry.services
+                or entry.binding_services
+                or entry.managed_drivers
+                or entry.cleanup_error
+            ):
+                return existing
+        return None
+
+    def _ensure_identity_available(self, identity: Any) -> None:
+        self._prune_idle_entries()
+        entry = self._entries.get(identity)
+        if entry is not None and entry.cleanup_error:
+            profile_name = getattr(identity, "profile_name", "unknown")
+            raise RuntimeError(
+                "browser lifecycle cleanup is incomplete for identity: "
+                f"{profile_name} ({entry.cleanup_error})"
+            )
+        conflict = self._find_managed_profile_conflict(identity)
+        if conflict is not None:
+            raise ValueError(
+                "managed browser user_data_dir is already owned by another "
+                f"identity: {conflict.profile_name}"
+            )
+
+    def _prune_idle_entries(self) -> None:
+        idle = [
+            identity
+            for identity, entry in self._entries.items()
+            if not entry.services
+            and not entry.binding_services
+            and not entry.managed_drivers
+            and not entry.cleanup_error
+        ]
+        for identity in idle:
+            self._entries.pop(identity, None)
+
     @staticmethod
     def _live_owner(entry: _BrowserServiceEntry) -> Optional[Any]:
         owner = entry.heartbeat_owner() if entry.heartbeat_owner is not None else None
@@ -250,6 +352,7 @@ BROWSER_SERVICE_REGISTRY = BrowserServiceRegistry()
 
 __all__ = [
     "BROWSER_SERVICE_REGISTRY",
+    "BrowserLifecycleResetInProgressError",
     "BrowserServiceIdentity",
     "BrowserServiceRegistry",
     "BrowserServiceRelease",
