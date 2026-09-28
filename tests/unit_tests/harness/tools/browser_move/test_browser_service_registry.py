@@ -15,26 +15,32 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
     BrowserRunGuardrails,
 )
-from openjiuwen.harness.tools.browser_move.playwright_runtime.service import BrowserService
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
-    BrowserAgentRuntime,
     _ACTIVE_BROWSER_RUNTIMES,
+    BrowserAgentRuntime,
     reset_active_browser_runtimes,
     reset_managed_browser_runtime,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.service import BrowserService
 from openjiuwen.harness.tools.browser_move.playwright_runtime.service_registry import (
     BROWSER_SERVICE_REGISTRY,
+    BrowserServiceIdentity,
     BrowserServiceRegistry,
 )
 
 
-def _make_service(*, key: str = "shared") -> BrowserService:
+def _make_service(
+    *,
+    key: str = "shared",
+    profile_name: str = "",
+    runtime_cwd: str | None = None,
+) -> BrowserService:
     mcp_cfg = McpServerConfig(
         server_id=f"test-playwright-{key}",
         server_name=f"test-playwright-{key}",
         server_path="stdio://playwright",
         client_type="stdio",
-        params={"cwd": str(Path.cwd())},
+        params={"cwd": runtime_cwd or str(Path.cwd())},
     )
     return BrowserService(
         provider="openai",
@@ -48,7 +54,11 @@ def _make_service(*, key: str = "shared") -> BrowserService:
             timeout_s=30,
             retry_once=False,
         ),
-        instance=BrowserInstanceConfig(key=key, driver_mode="managed"),
+        instance=BrowserInstanceConfig(
+            key=key,
+            driver_mode="managed",
+            profile_name=profile_name,
+        ),
     )
 
 
@@ -81,6 +91,160 @@ def test_registry_assigns_one_heartbeat_owner_and_transfers_it() -> None:
     second_release = registry.release(identity, second)
     assert second_release.close_mcp_binding is True
     assert second_release.next_heartbeat_owner is None
+
+
+def _identity(*, key: str, user_data_dir: str, driver_mode: str = "managed"):
+    return BrowserServiceIdentity(
+        browser_key=key,
+        profile_name=f"profile-{key}",
+        driver_mode=driver_mode,
+        display_mode="headed" if driver_mode == "managed" else driver_mode,
+        managed_args=(),
+        browser_binary="/usr/bin/google-chrome",
+        user_data_dir=user_data_dir,
+        cdp_endpoint="",
+        server_id=f"playwright-{key}",
+    )
+
+
+def test_registry_rejects_distinct_managed_identities_for_same_user_data_dir() -> None:
+    registry = BrowserServiceRegistry()
+    first = MagicMock()
+    second = MagicMock()
+    first_identity = _identity(key="first", user_data_dir="/profiles/shared")
+    second_identity = _identity(key="second", user_data_dir="/profiles/shared")
+    registry.acquire(first_identity, first)
+
+    with pytest.raises(ValueError, match="already owned"):
+        registry.acquire(second_identity, second)
+
+    assert second_identity not in registry._entries
+
+
+def test_registry_allows_same_managed_identity_to_share_user_data_dir() -> None:
+    registry = BrowserServiceRegistry()
+    identity = _identity(key="shared", user_data_dir="/profiles/shared")
+    first = MagicMock()
+    second = MagicMock()
+
+    registry.acquire(identity, first)
+    registry.acquire(identity, second)
+
+    assert identity in registry._entries
+
+
+def test_registry_releases_user_data_dir_after_last_non_driver_owner() -> None:
+    registry = BrowserServiceRegistry()
+    first = MagicMock()
+    first_identity = _identity(key="first", user_data_dir="/profiles/shared")
+    second_identity = _identity(key="second", user_data_dir="/profiles/shared")
+    registry.acquire(first_identity, first)
+    registry.release(first_identity, first)
+
+    registry.acquire(second_identity, MagicMock())
+
+    assert first_identity not in registry._entries
+    assert second_identity in registry._entries
+
+
+def test_registry_preserved_driver_keeps_user_data_dir_ownership() -> None:
+    registry = BrowserServiceRegistry()
+    first = MagicMock()
+    first_identity = _identity(key="first", user_data_dir="/profiles/shared")
+    second_identity = _identity(key="second", user_data_dir="/profiles/shared")
+    driver = MagicMock(owns_process=True)
+    registry.acquire(first_identity, first)
+    registry.register_managed_driver(first_identity, first, driver)
+    registry.release(first_identity, first)
+
+    with pytest.raises(ValueError, match="already owned"):
+        registry.acquire(second_identity, MagicMock())
+
+
+@pytest.mark.parametrize("operation", ["activate_binding", "register_managed_driver"])
+def test_registry_rejects_managed_profile_conflict_at_every_creation_entry(
+    operation: str,
+) -> None:
+    registry = BrowserServiceRegistry()
+    first_identity = _identity(key="first", user_data_dir="/profiles/shared")
+    second_identity = _identity(key="second", user_data_dir="/profiles/shared")
+    first = MagicMock()
+    registry.acquire(first_identity, first)
+
+    with pytest.raises(ValueError, match="already owned"):
+        if operation == "activate_binding":
+            registry.activate_binding(second_identity, MagicMock())
+        else:
+            registry.register_managed_driver(
+                second_identity,
+                MagicMock(),
+                MagicMock(owns_process=True),
+            )
+
+    assert second_identity not in registry._entries
+
+
+def test_registry_does_not_claim_remote_user_data_dir() -> None:
+    registry = BrowserServiceRegistry()
+    first = MagicMock()
+    second = MagicMock()
+    first_identity = _identity(
+        key="first",
+        user_data_dir="profile:shared",
+        driver_mode="remote",
+    )
+    second_identity = _identity(
+        key="second",
+        user_data_dir="profile:shared",
+        driver_mode="remote",
+    )
+
+    registry.acquire(first_identity, first)
+    registry.acquire(second_identity, second)
+
+    assert first_identity in registry._entries
+    assert second_identity in registry._entries
+
+
+def test_registry_blocks_acquire_during_and_after_failed_reset() -> None:
+    registry = BrowserServiceRegistry()
+    identity = _identity(key="blocked", user_data_dir="/profiles/blocked")
+    owner = MagicMock()
+    registry.acquire(identity, owner)
+
+    registry.begin_reset(identity)
+    with pytest.raises(RuntimeError, match="already in progress"):
+        registry.begin_reset(identity)
+    with pytest.raises(RuntimeError, match="reset_in_progress"):
+        registry.acquire(identity, MagicMock())
+
+    registry.restore_failed_reset(identity, (), "cleanup_failed:OSError")
+    with pytest.raises(RuntimeError, match="cleanup_failed"):
+        registry.acquire(identity, MagicMock())
+
+    registry.begin_reset(identity)
+    registry.complete_reset(identity)
+    registry.acquire(identity, MagicMock())
+
+
+def test_service_registry_claims_effective_managed_user_data_dir(tmp_path) -> None:
+    first = _make_service(
+        key="first",
+        profile_name="shared-profile",
+        runtime_cwd=str(tmp_path),
+    )
+    second = _make_service(
+        key="second",
+        profile_name="shared-profile",
+        runtime_cwd=str(tmp_path),
+    )
+    expected = str(tmp_path / ".browser-profiles" / "shared-profile")
+
+    assert first.lifecycle_identity.user_data_dir == expected
+    first.acquire_task_binding()
+    with pytest.raises(ValueError, match="already owned"):
+        second.acquire_task_binding()
+    assert second._task_binding_ref_count == 0
 
 
 @pytest.mark.asyncio
@@ -146,9 +310,14 @@ async def test_explicit_reset_stops_browser_preserved_after_task_release() -> No
 @pytest.mark.asyncio
 async def test_identity_reset_stops_only_matching_idle_managed_browser(
     monkeypatch,
+    tmp_path,
 ) -> None:
     monkeypatch.setenv("BROWSER_PROFILE_NAME", "jiuwenclaw")
     monkeypatch.delenv("BROWSER_MANAGED_ARGS", raising=False)
+    monkeypatch.setenv(
+        "BROWSER_MANAGED_USER_DATA_DIR",
+        str(tmp_path / "headed-profile"),
+    )
     headed = _make_service(key="")
     headed.acquire_task_binding()
     headed.started = True
@@ -164,6 +333,10 @@ async def test_identity_reset_stops_only_matching_idle_managed_browser(
     await headed.release_task_binding()
 
     monkeypatch.setenv("BROWSER_MANAGED_ARGS", "--headless=new")
+    monkeypatch.setenv(
+        "BROWSER_MANAGED_USER_DATA_DIR",
+        str(tmp_path / "headless-profile"),
+    )
     headless = _make_service(key="")
     headless.acquire_task_binding()
     headless.started = True

@@ -17,6 +17,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabiliti
     PDF_BROWSER_TOOL_NAMES,
     UNSAFE_DEV_BROWSER_TOOL_NAMES,
     VISION_BROWSER_TOOL_NAMES,
+    browser_tool_allowlist_fingerprint,
     resolve_browser_capabilities,
 )
 
@@ -99,6 +100,19 @@ def test_duplicate_categories_are_deduplicated_stably() -> None:
     assert resolved.requested_names == ("pdf", "vision")
     assert resolved.selected_names == ("core", "pdf", "vision")
     assert len(resolved.allowed_tool_names) == len(set(resolved.allowed_tool_names))
+
+
+def test_tool_allowlist_fingerprint_is_order_and_duplicate_independent() -> None:
+    first = browser_tool_allowlist_fingerprint(
+        ("browser_navigate", "browser_click", "browser_navigate")
+    )
+    second = browser_tool_allowlist_fingerprint(
+        ("browser_click", "browser_navigate")
+    )
+
+    assert first == second
+    assert first.startswith("sha256:")
+    assert len(first) == len("sha256:") + 64
 
 
 def test_unknown_category_is_rejected_by_resolver_and_browser_factory() -> None:

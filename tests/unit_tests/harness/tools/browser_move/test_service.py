@@ -12,14 +12,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
     BrowserRunGuardrails,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.profiles import BrowserProfile
-from openjiuwen.harness.tools.browser_move.playwright_runtime.service import BrowserService
-
-from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.harness.tools.browser_move.playwright_runtime.service import (
+    BrowserLifecycleCleanupError,
+    BrowserService,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.service_registry import (
+    BROWSER_SERVICE_REGISTRY,
+    BrowserLifecycleResetInProgressError,
+)
 
 
 def _make_service(*, retry_once: bool = False, runtime_cwd: str | None = None) -> BrowserService:
@@ -607,6 +613,24 @@ def test_profile_store_defaults_to_runtime_workspace() -> None:
     assert getattr(service, "_profile_store").path.resolve() == expected
 
 
+def test_legacy_local_screenshot_still_copies_to_default_folder_and_returns_data_url(
+    tmp_path: Path,
+) -> None:
+    service = _make_service(runtime_cwd=str(tmp_path))
+    source = tmp_path / "source.png"
+    source.write_bytes(b"png-content")
+
+    normalized = service._normalize_screenshot_value(str(source))
+
+    assert normalized == "data:image/png;base64,cG5nLWNvbnRlbnQ="
+    assert (tmp_path / "screenshots" / "source.png").read_bytes() == b"png-content"
+    assert service._normalize_screenshot_value(normalized) == normalized
+    assert (
+        service._normalize_screenshot_value("https://example.test/screenshot.png")
+        == "https://example.test/screenshot.png"
+    )
+
+
 def test_validate_mcp_command_accepts_absolute_node_without_npx(tmp_path: Path) -> None:
     node = tmp_path / "Node Runtime" / ("node.exe" if os.name == "nt" else "node")
     node.parent.mkdir()
@@ -780,6 +804,276 @@ def test_reset_stops_browser_without_eager_restart() -> None:
         assert service.started is False
         assert service._managed_driver is None
         assert service._heartbeat_task is None
+
+    _run(_test())
+
+
+def test_request_cancel_rejects_worker_result_after_cancellation() -> None:
+    async def _test():
+        service = _make_service()
+        worker_started = asyncio.Event()
+
+        async def fake_ensure_started() -> None:
+            return None
+
+        async def cancellation_suppressing_worker(**_kwargs):
+            worker_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return {
+                    "ok": True,
+                    "final": "late success",
+                    "page": {"url": "https://example.com", "title": "late"},
+                    "screenshot": None,
+                    "error": None,
+                }
+
+        with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+            service,
+            "run_task_once",
+            cancellation_suppressing_worker,
+        ):
+            task = asyncio.create_task(
+                service.run_task(
+                    task="work",
+                    session_id="session-cancel",
+                    request_id="request-cancel",
+                )
+            )
+            await worker_started.wait()
+            await service.request_cancel("session-cancel", "request-cancel")
+            result = await task
+
+        assert result["ok"] is False
+        assert result["error"] == "cancelled_by_frontend"
+        assert result["final"] == ""
+
+    _run(_test())
+
+
+def test_release_task_binding_marks_inflight_result_released() -> None:
+    async def _test():
+        service = _make_service()
+        service._task_binding_ref_count = 1
+        worker_started = asyncio.Event()
+
+        async def fake_ensure_started() -> None:
+            return None
+
+        async def blocking_worker(**_kwargs):
+            worker_started.set()
+            await asyncio.Event().wait()
+
+        with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+            service,
+            "run_task_once",
+            blocking_worker,
+        ):
+            task = asyncio.create_task(
+                service.run_task(
+                    task="work",
+                    session_id="session-release",
+                    request_id="request-release",
+                )
+            )
+            await worker_started.wait()
+            assert await service.release_task_binding() is True
+            result = await task
+
+        assert result["ok"] is False
+        assert result["error"] == "browser_task_binding_released"
+
+    _run(_test())
+
+
+def test_reset_marks_inflight_result_stale() -> None:
+    async def _test():
+        service = _make_service()
+        worker_started = asyncio.Event()
+
+        async def fake_ensure_started() -> None:
+            return None
+
+        async def blocking_worker(**_kwargs):
+            worker_started.set()
+            await asyncio.Event().wait()
+
+        with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+            service,
+            "run_task_once",
+            blocking_worker,
+        ), patch.object(
+            service,
+            "_remove_registered_mcp_server",
+            AsyncMock(),
+        ):
+            task = asyncio.create_task(
+                service.run_task(
+                    task="work",
+                    session_id="session-reset",
+                    request_id="request-reset",
+                )
+            )
+            await worker_started.wait()
+            await service.reset()
+            result = await task
+
+        assert result["ok"] is False
+        assert result["error"] == "browser_lifecycle_reset"
+
+    _run(_test())
+
+
+def test_internal_restart_preserves_initiating_task() -> None:
+    async def _test():
+        service = _make_service()
+        current_task = asyncio.current_task()
+
+        with patch.object(
+            BrowserService,
+            "_reset_lifecycle_resources",
+            AsyncMock(return_value=True),
+        ) as reset_resources, patch.object(
+            service,
+            "ensure_started",
+            AsyncMock(),
+        ) as ensure_started:
+            await service._restart_browser_runtime()
+
+        reset_resources.assert_awaited_once_with(
+            service.lifecycle_identity,
+            fallback_service=service,
+            preserve_task=current_task,
+        )
+        ensure_started.assert_awaited_once()
+
+    _run(_test())
+
+
+def test_failed_driver_cleanup_retains_owner_until_retry() -> None:
+    async def _test():
+        BROWSER_SERVICE_REGISTRY.clear()
+        with patch.dict(os.environ, {"BROWSER_DRIVER": "managed"}):
+            service = _make_service()
+        service.acquire_task_binding()
+        driver = MagicMock(owns_process=True)
+        driver.stop.side_effect = OSError("stop failed")
+        service._managed_driver = driver
+        BROWSER_SERVICE_REGISTRY.register_managed_driver(
+            service.lifecycle_identity,
+            service,
+            driver,
+        )
+
+        async def direct_to_thread(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        try:
+            with patch.object(
+                service,
+                "_remove_registered_mcp_server",
+                AsyncMock(),
+            ), patch.object(asyncio, "to_thread", direct_to_thread):
+                with pytest.raises(BrowserLifecycleCleanupError, match="remains blocked"):
+                    await service.reset()
+
+                assert service.managed_driver is driver
+                with pytest.raises(RuntimeError, match="cleanup is incomplete"):
+                    BROWSER_SERVICE_REGISTRY.acquire(
+                        service.lifecycle_identity,
+                        MagicMock(),
+                    )
+
+                driver.stop.side_effect = None
+                await service.reset()
+
+            assert service.managed_driver is None
+            BROWSER_SERVICE_REGISTRY.acquire(
+                service.lifecycle_identity,
+                MagicMock(),
+            )
+        finally:
+            BROWSER_SERVICE_REGISTRY.clear()
+
+    _run(_test())
+
+
+def test_failed_mcp_cleanup_blocks_identity_until_retry() -> None:
+    async def _test():
+        BROWSER_SERVICE_REGISTRY.clear()
+        service = _make_service()
+        service.acquire_task_binding()
+
+        try:
+            with patch.object(
+                service,
+                "_remove_registered_mcp_server",
+                AsyncMock(side_effect=RuntimeError("remove failed")),
+            ):
+                with pytest.raises(BrowserLifecycleCleanupError, match="remains blocked"):
+                    await service.reset()
+
+            with pytest.raises(RuntimeError, match="cleanup is incomplete"):
+                BROWSER_SERVICE_REGISTRY.activate_binding(
+                    service.lifecycle_identity,
+                    MagicMock(),
+                )
+
+            with patch.object(
+                service,
+                "_remove_registered_mcp_server",
+                AsyncMock(),
+            ):
+                await service.reset()
+
+            BROWSER_SERVICE_REGISTRY.activate_binding(
+                service.lifecycle_identity,
+                MagicMock(),
+            )
+        finally:
+            BROWSER_SERVICE_REGISTRY.clear()
+
+    _run(_test())
+
+
+def test_concurrent_reset_has_one_owner_and_one_stable_rejection() -> None:
+    async def _test():
+        BROWSER_SERVICE_REGISTRY.clear()
+        service = _make_service()
+        service.acquire_task_binding()
+        removal_started = asyncio.Event()
+        allow_removal = asyncio.Event()
+
+        async def controlled_remove() -> None:
+            removal_started.set()
+            await allow_removal.wait()
+
+        try:
+            with patch.object(
+                service,
+                "_remove_registered_mcp_server",
+                controlled_remove,
+            ):
+                reset_owner = asyncio.create_task(service.reset())
+                await removal_started.wait()
+
+                with pytest.raises(
+                    BrowserLifecycleResetInProgressError,
+                    match="already in progress",
+                ):
+                    await service.reset()
+
+                allow_removal.set()
+                await reset_owner
+
+            assert service._task_binding_ref_count == 1
+            BROWSER_SERVICE_REGISTRY.acquire(
+                service.lifecycle_identity,
+                MagicMock(),
+            )
+        finally:
+            BROWSER_SERVICE_REGISTRY.clear()
 
     _run(_test())
 

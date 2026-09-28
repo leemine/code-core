@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -52,6 +53,57 @@ def test_stop_does_not_terminate_external_browser() -> None:
 
     process.terminate.assert_not_called()
     process.kill.assert_not_called()
+
+
+def test_stop_confirms_owned_process_exit_before_clearing_handle() -> None:
+    driver = _make_driver()
+    process = MagicMock()
+    process.poll.side_effect = [None, 0, 0]
+    setattr(driver, "_process", process)
+    setattr(driver, "_owns_process", True)
+
+    driver.stop()
+
+    process.terminate.assert_called_once()
+    process.kill.assert_not_called()
+    assert driver._process is None
+    assert driver.owns_process is False
+
+
+def test_stop_kills_after_wait_timeout_and_confirms_exit() -> None:
+    driver = _make_driver()
+    process = MagicMock()
+    process.poll.side_effect = [None, None, 0]
+    process.wait.side_effect = [
+        subprocess.TimeoutExpired(cmd="chrome", timeout=0.5),
+        0,
+    ]
+    setattr(driver, "_process", process)
+    setattr(driver, "_owns_process", True)
+
+    driver.stop(wait_timeout_s=0.5)
+
+    process.terminate.assert_called_once()
+    process.kill.assert_called_once()
+    assert process.wait.call_count == 2
+    assert driver._process is None
+    assert driver.owns_process is False
+
+
+def test_stop_failure_retains_owned_process_for_retry() -> None:
+    driver = _make_driver()
+    process = MagicMock()
+    process.poll.return_value = None
+    process.terminate.side_effect = OSError("terminate failed")
+    process.kill.side_effect = OSError("kill failed")
+    setattr(driver, "_process", process)
+    setattr(driver, "_owns_process", True)
+
+    with pytest.raises(RuntimeError, match="did not exit"):
+        driver.stop()
+
+    assert driver._process is process
+    assert driver.owns_process is True
 
 
 def test_resolve_binary_uses_explicit_chrome_path(tmp_path: Path) -> None:
