@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/browser_move/playwright_runtime/identity.py`、`browser_capabilities.py`、`artifact_projection.py`、`browser_gateway.py`、`service.py`、`service_registry.py` |
-| 最近一次修订日期 | 2026-09-28 |
-| 关联 feature | `F_15_browser-execution-identity.md` |
+| 最近一次修订日期 | 2026-09-29 |
+| 关联 feature | `F_15_browser-execution-identity.md`、`F_16_browser-task-exit.md` |
 
 ## 范围 / 边界
 
@@ -82,7 +82,12 @@ Profile 存储、浏览器进程、MCP transport、权限交互或 Artifact 历�
     递归解冻协议 JSON 后校验 schema，拒绝未知工具、过期 ref、raw primitive 的 PageState target、
     session/request 漂移及宿主 admission 拒绝。调用按 Task 串行，成功后复用 runtime 的结果归一、
     PageState/ref 记录；异常只返回类别，不泄露 transport、凭据或路径。`close()` 幂等并等待活动调用
-    后释放 Task 资源，不直接销毁授权 Profile。
+    后释放 Task 资源，不直接销毁授权 Profile。宿主可在构造时指定 `stop_on_close=True`，
+    此时先通过既有 runtime reset(graceful=True)/registry barrier 停止精确实例的 MCP 和受管 Chrome，确认
+    成功后才释放 Task 并报告 closed；异常保持 gateway 未关闭以供重试。磁盘 Profile 不删除。
+    调用者取消时保留内部清理任务，下次 close 加入同一任务；不能取消后遗失 reset owner。
+    优雅关闭仅作用于自有 Chrome，CDP 失败后使用原进程退出确认；强制退出不承诺最新 Cookie 落盘。
+    默认 False 保留既有 Native/共享实例的 release 行为，不把停止策略隐式应用于其它调用者。
 
 ## 接口契约
 
@@ -174,7 +179,8 @@ BrowserToolAdmission = Callable[
 
 class BrowserExecutionToolGateway:
     def __init__(self, runtime: BrowserAgentRuntime, *,
-                 admit: BrowserToolAdmission | None = None): ...
+                 admit: BrowserToolAdmission | None = None,
+                 stop_on_close: bool = False): ...
     async def definitions(self) -> tuple[ToolDefinition, ...]: ...
     async def invoke(self, invocation: ToolInvocation) -> ToolExecutionResult: ...
     async def close(self) -> None: ...

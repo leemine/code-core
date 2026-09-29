@@ -67,6 +67,7 @@ class BrowserExecutionToolGateway:
         runtime: "BrowserAgentRuntime",
         *,
         admit: BrowserToolAdmission | None = None,
+        stop_on_close: bool = False,
     ) -> None:
         identity = runtime.service.execution_identity
         if not isinstance(identity, BrowserExecutionIdentity):
@@ -82,11 +83,13 @@ class BrowserExecutionToolGateway:
         self._identity = identity
         self._allowed_tool_names = tuple(dict.fromkeys(allowed))
         self._admit = admit
+        self._stop_on_close = stop_on_close
         self._definitions: tuple[ToolDefinition, ...] | None = None
         self._tools: dict[str, Any] = {}
         self._catalog_lock = asyncio.Lock()
         self._invoke_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
         self._closed = False
 
     @property
@@ -292,10 +295,28 @@ class BrowserExecutionToolGateway:
         async with self._close_lock:
             if self._closed:
                 return
-            async with self._catalog_lock:
-                async with self._invoke_lock:
-                    await self._runtime.release_task_resources()
-                    self._closed = True
+            if self._close_task is None:
+                self._close_task = asyncio.create_task(self._close_resources())
+                self._close_task.add_done_callback(
+                    lambda task: None if task.cancelled() else task.exception()
+                )
+            try:
+                # A caller timeout must not strand the registry reset barrier.
+                # Retain the cleanup owner and join it on the next close call.
+                await asyncio.shield(self._close_task)
+            except Exception:
+                self._close_task = None
+                raise
+
+    async def _close_resources(self) -> None:
+        async with self._catalog_lock:
+            async with self._invoke_lock:
+                if self._stop_on_close:
+                    # Stop the exact instance under the existing registry
+                    # barrier; disk Profile data is retained.
+                    await self._runtime.reset(graceful=True)
+                await self._runtime.release_task_resources()
+                self._closed = True
 
 
 __all__ = [

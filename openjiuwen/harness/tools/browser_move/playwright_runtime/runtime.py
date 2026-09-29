@@ -2212,10 +2212,13 @@ class BrowserAgentRuntime:
             self._last_observed_url = ""
             self._ensure_semantic_state_tracker().reset()
 
-    async def reset(self) -> None:
+    async def reset(self, *, graceful: bool = False) -> None:
         """Release the current browser and restart lazily on the next task."""
         try:
-            await self._service.reset()
+            if graceful:
+                await self._service.reset(graceful=True)
+            else:
+                await self._service.reset()
         finally:
             self._advance_page_generation()
             self._last_observed_url = ""

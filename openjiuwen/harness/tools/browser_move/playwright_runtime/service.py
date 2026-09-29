@@ -1242,6 +1242,7 @@ class BrowserService:
         identity: BrowserServiceIdentity,
         fallback_service: Optional["BrowserService"] = None,
         preserve_task: Optional[asyncio.Task[Any]] = None,
+        graceful: bool = False,
     ) -> bool:
         """Stop all process resources associated with one browser identity."""
         snapshot = BROWSER_SERVICE_REGISTRY.begin_reset(identity)
@@ -1275,7 +1276,10 @@ class BrowserService:
         failed_drivers: list[Any] = []
         for driver in drivers:
             try:
-                await asyncio.to_thread(driver.stop)
+                if graceful:
+                    await driver.stop_gracefully()
+                else:
+                    await asyncio.to_thread(driver.stop)
             except Exception as exc:
                 failed_drivers.append(driver)
                 cleanup_errors.append(
@@ -1297,11 +1301,12 @@ class BrowserService:
         BROWSER_SERVICE_REGISTRY.complete_reset(identity)
         return bool(services or drivers)
 
-    async def reset(self) -> None:
+    async def reset(self, *, graceful: bool = False) -> None:
         """Reset one shared browser identity and restart lazily on next use."""
         await self._reset_lifecycle_resources(
             self._lifecycle_identity,
             fallback_service=self,
+            graceful=graceful,
         )
 
     @classmethod
