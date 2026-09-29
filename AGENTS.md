@@ -86,3 +86,10 @@ Pass `COMMITS=N` to check recent commits instead.
 - Keep one SerializedTurnHarness state machine and observation stream; Team retains Task/Review/message scheduling. Mode, Step and child-agent shared semantics belong in the protocol; provider namespaces hold only private supplements.
 - New construction preserves legacy factories and lazy optional SDK imports. Bind configuration to authorized subject/session/workspace; no silent provider fallback or reuse across scopes.
 - Verify affected old and new contracts before merging core; downstream swarm updates both its declaration and lock only after the core commit is available remotely.
+
+## Python CI 执行策略（2026-09-29）
+
+- 每次提交/PR 和合入后的自动检查使用 `pr-stable`，本地按影响面运行确定性测试及所需真实验收；不逐提交、逐候选或逐合入 SHA 触发全量 Python CI。
+- `full-python` 只由每日 `schedule` 在默认分支执行。`workflow_dispatch` 只跑 stable；不要为每个提交额外手动补跑全量。
+- 全量是每日回归巡检，不是每个 PR 的必经门禁。保留完整归档、准确 SHA、失败/跳过/未运行与分片闭合审计；已知相关失败须调查修复，不能因降低频率忽略失败。
+- 合入后核验 stable、依赖来源和受影响范围；不得把旧 SHA 的每日全量结果记作新 SHA 已通过全量。
