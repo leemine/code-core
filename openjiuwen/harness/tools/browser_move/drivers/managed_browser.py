@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -322,6 +323,30 @@ class ManagedBrowserDriver:
 
         self._process = None
         self._owns_process = False
+
+    async def stop_gracefully(self, wait_timeout_s: float = 5.0) -> None:
+        """Flush an owned Chrome Profile, then confirm exit with the normal fallback.
+
+        An attached external Chrome is never sent Browser.close. A failed CDP
+        close still falls back to the owned process stop/kill confirmation.
+        """
+        process = self._process
+        if process is not None and self._owns_process and process.poll() is None:
+            import aiohttp
+
+            try:
+                async with asyncio.timeout(max(0.5, float(wait_timeout_s))):
+                    async with aiohttp.ClientSession(trust_env=False) as client:
+                        async with client.get(f"{self.cdp_endpoint}/json/version") as response:
+                            response.raise_for_status()
+                            version = await response.json()
+                        async with client.ws_connect(version["webSocketDebuggerUrl"]) as websocket:
+                            await websocket.send_json({"id": 1, "method": "Browser.close"})
+                            await websocket.receive()
+                    await asyncio.to_thread(process.wait, timeout=max(0.5, float(wait_timeout_s)))
+            except Exception:  # noqa: BLE001 - owned process fallback below
+                pass
+        await asyncio.to_thread(self.stop, wait_timeout_s)
 
     def clear(self):
         # Reap a Chrome child that exited (e.g. user closed the window) but
