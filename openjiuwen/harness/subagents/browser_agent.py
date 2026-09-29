@@ -20,23 +20,23 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
+from openjiuwen.harness.tools.browser_move.offload_recall import BrowserOffloadRecallTool
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    DEFAULT_BROWSER_CAPABILITIES,
+    resolve_browser_capabilities,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_state_context_processor import (
     BrowserStateContextProcessorConfig,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_processor import (
     BrowserWorkingContextProcessorConfig,
 )
-from openjiuwen.harness.tools.browser_move.offload_recall import BrowserOffloadRecallTool
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
     RuntimeSettings,
     build_browser_guardrails,
     build_playwright_mcp_config,
     build_runtime_settings,
-)
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
-    DEFAULT_BROWSER_CAPABILITIES,
-    resolve_browser_capabilities,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserAgentRuntime,
@@ -235,6 +235,7 @@ def build_browser_agent_config(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     settings: Optional[RuntimeSettings] = None,
+    downloads_root: Optional[str] = None,
     browser_key: Optional[str] = None,
     browser_instance: Optional[BrowserInstanceConfig | Dict[str, Any]] = None,
 ) -> SubAgentConfig:
@@ -271,7 +272,10 @@ def build_browser_agent_config(
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
         factory_name=BROWSER_AGENT_FACTORY_NAME,
-        factory_kwargs={"settings": resolved_settings},
+        factory_kwargs={
+            "settings": resolved_settings,
+            **({"downloads_root": downloads_root} if downloads_root else {}),
+        },
     )
 
 
@@ -294,6 +298,7 @@ def create_browser_agent(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     settings: Optional[RuntimeSettings] = None,
+    downloads_root: Optional[str] = None,
     browser_key: Optional[str] = None,
     browser_instance: Optional[BrowserInstanceConfig | Dict[str, Any]] = None,
     browser_capabilities: Optional[List[str]] = None,
@@ -352,6 +357,8 @@ def create_browser_agent(
         "instance": resolved_settings.instance,
         "allowed_tool_names": resolved_capabilities.allowed_tool_names,
     }
+    if downloads_root is not None:
+        runtime_kwargs["downloads_root"] = downloads_root
     browser_backend = BrowserAgentRuntime(**runtime_kwargs)
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
     working_context_config = BrowserWorkingContextProcessorConfig(

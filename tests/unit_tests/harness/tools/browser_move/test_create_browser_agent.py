@@ -23,18 +23,18 @@ from openjiuwen.harness.subagents.browser_agent import (
     build_browser_agent_config,
     create_browser_agent,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    CORE_BROWSER_TOOL_NAMES,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_rail import (
+    BrowserWorkingContextRail,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserRunGuardrails,
     RuntimeSettings,
 )
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
-    CORE_BROWSER_TOOL_NAMES,
-)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserRuntimeRail,
-)
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_rail import (
-    BrowserWorkingContextRail,
 )
 
 
@@ -542,3 +542,14 @@ def test_build_browser_agent_config_fallback_uses_model_name_field() -> None:
     spec = build_browser_agent_config(model, language="en")
 
     assert spec.factory_kwargs["settings"].model_name == "test-model-name"
+
+
+def test_optional_download_root_reaches_native_runtime(tmp_path) -> None:
+    root = str(tmp_path / 'outputs')
+    spec = build_browser_agent_config(_fake_model(), settings=_fake_settings(), downloads_root=root)
+    assert spec.factory_kwargs['downloads_root'] == root
+    calls, fake = _capture_create_deep_agent()
+    stack, runtime_cls, _, _ = _patch_all(fake)
+    with stack:
+        create_browser_agent(_fake_model(), settings=_fake_settings(), downloads_root=root)
+    assert runtime_cls.call_args.kwargs['downloads_root'] == root

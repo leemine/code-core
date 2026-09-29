@@ -21,6 +21,7 @@
     },
     "pr-stable": {
       "suites": [
+        "code-core.python.browser-downloads",
         "code-core.python.execution-construction",
         "code-core.python.native-output",
         "code-core.python.goal-control",
@@ -35,6 +36,56 @@
     }
   },
   "suites": [
+    {
+      "id": "code-core.python.browser-downloads",
+      "owner": "harness",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem",
+        "network"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 180,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/harness/tools/browser_move/test_downloads.py",
+          "tests/unit_tests/harness/tools/browser_move/test_browser_service_registry.py",
+          "tests/unit_tests/harness/tools/browser_move/test_browser_runtime_rail.py",
+          "tests/unit_tests/harness/tools/browser_move/test_create_browser_agent.py",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 120
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/harness/tools/browser_move/test_downloads.py",
+        "tests/unit_tests/harness/tools/browser_move/test_browser_service_registry.py",
+        "tests/unit_tests/harness/tools/browser_move/test_browser_runtime_rail.py",
+        "tests/unit_tests/harness/tools/browser_move/test_create_browser_agent.py",
+        "-q",
+        "-o",
+        "addopts=",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
+    },
     {
       "id": "code-core.python.agent-builder",
       "owner": "agent-builder",
