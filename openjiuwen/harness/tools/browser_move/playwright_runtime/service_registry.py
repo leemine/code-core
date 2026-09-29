@@ -280,6 +280,12 @@ class BrowserServiceRegistry:
                 matches.append(identity)
             return tuple(matches)
 
+    def managed_driver_identities(self) -> tuple[BrowserServiceIdentity, ...]:
+        """Snapshot managed resources still owned by this process, including idle ones."""
+        with self._lock:
+            return tuple(identity for identity, entry in self._entries.items()
+                         if identity.driver_mode == "managed" and (entry.managed_drivers or entry.cleanup_error))
+
     def clear(self) -> None:
         """Clear metadata for isolated tests after their resources are stopped."""
         with self._lock:

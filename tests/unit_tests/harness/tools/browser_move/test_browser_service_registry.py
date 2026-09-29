@@ -470,3 +470,19 @@ def test_display_mode_is_part_of_lifecycle_identity(monkeypatch) -> None:
     assert headless.lifecycle_identity != headed.lifecycle_identity
     assert headless.lifecycle_identity.display_mode == "headless"
     assert headed.lifecycle_identity.display_mode == "headed"
+
+@pytest.mark.asyncio
+async def test_application_shutdown_includes_idle_managed_driver() -> None:
+    from openjiuwen.harness.tools.browser_move import shutdown_managed_browser_runtimes
+    service = _make_service()
+    driver = MagicMock()
+    driver.owns_process = True
+    driver.stop_gracefully = AsyncMock()
+    BROWSER_SERVICE_REGISTRY.register_managed_driver(service.lifecycle_identity, service, driver)
+    # The last Agent may already have been destroyed; only the retained driver
+    # registry can close its warm Chrome at application shutdown.
+    BROWSER_SERVICE_REGISTRY.release(service.lifecycle_identity, service)
+    assert not _ACTIVE_BROWSER_RUNTIMES
+    await shutdown_managed_browser_runtimes()
+    driver.stop_gracefully.assert_awaited_once()
+    assert BROWSER_SERVICE_REGISTRY.managed_driver_identities() == ()

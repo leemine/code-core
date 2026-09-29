@@ -194,3 +194,27 @@ class BrowserExecutionToolGateway:
 - `S_10`：产品子 Agent 的唯一状态机和父子执行端口；Browser 身份不复制该状态机。
 - `S_18`：Native Browser preset 与旧实例配置的兼容接入。
 - `S_19`：External Provider 消费宿主受管 MCP；Provider 配置不能扩大 Browser 身份范围。
+
+### Native managed download ownership (R1-10F)
+
+`build_browser_agent_config` / `create_browser_agent` accept optional
+`downloads_root`, supplied by the host inside its authorized output workspace.
+The default remains disabled for callers that do not supply this port. Native
+rails and tool permissions still execute normally. The runtime uses a separate
+CDP connection because MCP's `noDefaults` attachment does not enable download
+events. Each invocation gets a private directory and an exclusive lease keyed
+by Chrome profile path; a competing invocation fails instead of changing its
+download destination. Temporary files are never completion evidence.
+
+Completed tools expose `browser_downloads` receipts (name, absolute host path,
+size, completed status) only after Chrome's terminal event and safe rename. The
+host continues to authorize and publish these files through its original file
+tool. On task release the runtime cancels pending GUIDs, confirms terminal events,
+resets download behavior and closes its CDP connection. Unconfirmed reset falls
+back to confirmed managed Chrome exit; failed exit retains ownership.
+
+`shutdown_managed_browser_runtimes()` closes process-owned managed Chrome at
+application shutdown, including idle drivers retained after their Agent was
+collected. It does not reset remote/attached browser identities, erase profiles,
+or silently swallow failed shutdown. Normal task release keeps the existing
+warm Chrome behavior after download cleanup is confirmed.

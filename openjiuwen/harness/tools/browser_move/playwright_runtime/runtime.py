@@ -422,6 +422,7 @@ class BrowserAgentRuntime:
         allowed_tool_names: Optional[Iterable[str]] = None,
         execution_identity: Optional[BrowserExecutionIdentity] = None,
         file_roots: Optional[BrowserExecutionFileRoots] = None,
+        downloads_root: Optional[str] = None,
     ) -> None:
         ensure_browser_runtime_client_patch()
         self._instance = instance
@@ -440,6 +441,8 @@ class BrowserAgentRuntime:
             execution_identity=execution_identity,
             file_roots=file_roots,
         )
+        self._downloads_root = downloads_root
+        self._downloads = None
         self._browser_custom_action_tool = None
         self._browser_list_actions_tool = None
         self._controller: BaseController = ActionController()
@@ -1083,6 +1086,13 @@ class BrowserAgentRuntime:
     async def ensure_runtime_ready(self) -> None:
         _ACTIVE_BROWSER_RUNTIMES.add(self)
         await self._service.ensure_runtime_ready()
+        if getattr(self, "_downloads_root", None) is not None and self._downloads is None:
+            from .downloads import BrowserDownloads
+            identity = self._service.lifecycle_identity
+            if identity.driver_mode != "managed":
+                raise ValueError("task downloads require a host-managed browser")
+            self._downloads = BrowserDownloads(self._downloads_root, owner_key=identity.user_data_dir)
+            await self._downloads.start(self._service._configured_cdp_endpoint())
         if self._code_executor is not None:
             return
 
@@ -2201,11 +2211,25 @@ class BrowserAgentRuntime:
     async def shutdown(self) -> None:
         try:
             await self._service.shutdown()
+            downloads = getattr(self, "_downloads", None)
+            if downloads is not None:
+                await downloads.discard_after_exit()
+                self._downloads = None
         finally:
             _ACTIVE_BROWSER_RUNTIMES.discard(self)
 
     async def release_task_resources(self) -> None:
         """Release task bindings while preserving Chrome and its profile."""
+        downloads = getattr(self, "_downloads", None)
+        if downloads is not None:
+            try:
+                await downloads.close()
+            except Exception:
+                # A lost CDP ACK cannot prove downloads stopped. Confirm Chrome
+                # exit through its existing owner before releasing the lease.
+                await self._service.reset(graceful=True)
+                await downloads.discard_after_exit()
+            self._downloads = None
         fully_released = await self._service.release_task_binding()
         if fully_released:
             self._advance_page_generation()
@@ -2219,6 +2243,10 @@ class BrowserAgentRuntime:
                 await self._service.reset(graceful=True)
             else:
                 await self._service.reset()
+            downloads = getattr(self, "_downloads", None)
+            if downloads is not None:
+                await downloads.discard_after_exit()
+                self._downloads = None
         finally:
             self._advance_page_generation()
             self._last_observed_url = ""
@@ -2243,6 +2271,22 @@ class BrowserAgentRuntime:
             tracker = SemanticStateTracker()
             self._semantic_state_tracker = tracker
         return tracker
+
+
+async def shutdown_managed_browser_runtimes() -> int:
+    """Application shutdown: stop process-owned managed Chrome, including idle handles.
+
+    Attached remote browsers are excluded. Failures propagate so a caller cannot
+    report clean exit when a managed driver is still retained for recovery.
+    """
+    from .service_registry import BROWSER_SERVICE_REGISTRY
+    identities = BROWSER_SERVICE_REGISTRY.managed_driver_identities()
+    for runtime in tuple(_ACTIVE_BROWSER_RUNTIMES):
+        if runtime.service.lifecycle_identity.driver_mode == "managed":
+            await runtime.reset(graceful=True)
+    for identity in BROWSER_SERVICE_REGISTRY.managed_driver_identities():
+        await BrowserService._reset_lifecycle_resources(identity, graceful=True)
+    return len(identities)
 
 
 async def reset_active_browser_runtimes() -> int:
@@ -2779,6 +2823,11 @@ class BrowserRuntimeRail(AgentRail):
         if self._finish_if_task_deadline_exhausted(ctx, session, state):
             return
         try:
+            if vars(self._runtime).get("_downloads_root") is not None:
+                downloads = vars(self._runtime).get("_downloads")
+                if downloads is None:
+                    raise ValueError("browser download lease is not ready")
+                downloads.check_ready()
             self._prepare_tool_call(ctx)
         except (ValueError, BaseError) as exc:
             self._deny_tool_call(ctx, exc)
@@ -2966,6 +3015,18 @@ class BrowserRuntimeRail(AgentRail):
         inputs = getattr(ctx, "inputs", None)
         tool_name = str(getattr(inputs, "tool_name", "") or "").strip()
         tool_result = self._normalize_tool_result(getattr(inputs, "tool_result", None))
+        downloads = vars(self._runtime).get("_downloads")
+        if downloads is not None:
+            receipts = await downloads.completed()
+            if receipts:
+                marker = "\n<browser_downloads>" + json.dumps(receipts, ensure_ascii=False) + "</browser_downloads>"
+                if isinstance(tool_result, dict):
+                    tool_result["browser_downloads"] = receipts
+                else:
+                    tool_result = str(tool_result) + marker
+                tool_msg = getattr(inputs, "tool_msg", None)
+                if tool_msg is not None and isinstance(getattr(tool_msg, "content", None), str):
+                    tool_msg.content += marker
         inputs.tool_result = tool_result
         outcome = BrowserAgentRuntime.classify_tool_result(tool_result)
         if outcome["denied"] or (isinstance(tool_result, dict) and tool_result.get("executed") is False):
