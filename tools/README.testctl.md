@@ -50,7 +50,7 @@ python3 tools/archivectl.py recover artifacts/test-runs/<interrupted-run>
 
 `full_regression.py` 是独立于 PR 稳定门禁的全量 Python 诊断入口，夜间或手动触发。默认每片约 250 例、2 个 worker、单例 30 秒/分片 1,800 秒上限；归档位于 `artifacts/test-runs/full-python-<UTC>/`，保存提交和锁文件指纹、全仓及分片收集日志、JUnit、闭合摘要与逐例 `failure_inventory.csv`。夜间环境显式安装 Pulsar、sandbox、online-RL、observability、ChromaDB、PGVector 等可选依赖。真实 AIGW 系统测试只在二进制存在时执行；否则逐例跳过并说明 `AIGW_BIN` 或默认位置。当前全量基线仍含失败，夜间任务会如实标红并上传证据。
 
-手动触发 GitHub Actions 时可通过 `full_workers` 在 2 和 4 个 worker 之间选择；默认值及定时任务保持 2。该有界输入只调整全量分片并发，不改变分片大小、超时或闭合判定。
+手动触发 GitHub Actions 时可通过 `full_workers` 在 4 和 2 个 worker 之间选择；默认值及定时任务使用 4，资源受限或诊断时可显式回退到 2。该有界输入只调整全量分片并发，不改变分片大小、超时或闭合判定。
 
 全量入口要求 `summary.closed=true` 且 `not_run=0`；即使 pytest 本身退出 0，收集差异、缺失用例或归因清单生成失败也使任务失败。动态参数 ID 不自动按函数名合并。AIGW 跳过表示普通 runner 缺少外部能力，不等于该系统测试已通过；完整验证仍需专用 AIGW/Redis 环境。
 
