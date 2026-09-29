@@ -135,3 +135,50 @@ def test_resolve_binary_does_not_fallback_for_invalid_explicit_path() -> None:
         return_value=["detected-chrome"],
     ), pytest.raises(RuntimeError, match="Configured Chrome binary not found"):
         driver._resolve_binary()
+
+
+@pytest.mark.asyncio
+async def test_graceful_stop_closes_only_owned_browser_and_waits_for_exit():
+    from unittest.mock import AsyncMock
+
+    driver = _make_driver()
+    process = MagicMock()
+    process.poll.side_effect = [None, 0]
+    driver._process = process
+    driver._owns_process = True
+    response = MagicMock()
+    response.json = AsyncMock(return_value={"webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/browser/test"})
+    websocket = AsyncMock()
+    client = MagicMock()
+    client.get.return_value.__aenter__ = AsyncMock(return_value=response)
+    client.ws_connect.return_value.__aenter__ = AsyncMock(return_value=websocket)
+    with patch("aiohttp.ClientSession") as session:
+        session.return_value.__aenter__ = AsyncMock(return_value=client)
+        await driver.stop_gracefully()
+    websocket.send_json.assert_awaited_once_with({"id": 1, "method": "Browser.close"})
+    process.wait.assert_called_once()
+    process.terminate.assert_not_called()
+    assert driver._process is None
+
+
+@pytest.mark.asyncio
+async def test_graceful_stop_does_not_send_cdp_to_external_browser():
+    driver = _make_driver()
+    driver._process = MagicMock()
+    driver._owns_process = False
+    with patch("aiohttp.ClientSession") as session:
+        await driver.stop_gracefully()
+    session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_graceful_stop_uses_confirmed_process_fallback_on_cdp_error():
+    driver = _make_driver()
+    process = MagicMock()
+    process.poll.side_effect = [None, None, 0, 0]
+    driver._process = process
+    driver._owns_process = True
+    with patch("aiohttp.ClientSession", side_effect=OSError("CDP unavailable")):
+        await driver.stop_gracefully()
+    process.terminate.assert_called_once()
+    assert driver._process is None

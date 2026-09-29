@@ -469,3 +469,53 @@ def test_transport_errors_are_redacted_and_close_is_idempotent(
     assert runtime.release_calls == 1
     assert gateway.closed is True
     assert after_close.is_error is True
+
+
+def test_stop_on_close_preserves_owner_on_failure_and_retries(tmp_path, monkeypatch):
+    _, runtime, _ = _gateway(tmp_path, monkeypatch)
+    calls = []
+
+    async def reset(*, graceful=False):
+        assert graceful is True
+        calls.append("reset")
+        if len(calls) == 1:
+            raise RuntimeError("exit unconfirmed")
+
+    runtime.reset = reset
+    gateway = BrowserExecutionToolGateway(runtime, stop_on_close=True)
+    with pytest.raises(RuntimeError, match="exit unconfirmed"):
+        asyncio.run(gateway.close())
+    assert not gateway.closed
+    assert runtime.release_calls == 0
+    asyncio.run(gateway.close())
+    asyncio.run(gateway.close())
+    assert gateway.closed
+    assert calls == ["reset", "reset"]
+    assert runtime.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_canceled_close_retains_cleanup_owner_and_joins_on_retry(tmp_path, monkeypatch):
+    _, runtime, _ = _gateway(tmp_path, monkeypatch)
+    started, finish = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def reset(*, graceful=False):
+        calls.append(graceful)
+        started.set()
+        await finish.wait()
+
+    runtime.reset = reset
+    gateway = BrowserExecutionToolGateway(runtime, stop_on_close=True)
+    closing = asyncio.create_task(gateway.close())
+    await started.wait()
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert not gateway.closed
+    assert runtime.release_calls == 0
+    finish.set()
+    await gateway.close()
+    assert gateway.closed
+    assert runtime.release_calls == 1
+    assert calls == [True]
