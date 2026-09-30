@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from openjiuwen.harness_protocol.checkpoints import HarnessCheckpoint, HarnessCheckpointSink
     from openjiuwen.harness_protocol.hooks import HarnessHookDispatcher
     from openjiuwen.harness_protocol.interactions import HarnessInteractionHandler
+    from openjiuwen.harness_protocol.runtime_policy import HarnessRuntimePolicy
     from openjiuwen.harness_protocol.tools import McpServerConfig, ToolGateway
 
 PROTOCOL_VERSION = "1.0"
@@ -228,6 +229,7 @@ class HarnessContext:
     interactions: "HarnessInteractionHandler | None" = None
     telemetry: HarnessTelemetry | None = None
     metadata: JsonObject = field(default_factory=dict)
+    runtime_policy: "HarnessRuntimePolicy | None" = None
 
     def __post_init__(self) -> None:
         required = {
@@ -244,6 +246,11 @@ class HarnessContext:
         object.__setattr__(self, "host_capabilities", frozenset(self.host_capabilities))
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
         object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
+        if self.runtime_policy is not None:
+            from openjiuwen.harness_protocol.runtime_policy import HarnessRuntimePolicy
+
+            if not isinstance(self.runtime_policy, HarnessRuntimePolicy):
+                raise TypeError("harness context runtime_policy must be a HarnessRuntimePolicy or None")
         object.__setattr__(self, "metadata", freeze_json_object(self.metadata))
 
 

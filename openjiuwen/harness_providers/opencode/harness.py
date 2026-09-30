@@ -35,7 +35,7 @@ from .config import CLI_VERSION, OpenCodeHarnessConfig
 from .errors import OpenCodeError
 from .mapping import Accumulator, native_id
 from .native_plugins import validate_native_plugin_packages
-from .options import validate_readback
+from .options import native_config, validate_readback
 
 
 class OpenCodeHarness(SerializedTurnHarness):
@@ -82,6 +82,17 @@ class OpenCodeHarness(SerializedTurnHarness):
             raise HarnessProtocolError("OpenCode MCP configuration requires the MCP_SERVERS host capability")
         if context.env or context.tools is not None or context.hooks is not None:
             raise UnsupportedHarnessCapabilityError("OpenCode does not support environment, native host tools or hooks")
+        if context.runtime_policy is not None:
+            # Compile before allocating a service so an over-broad or
+            # unsupported host policy cannot degrade to Provider defaults.
+            # Existing protocol validation stays first so this additive check
+            # does not mask a more specific compatibility error.
+            native_config(
+                self._config,
+                context.host_capabilities,
+                context.mcp_servers,
+                runtime_policy=context.runtime_policy,
+            )
 
     async def _open_session(self, context: HarnessContext) -> str:
         # Imports remain cheap and platform-independent until runtime startup.

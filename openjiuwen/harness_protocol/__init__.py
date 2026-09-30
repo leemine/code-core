@@ -109,6 +109,13 @@ from openjiuwen.harness_protocol.results import (
     TurnTerminationKind,
     TurnUsage,
 )
+from openjiuwen.harness_protocol.runtime_policy import (
+    HarnessRuntimePolicy,
+    RuntimeExecutionState,
+    RuntimeSurface,
+    SourceDiscovery,
+    WorkspaceAccess,
+)
 from openjiuwen.harness_protocol.serialization import (
     EVENT_WIRE_SCHEMA_VERSION,
     harness_event_from_dict,
@@ -153,6 +160,7 @@ __all__ = [
     "HarnessInput",
     "HarnessProtocol",
     "HarnessProtocolError",
+    "HarnessRuntimePolicy",
     "HarnessProvider",
     "HarnessState",
     "HarnessStateError",
@@ -194,8 +202,11 @@ __all__ = [
     "ProviderInteractionRequest",
     "ProviderInteractionResponse",
     "ResumePolicy",
+    "RuntimeExecutionState",
+    "RuntimeSurface",
     "SendReceipt",
     "StateChangedEvent",
+    "SourceDiscovery",
     "StopHookContext",
     "ToolDecision",
     "ToolDecisionKind",
@@ -221,6 +232,7 @@ __all__ = [
     "UsageUpdateMode",
     "UserInputRequest",
     "UserInputResponse",
+    "WorkspaceAccess",
     "event_retention",
     "freeze_json_object",
     "freeze_json_value",

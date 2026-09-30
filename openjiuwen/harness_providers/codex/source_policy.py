@@ -94,6 +94,7 @@ def _validate_managed_mcp_server(server: McpServerConfig) -> None:
 def _validate_effective_managed_mcp_servers(
     value: Any,
     expected_names: tuple[str, ...],
+    expected_approval_mode: str,
 ) -> None:
     if not isinstance(value, dict) or not value:
         raise HarnessProtocolError("Codex restricted startup did not retain managed MCP servers")
@@ -118,8 +119,10 @@ def _validate_effective_managed_mcp_servers(
             raise HarnessProtocolError("Codex effective MCP server lost loopback authentication")
         if server.get("required") is not True:
             raise HarnessProtocolError("Codex managed MCP server must remain required")
-        if server.get("default_tools_approval_mode") != "prompt":
-            raise HarnessProtocolError("Codex managed MCP tools require prompt approval")
+        if server.get("default_tools_approval_mode") != expected_approval_mode:
+            raise HarnessProtocolError(
+                "Codex managed MCP tools changed their effective approval mode"
+            )
         if (
             server.get("enabled") is not True
             or server.get("environment_id") != "local"
@@ -157,6 +160,8 @@ def validate_source_config(
     cwd: str | None = None,
     allow_native_plugins: bool = False,
     managed_mcp_names: tuple[str, ...] = (),
+    expected_mcp_approval_mode: str = "prompt",
+    require_permissions: bool = True,
 ) -> None:
     """Fail closed on config sources/extensions this restricted mode cannot admit."""
     allowed_keys = _CONFIG_KEYS | ({"plugins", "marketplaces"} if allow_native_plugins else set())
@@ -165,7 +170,11 @@ def validate_source_config(
         if effective and value is None:
             continue
         if effective and key == "mcp_servers" and managed_mcp_names:
-            _validate_effective_managed_mcp_servers(value, managed_mcp_names)
+            _validate_effective_managed_mcp_servers(
+                value,
+                managed_mcp_names,
+                expected_mcp_approval_mode,
+            )
             continue
         if effective and key in _EFFECTIVE_DEFAULTS and value == _EFFECTIVE_DEFAULTS[key]:
             continue
@@ -187,7 +196,8 @@ def validate_source_config(
         if key == "features" and any(value.get(name, False) is not False for name in disabled_features):
             raise HarnessProtocolError("Codex restricted startup requires source-loading features disabled")
     if effective and (
-        values.get("project_doc_max_bytes") != 0 or not values.get("default_permissions")
+        values.get("project_doc_max_bytes") != 0
+        or (require_permissions and not values.get("default_permissions"))
         or values.get("projects") != _untrusted_project(cwd)
         or values.get("allow_login_shell") is not False
         or any((values.get("features") or {}).get(name) is not False for name in disabled_features)
@@ -222,15 +232,19 @@ def validate_startup_sources(config: CodexHarnessConfig, context: HarnessContext
     """Inspect before copying skills or launching CLI; return a scope binding digest."""
     if config.startup_source_roots is None:
         return None
-    if config.inherit_process_env or config.bypass_approvals_and_sandbox:
-        raise HarnessProtocolError("Codex restricted startup requires isolated env and host approvals")
-    if HostCapability.TOOL_APPROVAL not in context.host_capabilities or context.interactions is None:
+    if config.inherit_process_env:
+        raise HarnessProtocolError("Codex restricted startup requires an isolated env")
+    if (
+        not config.bypass_approvals_and_sandbox
+        and (HostCapability.TOOL_APPROVAL not in context.host_capabilities or context.interactions is None)
+    ):
         raise HarnessProtocolError("Codex restricted startup requires host tool approvals")
     if context.mcp_servers:
         if not config.mcp_required:
             raise HarnessProtocolError("Codex managed MCP servers must be required")
-        if config.mcp_default_tools_approval_mode != "prompt":
-            raise HarnessProtocolError("Codex managed MCP tools require prompt approval")
+        expected_mode = "auto" if config.bypass_approvals_and_sandbox else "prompt"
+        if config.mcp_default_tools_approval_mode != expected_mode:
+            raise HarnessProtocolError("Codex managed MCP tools have the wrong approval mode")
         for server in context.mcp_servers:
             _validate_managed_mcp_server(server)
     cwd = _directory(context.cwd or config.cwd or "", "cwd")

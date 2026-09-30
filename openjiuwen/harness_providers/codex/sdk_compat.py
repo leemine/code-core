@@ -103,12 +103,50 @@ def _permission_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+async def validate_effective_startup_sources(
+    *,
+    client: Any,
+    cwd: str | None,
+    allow_native_plugins: bool,
+    managed_mcp_names: tuple[str, ...],
+    expected_mcp_approval_mode: str,
+    require_permissions: bool,
+) -> None:
+    """Read back ambient-source controls before a full-access thread starts."""
+
+    initialize = getattr(client, "_ensure_initialized", None)
+    request = getattr(getattr(client, "_client", None), "request", None)
+    if not callable(initialize) or not callable(request):
+        raise HarnessProtocolError("Codex SDK cannot verify effective startup sources")
+    await initialize()
+    response = await request(
+        "config/read",
+        {"cwd": cwd, "includeLayers": False},
+        response_model=RootModel[dict],
+    )
+    config = response.model_dump(mode="json").get("config")
+    if not isinstance(config, dict):
+        raise HarnessProtocolError("Codex did not return its effective source configuration")
+    from openjiuwen.harness_providers.codex.source_policy import validate_source_config
+
+    validate_source_config(
+        config,
+        effective=True,
+        cwd=cwd,
+        allow_native_plugins=allow_native_plugins,
+        managed_mcp_names=managed_mcp_names,
+        expected_mcp_approval_mode=expected_mcp_approval_mode,
+        require_permissions=require_permissions,
+    )
+
+
 async def connect_with_host_approvals(
     *, client: Any, sdk: Any, options: dict[str, Any],
     resume_thread_id: str | None, raw_events: bool, expected_fingerprint: str | None = None,
     source_fingerprint: str | None = None,
     allow_native_plugins: bool = False,
     managed_mcp_names: tuple[str, ...] = (),
+    expected_sandbox: str | None = None,
 ) -> tuple[Any, str, str]:
     """Negotiate host review and confirm the effective named or legacy policy.
 
@@ -123,7 +161,10 @@ async def connect_with_host_approvals(
     if "approval_mode" in options or "sandbox" in options:
         raise HarnessProtocolError("Codex host approval policy conflicts with permission bypass")
     thread_config = dict(options.get("config", {}))
-    sandbox = thread_config.get("sandbox_mode", "read-only")
+    configured_sandbox = thread_config.get("sandbox_mode")
+    if expected_sandbox is not None and configured_sandbox not in (None, expected_sandbox):
+        raise HarnessProtocolError("Codex runtime policy conflicts with the configured sandbox")
+    sandbox = expected_sandbox or configured_sandbox or "read-only"
     if sandbox not in ("read-only", "workspace-write"):
         raise HarnessProtocolError("Codex host approvals require a restricted sandbox")
     # Define named profiles through the server configuration, not per-thread
@@ -185,7 +226,11 @@ async def connect_with_host_approvals(
         raise HarnessProtocolError("Codex did not confirm the required host approval and sandbox policy")
     actual_profile = effective.get("activePermissionProfile")
     policy_matches = (
-        isinstance(actual_profile, dict) and actual_profile.get("id") == profile
+        isinstance(actual_profile, dict)
+        and actual_profile.get("id") == profile
+        and (expected_sandbox is None or actual_sandbox.get("type") == (
+            "readOnly" if expected_sandbox == "read-only" else "workspaceWrite"
+        ))
         if profile is not None else
         actual_profile is None and actual_sandbox.get("type") == (
             "readOnly" if sandbox == "read-only" else "workspaceWrite"
