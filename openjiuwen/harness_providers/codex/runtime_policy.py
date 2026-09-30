@@ -41,11 +41,13 @@ def compile_runtime_policy(
         else "workspace-write"
     )
     thread_config = dict(config.thread_config)
-    if "default_permissions" not in thread_config:
-        configured = thread_config.get("sandbox_mode")
-        if configured not in (None, sandbox):
-            raise HarnessProtocolError("Codex runtime policy conflicts with the configured sandbox")
-        thread_config["sandbox_mode"] = sandbox
+    configured = thread_config.get("sandbox_mode")
+    if configured not in (None, sandbox):
+        raise HarnessProtocolError("Codex runtime policy conflicts with the configured sandbox")
+    # The app server receives the desired sandbox through thread/start. Do not
+    # also inject the legacy sandbox_mode config key: an effective named
+    # permission profile is mutually exclusive with that legacy setting and is
+    # validated from the thread/start response instead.
     return CodexRuntimePolicy(
         replace(
             config,
