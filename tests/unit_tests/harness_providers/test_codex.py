@@ -99,8 +99,25 @@ def test_runtime_policy_narrows_authorized_codex_config_without_mutating_binding
     assert compiled.expected_sandbox == "read-only"
     assert compiled.config.bypass_approvals_and_sandbox is False
     assert compiled.config.mcp_default_tools_approval_mode == "prompt"
-    assert compiled.config.thread_config["sandbox_mode"] == "read-only"
+    assert "sandbox_mode" not in compiled.config.thread_config
     assert config.bypass_approvals_and_sandbox is True
+
+
+def test_runtime_policy_does_not_mix_named_permissions_with_legacy_sandbox():
+    config = CodexHarnessConfig(
+        inherit_process_env=False,
+        startup_source_roots=("/authorized",),
+        thread_config={"default_permissions": "workspace"},
+    )
+    policy = HarnessRuntimePolicy(
+        revision="surface-v1",
+        surface=RuntimeSurface.CODE,
+        execution_state=RuntimeExecutionState.NORMAL,
+        workspace_access=WorkspaceAccess.WORKSPACE_WRITE,
+    )
+    compiled = compile_runtime_policy(config, policy)
+    assert compiled.expected_sandbox == "workspace-write"
+    assert compiled.config.thread_config == {"default_permissions": "workspace"}
 
 
 def test_runtime_policy_cannot_expand_codex_authorization():
