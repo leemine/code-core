@@ -150,7 +150,8 @@
     清理锁只串行资源释放，不另建 Turn 队列。
 19. **Surface runtime policy 只做冷启动收窄**：宿主提供的 `HarnessRuntimePolicy` 先于 Provider
     资源分配编译。Codex 要求关闭进程环境继承并提供可信 `startup_source_roots`；normal 的
-    read-only/workspace-write 走既有宿主审批并回读 sandbox/来源，已冻结 full-access 仍保留显式来源
+    read-only/workspace-write 走既有宿主审批并回读 sandbox/来源；命名权限沿原生 `thread/start`
+    参数生效，不同时注入互斥的 legacy `sandbox_mode`。已冻结 full-access 仍保留显式来源
     覆盖并单独回读，不把文件权限放宽等同于 ambient context 放宽。OpenCode 在 generation 私有配置中
     生成精确 permission map，并经现有 `/config` 回读。Plan 只能 read-only，策略不能扩大构造授权；
     checkpoint 只保存策略 fingerprint 供权限指纹复用判断，策略 revision 不成为 Binding 身份。
