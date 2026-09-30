@@ -10,6 +10,7 @@ import pytest
 
 from openjiuwen.harness_providers.skills import (
     SkillSource,
+    configured_skill_names,
     install_skills,
     isolated_skill_scan_directory,
     normalize_skills,
@@ -62,6 +63,14 @@ def test_library_selection_and_frontmatter_name_collision(tmp_path):
     assert "keep" not in (existing / "SKILL.md").read_text()
     assert not (project / ".agents/skills/other").exists()
     assert not (project / ".agents/skills/selected").exists()
+
+
+def test_configured_inventory_matches_skip_and_replace_winners(tmp_path):
+    first = SkillSource(str(bundle(tmp_path / "first", "Shared")))
+    second = SkillSource(str(bundle(tmp_path / "second", "shared")))
+
+    assert configured_skill_names((first, second), conflict="skip") == ("Shared",)
+    assert configured_skill_names((first, second), conflict="replace") == ("shared",)
 
 
 def test_copy_failure_keeps_existing_skill(tmp_path, monkeypatch):

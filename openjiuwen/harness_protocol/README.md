@@ -53,6 +53,10 @@ contain turns from multiple agents. The single-agent harness API therefore uses
 - `HarnessContext`: agent identity plus host services injected at
   `start`, including tools, MCP, hooks, interactions, checkpoint storage, and
   an optional provider-neutral cold-start `HarnessRuntimePolicy`.
+- `ProviderCapabilityInventory`: immutable, fingerprinted names configured by
+  a Provider-private compiler. It is a host catalog input, not authorization
+  or proof that startup succeeded; the Provider still verifies its native
+  Skill/plugin/MCP loader before accepting a Turn.
 - `HarnessEvent`: an event envelope with global ordering and correlation IDs.
   Its payload is provider-neutral; `ProviderEvent` preserves namespaced
   extensions without changing the shared protocol.

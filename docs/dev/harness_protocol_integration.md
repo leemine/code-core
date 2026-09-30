@@ -358,6 +358,11 @@ Runtime policy 必须由可信宿主在 `start()` 前编译完成，不能来自
 `full_access` 仍需冻结的 `ExecutionAuthorization`，plan 只能 read-only。运行中的 harness 不替换该
 快照；冷启动可使用新 revision。Provider 只在私有层生成厂商配置，并在支持时回读有效策略。
 
+宿主若需要建立产品级 Tool/Skill/subagent 目录，可使用
+`ProviderCapabilityInventory` 作为 Provider 原生一侧的只读输入。目录指纹只用于冷启动审计；
+inventory 声明不能替代原生 loader 的实际装载、来源/摘要检查或宿主审批，也不能把未配置能力
+当作可用。相同可执行命名空间与宿主权威产品工具冲突时，应在 Provider 分配前失败关闭。
+
 如果三方 SDK 接受 Python tool callback，使用 `context.tools`：
 
 ```python

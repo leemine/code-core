@@ -3,6 +3,11 @@
 
 """Provider-neutral protocol for integrating third-party agent harnesses."""
 
+from openjiuwen.harness_protocol.capability_inventory import (
+    ProviderCapability,
+    ProviderCapabilityInventory,
+    ProviderCapabilityKind,
+)
 from openjiuwen.harness_protocol.checkpoints import (
     MAX_CHECKPOINT_BYTES,
     CheckpointReason,
@@ -199,6 +204,9 @@ __all__ = [
     "OutputKind",
     "OutputOperation",
     "ProviderEvent",
+    "ProviderCapability",
+    "ProviderCapabilityInventory",
+    "ProviderCapabilityKind",
     "ProviderInteractionRequest",
     "ProviderInteractionResponse",
     "ResumePolicy",

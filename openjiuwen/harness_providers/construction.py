@@ -8,6 +8,10 @@ from openjiuwen.harness_protocol import (
     HarnessAuthorizationProvider,
     HarnessProtocol,
     HarnessProvider,
+    ProviderCapability,
+    ProviderCapabilityInventory,
+    ProviderCapabilityKind,
+    RuntimeSurface,
 )
 from openjiuwen.harness_protocol.construction import AgentExecutionSpec
 from openjiuwen.harness_protocol.errors import UnsupportedHarnessCapabilityError
@@ -15,6 +19,15 @@ from openjiuwen.harness_protocol.models import JsonObject
 
 HarnessProviderName = Literal["native", "native_v2", "claudecode", "codex", "dsh", "opencode"]
 PROVIDER_NAMES: tuple[HarnessProviderName, ...] = ("native", "native_v2", "claudecode", "codex", "dsh", "opencode")
+
+_EXTERNAL_CODE_CAPABILITIES = (
+    "filesystem",
+    "terminal",
+    "git",
+    "diff",
+    "test",
+    "review",
+)
 
 
 def resolve_provider(provider: str) -> HarnessProvider:
@@ -76,6 +89,83 @@ def execution_authorization(spec: AgentExecutionSpec) -> ExecutionAuthorization:
     if isinstance(provider, HarnessAuthorizationProvider):
         return provider.legacy_authorization(spec.provider_config)
     return ExecutionAuthorization()
+
+
+def configured_provider_capabilities(
+    spec: AgentExecutionSpec,
+) -> ProviderCapabilityInventory:
+    """Compile the Provider-owned inventory without allocating a runtime.
+
+    Portable Skill and native-plugin bytes are still independently validated
+    by the owning Provider immediately before startup and, where applicable,
+    before every Turn. This read-only declaration lets a host reject namespace
+    collisions and freeze one product capability catalog before side effects.
+    """
+
+    config = compile_execution(spec)
+    entries = [
+        ProviderCapability(
+            name,
+            ProviderCapabilityKind.CATEGORY,
+            frozenset({RuntimeSurface.CODE}),
+        )
+        for name in _EXTERNAL_CODE_CAPABILITIES
+    ] if spec.provider_id in {"codex", "opencode"} else []
+    if spec.provider_id == "codex":
+        from openjiuwen.harness_providers.codex.config import CodexHarnessConfig
+        from openjiuwen.harness_providers.skills import configured_skill_names
+
+        parsed = CodexHarnessConfig.from_mapping(config)
+        entries.extend(
+            ProviderCapability(name, ProviderCapabilityKind.SKILL, source="portable_skill")
+            for name in configured_skill_names(parsed.skills, conflict=parsed.skill_conflict)
+        )
+        for plugin in parsed.native_plugins or ():
+            if not plugin.enabled:
+                continue
+            entries.append(
+                ProviderCapability(
+                    plugin.plugin_id,
+                    ProviderCapabilityKind.PLUGIN,
+                    source="native_plugin",
+                )
+            )
+            entries.extend(
+                ProviderCapability(
+                    name,
+                    ProviderCapabilityKind.MCP_SERVER,
+                    source=plugin.plugin_id,
+                )
+                for name in plugin.mcp_server_names
+            )
+    elif spec.provider_id == "opencode":
+        from openjiuwen.harness_providers.opencode.config import OpenCodeHarnessConfig
+        from openjiuwen.harness_providers.skills import configured_skill_names
+
+        parsed = OpenCodeHarnessConfig.from_mapping(config)
+        entries.extend(
+            ProviderCapability(name, ProviderCapabilityKind.SKILL, source="portable_skill")
+            for name in configured_skill_names(parsed.skills, conflict=parsed.skill_conflict)
+        )
+        for plugin in parsed.native_plugins or ():
+            if not plugin.enabled:
+                continue
+            entries.append(
+                ProviderCapability(
+                    plugin.plugin_id,
+                    ProviderCapabilityKind.PLUGIN,
+                    source="native_plugin",
+                )
+            )
+            entries.extend(
+                ProviderCapability(
+                    name,
+                    ProviderCapabilityKind.TOOL,
+                    source=plugin.plugin_id,
+                )
+                for name in plugin.required_tools
+            )
+    return ProviderCapabilityInventory(spec.provider_id, tuple(entries))
 
 
 def apply_legacy_full_access(spec: AgentExecutionSpec) -> AgentExecutionSpec:
