@@ -24,7 +24,8 @@ Codex/OpenCode 仍只接收各自私有配置。若只增加 system prompt，Pla
 - Codex 私有 compiler 把 read-only/workspace-write 映射到原生 sandbox 和宿主审批。所有新 Surface
   策略都要求关闭进程环境继承并提供可信 `startup_source_roots`，使原生 AGENTS/Skills/插件默认发现
   不能越过宿主来源边界。已授权 full-access 只放宽执行权限，仍生成并回读 ambient-source 禁用项；
-  normal/plan 继续复用命名权限或 legacy restricted 的有效配置回读。
+  normal/plan 继续复用命名权限或 legacy restricted 的有效配置回读。sandbox 要求通过原生
+  `thread/start` 参数和响应核验；命名权限存在时不再重复注入与其互斥的 legacy `sandbox_mode`。
 - OpenCode 私有 compiler 在 generation 封存配置中生成精确 permission map：Plan 默认 deny，仅放行
   读取/搜索/LSP/显式 skill；workspace-write 默认 ask 并拒绝 external_directory/task；full-access
   仍拒绝产品未准入的 task。现有 `/config` 回读确认最终值。
@@ -42,7 +43,7 @@ Codex/OpenCode 仍只接收各自私有配置。若只增加 system prompt，Pla
 ## 验证
 
 公共单测覆盖冻结、稳定 fingerprint、非法枚举、重复来源和 Plan 非只读拒绝。Codex 覆盖授权收窄、
-越权拒绝、显式来源/隔离环境前置条件、full-access 来源回读和旧配置不变；OpenCode 覆盖三档精确
+越权拒绝、显式来源/隔离环境前置条件、命名权限与 sandbox 映射、full-access 来源回读和旧配置不变；OpenCode 覆盖三档精确
 permission map、越权拒绝及 generation 有效配置回读。下游 swarm 负责 Work/Code prompt、路径、规则、
 附件、个人上下文与冷启动快照的产品级黄金/越界测试。
 
