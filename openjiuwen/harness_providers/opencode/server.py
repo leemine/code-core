@@ -234,6 +234,7 @@ class ManagedServer:
                 self.context.mcp_servers,
                 skill_path=self.skill_path,
                 plugin_specs=self.plugin_stage.specs,
+                runtime_policy=self.context.runtime_policy,
             )
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))

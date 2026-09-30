@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_protocol` |
 | 协议版本 | `1.0` |
-| 最近一次修订日期 | 2026-08-20 |
+| 最近一次修订日期 | 2026-09-30 |
 | 关联 feature | `F_94_external-harness-protocol.md` |
 
 ## 范围与边界
@@ -53,6 +53,8 @@ Round 误用提供公共别名。
 10. protocol 包不依赖任何可选厂商 SDK。
 11. 跨协议 JSON 值构造时递归校验、复制和冻结；禁止 NaN/Infinity、任意 Python object 和可变别名。
 12. event buffer 有界，retention 由 payload 推导；REQUIRED event 永不丢弃。
+13. 可选 `HarnessContext.runtime_policy` 是单个 Provider 进程周期的不可变公共要求，不是授权令牌；
+    Provider 私有编译只能在冻结的 `ExecutionAuthorization` 内收窄，不能扩大权限或原生来源范围。
 
 ## 接口契约
 
@@ -77,6 +79,17 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 | `abort(mode)` | graceful/force abort；能力 gated |
 | `pause()` / `resume()` | warm/cold paused-turn continuation；能力 gated |
 | `export_checkpoint()` | 返回最新 `HarnessCheckpoint` 快照；不替代主动保存 |
+
+### HarnessRuntimePolicy
+
+宿主可在 `start(context)` 前提供 `HarnessRuntimePolicy`。该值固定 Surface（Work/Code）、执行状态
+（normal/plan）、最大 workspace access、允许的上下文与记忆来源、所需能力类别、预期产物类别及
+source-discovery 方式。`plan` 只允许 `read_only`；`full_access` 仍需独立冻结的构造授权。
+
+策略 revision/fingerprint 仅用于进程周期审计和恢复时判断是否复用旧权限指纹，不加入 Provider
+Binding 或 Session Surface 身份。冷启动可使用新策略，运行中的 Harness 不得替换该值。公共协议不生成
+厂商配置；Provider 必须在启动副作用前完成私有映射，并在原生运行时支持时回读有效 sandbox、审批、
+MCP 和来源控制。旧宿主不提供该字段时保持原语义。
 
 ### Delivery
 

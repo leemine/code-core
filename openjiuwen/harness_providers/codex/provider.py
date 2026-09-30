@@ -66,8 +66,6 @@ class CodexHarnessProvider:
                 raise ValueError("explicit authorization requires valid Codex config overrides") from exc
         if any(conflicts(value) for value in overrides):
             raise ValueError("Codex permission overrides conflict with explicit execution authorization")
-        if authorization.full_access and parsed.startup_source_roots is not None:
-            raise ValueError("Codex restricted startup sources conflict with full access")
         return _permission_config(config, authorization.full_access)
 
     @staticmethod

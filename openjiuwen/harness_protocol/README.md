@@ -51,7 +51,8 @@ contain turns from multiple agents. The single-agent harness API therefore uses
   harness capabilities, compatible protocol versions, and required/optional
   host capabilities.
 - `HarnessContext`: agent identity plus host services injected at
-  `start`, including tools, MCP, hooks, interactions, and checkpoint storage.
+  `start`, including tools, MCP, hooks, interactions, checkpoint storage, and
+  an optional provider-neutral cold-start `HarnessRuntimePolicy`.
 - `HarnessEvent`: an event envelope with global ordering and correlation IDs.
   Its payload is provider-neutral; `ProviderEvent` preserves namespaced
   extensions without changing the shared protocol.
@@ -173,6 +174,10 @@ class MyHarness:
     unknown event types and schema versions.
 15. Environment values, credentials, and provider client objects must never be
    copied into events, checkpoints, exceptions, or logs.
+16. `HarnessRuntimePolicy` is an immutable requirement snapshot for one
+    provider process cycle. It may narrow, but never expand, the separately
+    frozen `ExecutionAuthorization`; Provider-private compilers must reject an
+    unsupported source or workspace policy before starting native resources.
 
 ## Documents
 
@@ -202,10 +207,27 @@ The existing manifest factory delegates provider lookup to the same registry in 
 settings never grant authorization. The optional `HarnessAuthorizationProvider`
 construction port compiles this decision to vendor config and describes legacy
 config; it does not start a session. Explicit requests fail before startup if
-unsupported (currently only Codex implements this port).
+unsupported (currently Codex and OpenCode implement this port).
 
 Omitting authorization preserves legacy configuration and Binding fingerprints.
 Explicit `False` retains runtime policy/approval enforcement; `True` requests
 full access. Neither is an OS isolation guarantee. Hosts must preserve exact
 Binding checks; migrating an old profile to explicit authorization changes its
 identity even if the resulting vendor options look equivalent.
+
+## Cold-start runtime policy
+
+`HarnessContext.runtime_policy` is optional so existing hosts retain their
+exact behavior. A host that supplies it must use a `HarnessRuntimePolicy`
+containing the Work/Code Surface, normal/plan execution state, maximum
+workspace access, explicit context/memory/capability/artifact requirements,
+and source-discovery mode. The value and its fingerprint are audit data for
+one provider process cycle; they are not an authorization token or persistent
+Session identity.
+
+Plan requires `READ_ONLY`. `FULL_ACCESS` is valid only when the frozen
+construction authorization already grants it. Codex and OpenCode translate
+the shared value into their private startup configuration and verify effective
+configuration where their native runtime exposes readback. Vendor JSON/TOML,
+native tool names, product UI state, and mutable policy storage do not belong
+in this public value object.

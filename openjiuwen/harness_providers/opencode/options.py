@@ -6,7 +6,13 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from openjiuwen.harness_protocol import HostCapability, McpTransport
+from openjiuwen.harness_protocol import (
+    HarnessRuntimePolicy,
+    HostCapability,
+    McpTransport,
+    SourceDiscovery,
+    WorkspaceAccess,
+)
 
 from .errors import OpenCodeError
 
@@ -134,6 +140,7 @@ def native_config(
     skill_path: Path | None = None,
     plugin_specs: tuple[str, ...] = (),
     include_product_mcp=True,
+    runtime_policy: HarnessRuntimePolicy | None = None,
 ):
     model = config.model
     if model is None:
@@ -156,13 +163,7 @@ def native_config(
                 },
             }
         },
-        "permission": {
-            "*": "allow" if config.full_access else "ask",
-            "task": "deny",
-            # The native question tool creates the awaited question request;
-            # it is not itself a host-approved side effect.
-            "question": "allow" if HostCapability.USER_INPUT in host_capabilities else "deny",
-        },
+        "permission": _permission_config(config, host_capabilities, runtime_policy),
         "lsp": False,
         "formatter": False,
         "agent": {"title": {"disable": True}},
@@ -173,6 +174,39 @@ def native_config(
             else {}
         ),
         **({"plugin": list(plugin_specs)} if config.native_plugins is not None else {}),
+    }
+
+
+def _permission_config(config, host_capabilities, policy: HarnessRuntimePolicy | None):
+    question = "allow" if HostCapability.USER_INPUT in host_capabilities else "deny"
+    if policy is None:
+        return {"*": "allow" if config.full_access else "ask", "task": "deny", "question": question}
+    if policy.source_discovery is not SourceDiscovery.EXPLICIT_ONLY:
+        raise OpenCodeError("unsupported_runtime_source_policy", category="process_start_failed")
+    if policy.workspace_access is WorkspaceAccess.FULL_ACCESS:
+        if not config.full_access:
+            raise OpenCodeError("runtime_policy_exceeds_authorization", category="process_start_failed")
+        return {"*": "allow", "task": "deny", "question": question}
+    if policy.workspace_access is WorkspaceAccess.READ_ONLY:
+        return {
+            "*": "deny",
+            "read": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "list": "allow",
+            "lsp": "allow",
+            "skill": "allow",
+            "edit": "deny",
+            "bash": "deny",
+            "external_directory": "deny",
+            "task": "deny",
+            "question": question,
+        }
+    return {
+        "*": "ask",
+        "external_directory": "deny",
+        "task": "deny",
+        "question": question,
     }
 
 

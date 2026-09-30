@@ -350,7 +350,13 @@ OpenJiuwen 统一策略。二者不要用同一个未经区分的回调类型。
 - cwd 和环境变量；
 - resume policy、versioned checkpoint 和 checkpoint sink；
 - native tool gateway 和 MCP server 配置；
-- hook dispatcher、interaction handler 与 telemetry handle。
+- hook dispatcher、interaction handler 与 telemetry handle；
+- 可选的 `HarnessRuntimePolicy`，用于一个冷启动 Provider 周期的 Work/Code、normal/plan、
+  workspace access 及上下文/记忆/能力/产物来源要求。
+
+Runtime policy 必须由可信宿主在 `start()` 前编译完成，不能来自模型输出。它不是授权令牌：
+`full_access` 仍需冻结的 `ExecutionAuthorization`，plan 只能 read-only。运行中的 harness 不替换该
+快照；冷启动可使用新 revision。Provider 只在私有层生成厂商配置，并在支持时回读有效策略。
 
 如果三方 SDK 接受 Python tool callback，使用 `context.tools`：
 
@@ -977,7 +983,7 @@ The engine compiles it through the provider's optional
 `HarnessAuthorizationProvider` port before construction. Hosts can use
 `openjiuwen.harness_providers.construction.execution_authorization(spec)` for
 the corresponding product-tool policy without inspecting vendor JSON.
-Explicit unsupported providers fail; only Codex currently adapts this contract.
+Explicit unsupported providers fail; Codex and OpenCode currently adapt this contract.
 
 Leave old specs at `authorization=None`: their JSON and Binding digests stay
 unchanged. The narrow `apply_legacy_full_access` helper preserves the historical

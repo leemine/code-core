@@ -77,8 +77,10 @@ def test_second_provider_can_compile_without_host_vendor_branches(monkeypatch):
     assert construction.execution_authorization(spec).full_access
 
 
-def test_full_access_cannot_claim_restricted_source_admission():
+def test_full_access_preserves_explicit_source_admission():
     spec = AgentExecutionSpec("codex", "r1", provider_config={"startup_source_roots": ["/tmp/work"]},
                               authorization=ExecutionAuthorization(True))
-    with pytest.raises(ValueError, match="restricted startup sources"):
-        construction.compile_execution(spec)
+    compiled = construction.compile_execution(spec)
+    assert compiled["startup_source_roots"] == ("/tmp/work",)
+    assert compiled["bypass_approvals_and_sandbox"] is True
+    assert compiled["mcp_default_tools_approval_mode"] == "auto"

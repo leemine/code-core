@@ -17,6 +17,7 @@ from openjiuwen.harness_protocol import (
     ResumePolicy,
 )
 from openjiuwen.harness_providers.codex import CodexHarness, CodexHarnessConfig
+from openjiuwen.harness_providers.codex.sdk_compat import validate_effective_startup_sources
 from openjiuwen.harness_providers.codex.source_policy import (
     restricted_startup_overrides,
     validate_source_config,
@@ -50,12 +51,11 @@ def test_root_array_roundtrip_and_legacy_opt_out():
     assert validate_startup_sources(CodexHarnessConfig(), _context()) is None
 
 
-@pytest.mark.parametrize("change", ["inherit", "bypass", "handler", "capability", "home_override", "relative", "root"])
+@pytest.mark.parametrize("change", ["inherit", "handler", "capability", "home_override", "relative", "root"])
 def test_restricted_preconditions_fail_closed(policy, change):
     config, context = policy
-    if change in ("inherit", "bypass"):
-        field = "inherit_process_env" if change == "inherit" else "bypass_approvals_and_sandbox"
-        config = replace(config, **{field: True})
+    if change == "inherit":
+        config = replace(config, inherit_process_env=True)
     elif change == "handler":
         context = replace(context, interactions=None)
     elif change == "capability":
@@ -66,6 +66,17 @@ def test_restricted_preconditions_fail_closed(policy, change):
         config = replace(config, startup_source_roots=("relative" if change == "relative" else "/",))
     with pytest.raises(HarnessProtocolError):
         validate_startup_sources(config, context)
+
+
+def test_full_access_keeps_explicit_source_admission_without_host_approval(policy):
+    config, context = policy
+    config = replace(
+        config,
+        bypass_approvals_and_sandbox=True,
+        mcp_default_tools_approval_mode="auto",
+    )
+    context = replace(context, host_capabilities=frozenset(), interactions=None)
+    assert validate_startup_sources(config, context)
 
 
 @pytest.mark.parametrize("key", [
@@ -305,6 +316,43 @@ def test_effective_configuration_requires_named_profile_and_disabled_agents(tmp_
             validate_source_config(values, effective=True, cwd=str(tmp_path))
     values = {"default_permissions": "a0", **tomllib.loads("\n".join(restricted_startup_overrides(str(tmp_path))))}
     validate_source_config(values, effective=True, cwd=str(tmp_path))
+
+
+def test_full_access_effective_sources_do_not_require_a_permission_profile(tmp_path):
+    values = tomllib.loads("\n".join(restricted_startup_overrides(str(tmp_path))))
+    validate_source_config(
+        values,
+        effective=True,
+        cwd=str(tmp_path),
+        require_permissions=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_full_access_reads_back_effective_source_controls_before_start(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    values = tomllib.loads("\n".join(restricted_startup_overrides(str(tmp_path))))
+
+    async def request(method, params, *, response_model):
+        assert method == "config/read"
+        assert params == {"cwd": str(tmp_path), "includeLayers": False}
+        return response_model.model_validate({"config": values})
+
+    client = SimpleNamespace(
+        _ensure_initialized=AsyncMock(),
+        _client=SimpleNamespace(request=AsyncMock(side_effect=request)),
+    )
+    await validate_effective_startup_sources(
+        client=client,
+        cwd=str(tmp_path),
+        allow_native_plugins=False,
+        managed_mcp_names=(),
+        expected_mcp_approval_mode="auto",
+        require_permissions=False,
+    )
+    client._ensure_initialized.assert_awaited_once()
 
 
 @pytest.mark.asyncio
