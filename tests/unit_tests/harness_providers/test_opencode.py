@@ -19,6 +19,7 @@ from openjiuwen.harness_protocol import (
     HarnessContext,
     HarnessInput,
     HarnessProtocolError,
+    HarnessRuntimePolicy,
     HostCapability,
     InteractionCancelReason,
     InteractionResponseStatus,
@@ -28,12 +29,15 @@ from openjiuwen.harness_protocol import (
     McpTransport,
     OutputOperation,
     ResumePolicy,
+    RuntimeExecutionState,
+    RuntimeSurface,
     ToolApprovalDecision,
     ToolApprovalResponse,
     TurnEventKind,
     TurnStatus,
     UnsupportedHarnessCapabilityError,
     UserInputResponse,
+    WorkspaceAccess,
 )
 from openjiuwen.harness_providers.base import TurnTiming
 from openjiuwen.harness_providers.construction import resolve_provider
@@ -98,6 +102,45 @@ def test_authorization_and_separate_model_identity():
     assert native_config(config())["provider"]["openjiuwen"]["options"]["apiKey"] == "test-secret"
     assert provider.card.supports(HarnessCapability.MCP_TOOLS)
     assert not provider.card.supports(HarnessCapability.NATIVE_TOOLS)
+
+
+def test_runtime_policy_compiles_exact_opencode_permissions():
+    normal = HarnessRuntimePolicy(
+        revision="surface-v1",
+        surface=RuntimeSurface.CODE,
+        execution_state=RuntimeExecutionState.NORMAL,
+        workspace_access=WorkspaceAccess.WORKSPACE_WRITE,
+    )
+    plan = HarnessRuntimePolicy(
+        revision="surface-v1",
+        surface=RuntimeSurface.CODE,
+        execution_state=RuntimeExecutionState.PLAN,
+        workspace_access=WorkspaceAccess.READ_ONLY,
+    )
+    normal_permissions = native_config(config(), runtime_policy=normal)["permission"]
+    plan_permissions = native_config(config(full_access=True), runtime_policy=plan)["permission"]
+    assert normal_permissions == {
+        "*": "ask",
+        "external_directory": "deny",
+        "task": "deny",
+        "question": "deny",
+    }
+    assert plan_permissions["*"] == "deny"
+    assert plan_permissions["read"] == "allow"
+    assert plan_permissions["edit"] == "deny"
+    assert plan_permissions["bash"] == "deny"
+    assert plan_permissions["external_directory"] == "deny"
+
+
+def test_runtime_policy_cannot_expand_opencode_authorization():
+    policy = HarnessRuntimePolicy(
+        revision="surface-v1",
+        surface="work",
+        execution_state="normal",
+        workspace_access="full_access",
+    )
+    with pytest.raises(OpenCodeError, match="runtime_policy_exceeds_authorization"):
+        native_config(config(), runtime_policy=policy)
 
 
 def _product_mcp(**overrides):

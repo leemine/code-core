@@ -17,11 +17,13 @@ import pytest
 from openjiuwen.harness_protocol import (
     DeliveryMode,
     DiagnosticEvent,
+    ExecutionAuthorization,
     HarnessContext,
     HarnessEvent,
     HarnessInput,
     HarnessProtocol,
     HarnessProtocolError,
+    HarnessRuntimePolicy,
     HarnessState,
     HostCapability,
     InteractionResponseStatus,
@@ -33,6 +35,8 @@ from openjiuwen.harness_protocol import (
     ProviderEvent,
     ProviderInteractionResponse,
     ResumePolicy,
+    RuntimeExecutionState,
+    RuntimeSurface,
     ToolApprovalDecision,
     ToolApprovalResponse,
     TurnEventKind,
@@ -40,6 +44,7 @@ from openjiuwen.harness_protocol import (
     UsageUpdatedEvent,
     UserInputRequest,
     UserInputResponse,
+    WorkspaceAccess,
 )
 from openjiuwen.harness_providers.codex import CodexHarness, CodexHarnessConfig, CodexHarnessProvider, CodexModelConfig
 from openjiuwen.harness_providers.codex.failure_classifier import (
@@ -55,6 +60,7 @@ from openjiuwen.harness_providers.codex.options import (
     codex_mcp_config_overrides,
     codex_model_config_overrides,
 )
+from openjiuwen.harness_providers.codex.runtime_policy import compile_runtime_policy
 from tests.test_logger import logger
 
 
@@ -74,6 +80,74 @@ def test_model_selection_does_not_grant_permissions(monkeypatch, model, bypass) 
     else:
         assert "approval_mode" not in options
         assert "sandbox" not in options
+
+
+def test_runtime_policy_narrows_authorized_codex_config_without_mutating_binding_snapshot():
+    config = CodexHarnessConfig(
+        bypass_approvals_and_sandbox=True,
+        inherit_process_env=False,
+        startup_source_roots=("/authorized",),
+        mcp_default_tools_approval_mode="auto",
+    )
+    policy = HarnessRuntimePolicy(
+        revision="surface-v1",
+        surface=RuntimeSurface.CODE,
+        execution_state=RuntimeExecutionState.PLAN,
+        workspace_access=WorkspaceAccess.READ_ONLY,
+    )
+    compiled = compile_runtime_policy(config, policy)
+    assert compiled.expected_sandbox == "read-only"
+    assert compiled.config.bypass_approvals_and_sandbox is False
+    assert compiled.config.mcp_default_tools_approval_mode == "prompt"
+    assert compiled.config.thread_config["sandbox_mode"] == "read-only"
+    assert config.bypass_approvals_and_sandbox is True
+
+
+def test_runtime_policy_cannot_expand_codex_authorization():
+    policy = HarnessRuntimePolicy(
+        revision="surface-v1",
+        surface="code",
+        execution_state="normal",
+        workspace_access="full_access",
+    )
+    with pytest.raises(HarnessProtocolError, match="authorization boundary"):
+        compile_runtime_policy(
+            CodexHarnessConfig(
+                inherit_process_env=False,
+                startup_source_roots=("/authorized",),
+            ),
+            policy,
+        )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        CodexHarnessConfig(inherit_process_env=False),
+        CodexHarnessConfig(startup_source_roots=("/authorized",)),
+    ],
+)
+def test_runtime_policy_requires_explicit_isolated_codex_sources(config):
+    policy = HarnessRuntimePolicy(
+        revision="surface-v1",
+        surface="work",
+        execution_state="normal",
+        workspace_access="workspace_write",
+    )
+    with pytest.raises(HarnessProtocolError, match="isolated env and explicit"):
+        compile_runtime_policy(config, policy)
+
+
+def test_full_access_authorization_preserves_explicit_codex_source_roots():
+    compiled = CodexHarnessProvider.compile_authorization(
+        {
+            "inherit_process_env": False,
+            "startup_source_roots": ["/authorized"],
+        },
+        ExecutionAuthorization(full_access=True),
+    )
+    assert compiled["bypass_approvals_and_sandbox"] is True
+    assert compiled["startup_source_roots"] == ("/authorized",)
 
 
 @pytest.mark.asyncio
