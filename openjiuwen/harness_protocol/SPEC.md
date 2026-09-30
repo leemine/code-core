@@ -55,6 +55,9 @@ Round 误用提供公共别名。
 12. event buffer 有界，retention 由 payload 推导；REQUIRED event 永不丢弃。
 13. 可选 `HarnessContext.runtime_policy` 是单个 Provider 进程周期的不可变公共要求，不是授权令牌；
     Provider 私有编译只能在冻结的 `ExecutionAuthorization` 内收窄，不能扩大权限或原生来源范围。
+14. `ProviderCapabilityInventory` 只描述 Provider 私有编译器已配置的原生类别、工具、Skill、
+    MCP 与插件名称，供宿主在启动副作用前合并目录和拒绝命名冲突。它不授予权限，也不替代
+    Provider 原生 loader 的来源、版本、摘要和有效 inventory 回读。
 
 ## 接口契约
 
