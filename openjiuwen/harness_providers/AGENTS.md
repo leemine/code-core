@@ -18,9 +18,9 @@ harness_providers/
 ├── jsonsafe.py     # to_json_safe: vendor objects -> protocol JSON values
 ├── native/         # DeepAgentHarness over the in-process DeepAgent interaction loop (+ NativeHarnessProvider)
 ├── claudecode/     # ClaudeCodeHarness over claude-agent-sdk (config / options / mapping / failure_classifier)
-├── codex/          # CodexHarness over openai-codex (config / options / mapping / failure_classifier)
+├── codex/          # CodexHarness over openai-codex (+ private runtime-policy/source compiler)
 ├── dsh/            # DshHarness over deepseek-harness (moved from agent_teams.external.dsh; see dsh/AGENTS.md)
-└── opencode/       # fixed HTTP/SSE CLI, interactions, checkpoints and owned systemd cgroup (OC1/OC2)
+└── opencode/       # fixed HTTP/SSE CLI, interactions, checkpoints, runtime-policy mapping and owned systemd cgroup
 ```
 
 Provider names accepted by the factory: `native`, `native_v2`, `claudecode`, `codex`, `dsh`, `opencode`.
@@ -138,6 +138,13 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
     before plugin code executes. Source and staged bytes are rechecked before
     each Turn, the snapshot fingerprint is checkpoint-bound, and cgroup
     emptiness—not the optional plugin `dispose` callback—is the cleanup authority.
+13. **Runtime policy is compiled privately and only narrows authorization.**
+    Codex requires an isolated process environment plus explicit startup source
+    roots, maps read-only/workspace-write to native sandbox and host approval,
+    and keeps ambient-source controls active even under separately authorized
+    full access. OpenCode renders an exact native permission object in its
+    sealed generation config. Both fail before provider allocation on expansion
+    or conflict and retain legacy behavior when no runtime policy is supplied.
 
 ## Change requirements
 

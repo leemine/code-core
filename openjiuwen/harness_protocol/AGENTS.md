@@ -10,6 +10,7 @@ remain in `openjiuwen/agent_teams/external/cli_agent`.
 
 - `protocol.py`: behavioral Harness and provider factory Protocols.
 - `models.py`: lifecycle commands, context, capability card, and JSON types.
+- `runtime_policy.py`: immutable provider-neutral cold-start Surface requirements.
 - `events.py`: ordered observation-plane event envelope and payloads.
 - `results.py`: normalized terminal result, usage, and failure types.
 - `interactions.py`: awaited provider-request/host-response control plane.
@@ -95,6 +96,10 @@ boundary. Do not introduce Round aliases for these concepts.
 15. Public event cursors provide idempotent `aclose()` so early consumer exit
     releases the single-consumer lease. Wire events use the official codec and
     preserve unknown event types.
+16. Runtime policy describes one cold provider cycle and is not authorization.
+    It may be audited by fingerprint but must not become Session/Binding
+    identity, vendor configuration, mutable policy storage, or a claim that a
+    requested capability is available.
 
 ## Compatibility
 
