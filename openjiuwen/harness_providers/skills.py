@@ -92,6 +92,42 @@ def _discover(root: Path) -> list[Path]:
     return result
 
 
+def configured_skill_names(
+    sources: tuple[SkillSource, ...],
+    *,
+    conflict: str,
+) -> tuple[str, ...]:
+    """Resolve the same configured Skill winners without copying bundles.
+
+    Provider construction uses this read-only inventory for host catalog
+    collision checks. ``install_skills`` remains the loader and independently
+    validates/copies the selected bytes immediately before startup.
+    """
+
+    if conflict not in {"skip", "replace"}:
+        raise ValueError("skill_conflict must be skip or replace")
+    winners: dict[str, str] = {}
+    order: list[str] = []
+    for source in sources:
+        root = Path(source.dir).expanduser().resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError(f"skill source is not a directory: {root}")
+        bundles = _discover(root)
+        if not bundles:
+            raise ValueError(f"no SKILL.md bundles found in {root}")
+        for bundle in bundles:
+            name = _name(bundle)
+            if source.enabled_skills and name not in source.enabled_skills:
+                continue
+            key = name.casefold()
+            if key in winners and conflict == "skip":
+                continue
+            if key not in winners:
+                order.append(key)
+            winners[key] = name
+    return tuple(winners[key] for key in order)
+
+
 def _validate_tree(path: Path, root: Path, ancestors: frozenset[Path] = frozenset()) -> None:
     resolved = path.resolve(strict=True)
     if not resolved.is_relative_to(root):
