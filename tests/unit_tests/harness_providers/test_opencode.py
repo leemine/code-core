@@ -1087,3 +1087,18 @@ def test_completed_output_limit_is_failure_instead_of_waiting_for_timeout():
     acc = Accumulator("ses_s", "msg_u", 10000)
     with pytest.raises(OpenCodeError, match="model_output_limit_exceeded"):
         acc.consume(event("message.updated", info=info(time={"completed": 1}, finish="length")))
+
+
+def test_default_model_budgets_preserve_existing_storage_identity():
+    from dataclasses import asdict
+    from openjiuwen.harness_providers.opencode.server import _config_identity
+
+    original = config()
+    legacy = asdict(original)
+    legacy.pop("native_plugins")
+    legacy["model"].pop("context_window")
+    legacy["model"].pop("max_output_tokens")
+    assert _config_identity(original) == legacy
+    changed = replace(original, model=replace(original.model, context_window=131072, max_output_tokens=16384))
+    assert _config_identity(changed) != legacy
+    assert _config_identity(changed)["model"]["max_output_tokens"] == 16384
