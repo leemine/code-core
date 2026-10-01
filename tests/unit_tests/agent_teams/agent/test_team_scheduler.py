@@ -5,7 +5,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -123,6 +123,7 @@ def _build_scheduler(
     )
     spec.agents = None
     infra.team_backend = AsyncMock(team_name=TEAM)
+    infra.team_backend.task_verification_enabled = Mock(return_value=True)
     blueprint = SimpleNamespace(spec=spec, team_name=TEAM)
     host = FakeHost()
     if review_feedback_rail is not None:

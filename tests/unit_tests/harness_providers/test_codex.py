@@ -604,9 +604,13 @@ async def test_steer_before_the_sdk_handle_exists_is_queued(monkeypatch: pytest.
     receipt = await harness.send(HarnessInput(content="long"))
     await asyncio.sleep(0.01)
     assert harness.state is HarnessState.RUNNING and not state.handles
-    steer = await harness.send(HarnessInput(content="early"), mode=DeliveryMode.STEER)
-    assert steer.turn_id == receipt.turn_id
+    delivery = asyncio.create_task(harness.send(HarnessInput(content="early"), mode=DeliveryMode.STEER))
+    await asyncio.sleep(0)
+    assert not delivery.done()
     state.turn_gate.set()
+    steer = await asyncio.wait_for(delivery, 2)
+    assert steer.turn_id == receipt.turn_id
+    assert steer.accepted_mode is DeliveryMode.STEER
     terminal = _terminal(await _turn(harness, receipt.turn_id))
     assert terminal.kind is TurnEventKind.FINISHED
     assert state.handles[0].steers == ["early"]
