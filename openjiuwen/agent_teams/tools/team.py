@@ -2463,6 +2463,11 @@ class TeamBackend:
         """
         return self._enable_hitt
 
+    @property
+    def history_restored(self) -> bool:
+        """Whether this backend belongs to the original cold-recovery path."""
+        return self._history_restored
+
     def mark_history_restored(self) -> None:
         """Record that this run restored a conversation containing the policy.
 

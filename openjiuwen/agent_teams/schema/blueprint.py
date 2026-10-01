@@ -204,6 +204,12 @@ class TeamAgentSpec(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     agents: dict[str, DeepAgentSpec]
+    execution_provider: str = Field(default="native", pattern=r"^[a-z][a-z0-9_-]*$")
+    """Execution Provider for every member; independent of model endpoints.
+
+    External selections require the host factory in the existing BuildContext.
+    Only this identity is persisted here; Provider configuration stays host-owned.
+    """
     team_name: str = "agent_team"
     enable_group_chat: bool = False
     group_context_tail: int = Field(default=5, ge=1, le=20)
@@ -744,6 +750,10 @@ class TeamAgentSpec(BaseModel):
         if leader_agent is None:
             raise ValueError("agents dict must contain a 'leader' key")
 
+        from openjiuwen.agent_teams.agent.runtime_factory import require_member_runtime_factory
+
+        require_member_runtime_factory(self)
+
         self._validate_reserved_names()
         self._validate_hitt_consistency()
         self._validate_bridge_consistency()
@@ -812,7 +822,8 @@ class TeamAgentSpec(BaseModel):
             model_allocator.allocate(model_name=self.leader.model_name) if model_allocator is not None else None
         )
         leader_member_model = leader_allocation.to_team_model_config() if leader_allocation else None
-        self._validate_leader_model_resolved(leader_agent, leader_member_model, team_spec)
+        if self.execution_provider == "native":
+            self._validate_leader_model_resolved(leader_agent, leader_member_model, team_spec)
 
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,

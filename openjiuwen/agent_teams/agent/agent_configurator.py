@@ -245,6 +245,8 @@ class AgentConfigurator:
         member_runtime: Optional["MemberRuntime"] = None,
     ) -> "MemberRuntime":
         """Main entry point: configure infrastructure and build the runtime."""
+        if spec.execution_provider != "native" and member_runtime is not None:
+            raise ValueError("External Team member runtime must come from its host factory")
         self.setup_infra(spec, ctx)
         return self.setup_agent(spec, ctx, member_runtime=member_runtime)
 
@@ -261,6 +263,9 @@ class AgentConfigurator:
         on_team_built: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, prepare team backend."""
+        from openjiuwen.agent_teams.agent.runtime_factory import require_member_runtime_factory
+
+        require_member_runtime_factory(spec)
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
         resolved_language = _resolve_language(agent_spec.language)
         self._blueprint = TeamAgentBlueprint(
@@ -431,6 +436,33 @@ class AgentConfigurator:
         memory setup is skipped — coordination still drives it
         through the same :class:`MemberRuntime` surface.
         """
+        if spec.execution_provider != "native":
+            from openjiuwen.agent_teams.agent.runtime_factory import (
+                TeamMemberRuntimeBuild,
+                require_member_runtime_factory,
+            )
+            from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
+            from openjiuwen.harness_providers.construction import resolve_provider
+            from openjiuwen.harness_protocol import HarnessState
+
+            if member_runtime is not None:
+                raise ValueError("External Team member runtime must come from its host factory")
+            factory = require_member_runtime_factory(spec)
+            member_runtime = factory.build_member_runtime(TeamMemberRuntimeBuild(
+                spec=spec, context=ctx, card=self._card,
+                language=self._blueprint.language, team_mode=_resolve_team_mode(spec),
+                team_backend=self.team_backend,
+                workspace_manager=self.workspace_manager, model_allocator=self.model_allocator,
+                messager=self.messager,
+            ))
+            if not isinstance(member_runtime, ExternalHarnessMemberRuntime):
+                raise TypeError("Team member factory must return an unstarted ExternalHarnessMemberRuntime")
+            if member_runtime.provider_name != resolve_provider(spec.execution_provider).card.name:
+                raise ValueError("Team member runtime Provider does not match the Spec")
+            if (member_runtime.harness.state is not HarnessState.TERMINATED
+                    or member_runtime.harness.provider_session_id is not None):
+                raise ValueError("Team member factory must return a fresh unstarted runtime")
+
         if member_runtime is not None:
             self.harness = member_runtime
             self.memory_manager = None
