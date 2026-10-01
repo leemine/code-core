@@ -326,3 +326,6 @@ normal config readback. They let deployments configure the actual selected
 model budget without private patching. A native completed `finish=length`
 record fails the Turn explicitly as `model_output_limit_exceeded`; it neither
 waits for the overall timeout nor treats an incomplete answer as successful.
+
+Default model budgets preserve the historical storage fingerprint byte for byte;
+explicit budget changes remain part of the bound configuration identity.
