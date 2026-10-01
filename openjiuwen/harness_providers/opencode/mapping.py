@@ -94,6 +94,8 @@ class Accumulator:
                 raise native_error(info["error"])
             self.infos[mid] = info
             self.parts.setdefault(mid, {})
+            if info.get("time", {}).get("completed") and info.get("finish") == "length":
+                raise OpenCodeError("model_output_limit_exceeded")
             if mid == next(reversed(self.infos)):
                 self.final_id = mid if info.get("time", {}).get("completed") and info.get("finish") == "stop" else None
             usage = self.usage()

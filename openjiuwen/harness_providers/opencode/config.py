@@ -25,8 +25,16 @@ class OpenCodeModelConfig:
     api_base: str
     api_key: str | None = field(default=None, repr=False)
     provider: str = "openjiuwen"
+    context_window: int = 32000
+    max_output_tokens: int = 4096
 
     def __post_init__(self):
+        for name in ("context_window", "max_output_tokens"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"OpenCode model {name} must be a positive integer")
+        if self.max_output_tokens > self.context_window:
+            raise ValueError("OpenCode model output limit exceeds context window")
         for name in ("model", "api_base", "provider"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
