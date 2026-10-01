@@ -969,3 +969,55 @@ async def test_completed_session_checkpoint_resumes_without_creating_session():
     rejected = FakeHarness("normal")
     with pytest.raises(HarnessProtocolError, match="confirmed idle session"):
         await rejected.start(context(checkpoint=unsafe, resume_policy=ResumePolicy.REQUIRE_RESUME))
+
+
+@pytest.mark.parametrize("hold_host", [True, False])
+def test_launcher_reaps_native_process_when_host_lease_is_lost(tmp_path, hold_host):
+    import fcntl
+    import os
+    import subprocess
+    import sys
+    import time
+
+    scope = tmp_path / "scope"
+    root = scope / "generation"
+    root.mkdir(parents=True)
+    marker = root / "child-pid"
+    cli = root / "fake-cli"
+    cli.write_text(
+        f"#!{sys.executable}\nimport os,time\nfrom pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n"
+    )
+    cli.chmod(0o700)
+    owner = {"generation": "only-this-test"}
+    (scope / "owner.json").write_text(json.dumps(owner))
+    fd = os.open(scope / "host.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    if hold_host:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    launch = root / "launch.json"
+    launch.write_text(
+        json.dumps(
+            {"owner": owner, "cli": str(cli), "cwd": str(root), "port": 1, "env": {}}
+        )
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-S", _launcher.__file__, str(launch)]
+    )
+    try:
+        if hold_host:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert marker.exists()
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        assert process.wait(timeout=5) == 75
+        if hold_host:
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(marker.read_text()), 0)
+        else:
+            assert not marker.exists()
+    finally:
+        os.close(fd)
+        if process.poll() is None:
+            process.kill()
+            process.wait()
