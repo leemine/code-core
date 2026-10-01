@@ -556,7 +556,10 @@ def test_mapping_scopes_snapshots_deltas_usage_and_final():
         delta = acc.consume(event("message.part.delta", messageID="msg_a", partID="prt_t", field="text", delta="a"))
         assert delta[0][0].operation is OutputOperation.DELTA
     acc.consume(event("message.part.updated", part=textpart("aa", time={"end": 1})))
-    completed = info(time={"completed": 1}, finish="stop", tokens={"input": 4, "output": 2, "total": 6, "reasoning": 0, "cache": {"read": 0, "write": 0}})
+    completed = info(
+        time={"completed": 1}, finish="stop",
+        tokens={"input": 4, "output": 2, "total": 6, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+    )
     for _ in range(2):
         acc.consume(event("message.updated", info=completed))
     assert acc.usage().input_tokens == 4
@@ -1060,3 +1063,27 @@ def test_missing_reasoning_keeps_output_usage_unknown():
     })))
     assert acc.usage().input_tokens == 4
     assert acc.usage().output_tokens is None
+
+
+@pytest.mark.parametrize("values", [
+    {"context_window": 0}, {"max_output_tokens": True},
+    {"context_window": 10, "max_output_tokens": 11},
+])
+def test_model_limits_reject_invalid_values(values):
+    with pytest.raises(ValueError):
+        OpenCodeModelConfig("fixture", "http://127.0.0.1:1/v1", **values)
+
+
+def test_native_config_uses_explicit_model_limits():
+    model = OpenCodeModelConfig("fixture", "http://127.0.0.1:1/v1",
+                               context_window=131072, max_output_tokens=16384)
+    rendered = native_config(OpenCodeHarnessConfig(model=model))
+    assert rendered["provider"]["openjiuwen"]["models"]["fixture"]["limit"] == {
+        "context": 131072, "output": 16384,
+    }
+
+
+def test_completed_output_limit_is_failure_instead_of_waiting_for_timeout():
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    with pytest.raises(OpenCodeError, match="model_output_limit_exceeded"):
+        acc.consume(event("message.updated", info=info(time={"completed": 1}, finish="length")))
