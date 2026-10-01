@@ -46,3 +46,11 @@ Ruff 稳定选择集和 diff check 通过。
 
 这是 R1-11F 的前置修复，不代表全角色 Provider 构造、Team 工具准入、Surface 继承或真实
 Native/Codex/OpenCode × Work/Code 六格完成；产品 External Team 准入仍保持关闭。
+
+
+## 产品强制取消的退出竞态（2026-10-01）
+
+真实 OpenCode Team 在拒绝审批后可能已关闭 HTTP 服务；此时立即 abort 会报 transport
+unavailable。成员强制取消现在在 abort 执行失败后调用同一 stop 路径，只有 Provider 与
+成员资源全部确认退出才成功。stop 失败继续抛出并保留同一成员供重试。普通温和取消和
+不支持的控制能力仍按原契约报错，不用该补偿伪造暂停或恢复成功。
