@@ -297,3 +297,11 @@ full-access。
 assistant 完成消息、原生 stop 原因、后续 idle 和权威消息回读一致。异常/超时/断流后停止
 受管服务、禁止未知副作用重试；SSE 断开会取消宿主待答并产生未知失败，不自动重连或重放。活动 Turn/
 待答的冷重建仍不支持，不复制第二套 Turn 状态机。
+
+
+### OpenCode host lease 失效清理
+
+私有 systemd launcher 观察既有 host.lock 与 generation owner 描述。宿主进程崩溃释放
+租约或恢复替换 owner 时，launcher 停止本代 CLI 并退出，由原 KillMode=control-group
+收敛其后代。无宿主租约时禁止启动；不等待新请求重新构造 Provider 才清理孤儿进程。
+这不恢复活动 Turn，不改变已有私有 cgroup/lease 身份核验。
