@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
-| 最近一次修订日期 | 2026-08-10 |
+| 最近一次修订日期 | 2026-10-01 |
 | 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback） |
 
 ## 范围 / 边界
@@ -17,7 +17,7 @@
 
 - `TeamScheduler` 的激活条件、触发集、双幂等扫描（开工 / 验票）与内存记账语义。
 - dispatch_mode 作为静态 spec 配置的消费方式（调度器构造/激活、verify 裁决策略、handler 类装配）。
-- 评审投票的数据面（票表、`review_round`）与判定面（`verdict.judge`、`settle_review`）分工。
+- 评审投票的数据面（票表、`review_round`）与判定面（`settle_review_tally`、`settle_review`）分工。
 - `SchedulerHost` 窄协议与 kernel 接线（组合 wake、`SCHEDULER_SCAN` 回声、激活/失活时机）。
 - 成员交接消息的两阶段渲染契约（模板 key / 占位符标准 / 命名空间白名单 / 展开点 / 降级链）。
 - 失败轮次 reviewer feedback 与团队终态向宿主发布的可选 callback 契约。
@@ -31,15 +31,15 @@
 ## 不变量
 
 1. **调度器只在 `spec.dispatch_mode == "scheduled"` 的 leader kernel 上存在**：`CoordinationKernel.setup` 构造（休眠态）；其余 kernel（teammate、autonomous leader）的 `scheduler` 恒为 None。
-2. **激活条件 = team 已建成**。两个激活点：`kernel.notify_team_built()`（build_team 成功回调内，先于任何 teammate spawn / create_task）与 `kernel.start()`（team 行已存在——warm resume / 冷恢复）。`pause()` / `stop()` 即 `deactivate()`。
+2. **激活条件 = team 已建成**。两个激活点：`kernel.notify_team_built()`（build_team 成功回调内，先于任何 teammate spawn / create_task）与 `kernel.start()`（team 行已存在——warm resume / 冷恢复）。`pause()` / `stop()` 先 `deactivate()`，再等待 `stop_reviewers()` 确认临时执行退出，失败保留所有者和会话。
 3. **dispatch_mode 是静态 spec 配置**（F_62 评审定稿）：`TeamAgentSpec.dispatch_mode` 在构建期决定一切——rails/工具形态/提示词按模式装配、每套一份互不混写；`TeamSpec.dispatch_mode` 镜像它随 spawn 载荷到达成员进程；`build_team` **不选择协调模式**（`team_info.dispatch_mode` 列只是记录，spec 是运行时真相）；运行期没有任何模式切换路径。
 4. **调度器不理解事件，只理解看板**：任何触发（`task_*` / `member_*` transport 事件、`POLL_TASK`、`SCHEDULER_SCAN`、激活）都跑同一对幂等扫描到有界不动点（`_MAX_SCAN_PASSES`）。恢复没有独立路径——激活扫描就是恢复。事件仅承担两个扫描推不出的职责：终态摘要与 `TASK_LIST_DRAINED` 收尾（事件只发一次）。
 5. **交接 = leader 身份邮箱消息，投递即启动**：`_send_as_leader` 先写邮箱行（持久）再 `host.auto_start_member`（`UNSTARTED→STARTING` CAS，幂等）。成员在线与否不是开工前置条件；成员侧零新代码（走既有 `MessageHandler`）。行里存的是**投递载荷不是文案**（`content=""` + `meta`），文案在投递时按模板渲染——见「消息面」段与 `S_12` 的 meta 三铁律。
 6. **`SchedulerHost.deliver_input` 只准注入 leader 自身**（终态摘要 / 升级 / 收尾）。对成员的输入永远走邮箱。
 7. **开工规则**：成员无活跃任务（`{PLANNING, IN_PROGRESS, IN_REVIEW}`）时，取其名下 `updated_at` 最早的 `PENDING(assignee)` 任务 `start_task`（DAO CAS；plan_mode 成员落 `PLANNING`）。并发/重复触发由 CAS 与一活跃探针消歧。
-8. **验票规则**：每轮 `(task_id, review_round)` 送审派发一次（内存去重，崩溃后至多重发一轮）；`verdict.judge` 三值判定——`pass ≥ ceil(threshold×n)` 过、fail 票使配额不可达即败、否则未定；settle 经 `task_manager.settle_review` 的 `IN_REVIEW` 源态 CAS，单判定者 + CAS 保证不双结算。
+8. **验票规则**：每轮 `(task_id, review_round)` 仅派发缺票 reviewer（内存去重、恢复读原票据）。`settle_review_tally` 等待二元票池齐票后执行一票否决，再等待 inspector 齐票且平均分至少 0.85；否则未定。已确定 PASS/FAIL 还须等待本轮自有临时执行退出，再经 `task_manager.settle_review` 的 `IN_REVIEW` 源态 CAS，保证不双结算。
 9. **升级规则**：败局且 `review_round ≥ max_review_rounds`（任务列，NULL → `spec.default_max_review_rounds`）→ 不再自动打回，任务**留 `IN_REVIEW`**，升级注入 leader；未定且本轮开启超 `spec.review_stall_timeout` → 停摆升级（附已投/未投名单）。两类升级共用 `(task_id, review_round)` 去重；升级后决定性迟票仍可正常 settle。软催办（600s，包内常量 `_REVIEW_RENUDGE_SECONDS`）只发给未投票 reviewer、每轮每窗一次。
-10. **投票判定策略在调度器，票据事实在 DB**：`verify_task`（scheduled 团队）只追加票行 + 发 `TASK_REVIEW_VOTE`，不翻转状态；autonomous 团队维持首裁即决。工具描述随语义分离（desc_key：`verify_task` / `verify_task_scheduled`）。策略更换 = 替换 `verdict.judge`，不碰票表与状态机。
+10. **投票判定策略在调度器，票据事实在 DB**：`verify_task`（scheduled 团队）只追加票行 + 发 `TASK_REVIEW_VOTE`，不翻转状态；autonomous 团队维持首裁即决。工具描述随语义分离（desc_key：`verify_task` / `verify_task_scheduled`）。策略更换 = 替换 `settle_review_tally`，不碰票表与状态机。
 11. **leader 自发事件经 `SCHEDULER_SCAN` 回声可见**：`kernel._filter_self` 丢弃 self 事件时，若调度器激活且事件是 `task_*`，改投 `InnerEventType.SCHEDULER_SCAN`。coordination 无 handler 监听该 inner 事件；调度器视其为纯扫描提示。
 12. **异常语义**：`TeamScheduler.on_event` 吞普通异常（log + 下次触发重试幂等扫描），绝不让 bus loop 挂掉——与 `AsyncCallbackFramework.trigger` 的 swallow 语义对齐。
 13. **内存记账不持久化**：送审去重 / 催办节流 / 升级去重 / 摘要去重都是进程内状态；leader 重启最坏重发一次送审或升级。看板真相只在 DB。
@@ -86,6 +86,7 @@ class TeamScheduler:
 
     async def activate(self) -> None: ...      # 幂等；激活即恢复扫描
     def deactivate(self) -> None: ...
+    async def stop_reviewers(self) -> None: ...  # 确认退出；失败保留原所有者
     async def on_event(self, event: CoordinationEvent) -> None: ...
 ```
 
@@ -125,7 +126,7 @@ kernel 侧：
 - `_build_wake_callback()`：有调度器时组合 "coordination dispatch → scheduler.on_event"，否则裸 dispatch。
 - `notify_team_built()`：build_team 成功回调（`TeamAgent._mark_team_built`）→ 存在调度器则 `activate()`。
 
-配置消费（全部只在 leader 侧，不跨进程镜像）：`TeamAgentSpec.verify_vote_threshold`（默认 2/3，(0,1]）、`default_max_review_rounds`（默认 3，≥1）、`review_stall_timeout`（默认 1800s，>0）、`enable_task_verification`（提示词驱动，`CapabilityOverrides` 可在 build_team 覆盖；该参数只在 scheduled 下向模型暴露——本节这些配置都只有 scheduled 才有消费者，见 [[F_76]] 与 `S_08` 不变量 21b）。
+配置消费（全部只在 leader 侧，不跨进程镜像）：`default_max_review_rounds`（默认 3，≥1）、`review_stall_timeout`（默认 1800s，>0）、`enable_task_verification`（提示词驱动，`CapabilityOverrides` 可在 build_team 覆盖；该参数只在 scheduled 下向模型暴露——本节这些配置都只有 scheduled 才有消费者，见 [[F_76]] 与 `S_08` 不变量 21b）。
 
 ## 数据结构
 
@@ -184,3 +185,47 @@ leader 摘要不经邮箱 → 无 meta 通道、无投递时展开，维持一�
 - **`S_08_team-tools-contract`**：scheduled 形态 `create_task`（assignee 必填 + `max_review_rounds`）、`verify_task` 按模式二分的语义与描述形态、`build_team` 不选协调模式（不变量 21）。
 - **`S_12_schema-data-models`**：状态机（`start` 边的 PLANNING/IN_PROGRESS 落点）、票表、任务行新列、`TASK_REVIEW_VOTE` 事件、消息表 `meta` 投递载荷列与其三铁律。
 - **`F_73_reviewer-feedback-skill-evolution-boundaries`**：定义 scheduler callback 之外的归因、成员轨迹、Skill Rail 与创建审批边界；本文只约束 callback 的派发时机和失败隔离。
+
+
+## 临时执行接缝（2026-10-01，F_116）
+
+`_dispatch_to_reviewer` 不再丢弃后台 Task；`_review_runs` 按 task/review_round/reviewer
+保留 Task、runtime、cleanup Task 和投递/退出标记。反复扫描不重复构造仍存活或清理
+未确认的执行。cleanup 独立受 shield 保护；停止等待超时或被取消仍保留原句柄。Native
+既有 181001 重试必须先成功 dispose 才可新建。External 未知错误不按字符串自动重发。
+
+显式 External scheduled Spec 要求同一个 `TeamMemberRuntimeFactory` 同时实现
+`TeamReviewRuntimeFactory`，验证先于基础设施分配；执行时再次核对 Provider 与真实
+Team Session。`TeamReviewRuntimeBuild` 提供 task/review_round/reviewer、独立 invocation_id、
+原模板系统提示词、原 Verify/View 工具、语言和 BuildContext；临时身份不是 roster 成员
+或产品子 Agent。`TeamReviewRuntime` 的 run_once 必须对未知/失败抛错，dispose 返回
+表示执行/消费者/工具资源已退出；失败可重试同一实例。
+
+`SchedulerHost` 的两个输入投递方法不变；External 构造另读取 owning TeamAgent 的
+session_manager.team_session。具体宿主负责 Provider 配置/授权/单消费者历史与交互、
+root Round 用量和未知状态持久化；本接缝不包含这些宿主实现，不形成产品准入承诺。
+
+
+### 临时 reviewer 宿主与精确交互（2026-10-01，F_117）
+
+原 scheduler 暴露 review_interaction_target，按 _review_runs 的 invocation owner 查询；
+停止期间拒绝，退出后移除。Runner 原 InteractiveInput 在普通成员未命中时使用该查询，
+仍核对 team/root Session/cycle/pending，不新增 registry。宿主复用原 External IO/投影，
+在原 Team Session 保存评审 pending/closed/blocked 并拒绝未知冷重放。产品 scheduled
+仍关闭；真实本机 CLI 正向已验，pending 冷恢复及渠道/Cluster 尚未验收。
+详见 [F_117](../features/F_117_scheduled-review-host-interactions.md)。
+
+
+### 原 Team 输出接线补充（2026-10-01）
+
+真实 Runtime/Runner 审批验收发现：临时 reviewer 仅写 Team Session 流，原 TeamAgent
+实际消费 StreamController.stream_queue，因此审批已登记却无法到达回答端。现有
+TeamReviewRuntimeBuild 增加可选 output_sink；原 scheduler 注入绑定当轮队列与
+Team Session 的回调，队列或 Session 改变后拒绝迟到输出。宿主将投影包装为已有
+TeamOutputSchema，保留 source_member 与 payload 中 scheduled_review/invocation 身份；
+不把临时评审加入 roster。不新增流消费者、队列、registry 或协议事件。独立宿主
+未提供 sink 时仍可使用原 Session stream；接入原 scheduler 的宿主必须提供原流所有者。
+
+原 scheduler/Native/成员构造 52 项通过；Swarm 原 Runtime.stream→已绑定 facade→
+TeamManager→Runner→scheduler owner 的 Codex/OpenCode 允许/取消 4 项真实 CLI 通过。
+仅本机受控模型与候选配置，不代表 Web/TUI、远端模型、Cluster 或全局准入通过。

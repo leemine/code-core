@@ -157,6 +157,13 @@
     checkpoint 只保存策略 fingerprint 供权限指纹复用判断，策略 revision 不成为 Binding 身份。
     未提供 runtime policy 的旧调用保持原行为。
 
+20. **Codex steer 回执以原生接受为准**：turn/start 尚未返回时仅保存待确认命令与 Future，
+    不提前返回 STEER 回执。原生明确以 `-32600` + `no active turn to steer` 拒绝时，
+    输入尚未被接受，Provider 委托原 `SerializedTurnHarness.send(FOLLOW_UP)` 排队并返回
+    新 Turn 的 FOLLOW_UP 回执。原回合继续由同一 reader 排空、发布自己的终态与用量，
+    不因这次明确拒绝被中断或改判失败。其它错误与未确认结果不自动重发；启动失败、
+    取消或停止释放等待者，未派发的取消命令不送入 SDK。没有第二套 Turn 队列或状态机。
+
 ## 接口契约
 
 ```python

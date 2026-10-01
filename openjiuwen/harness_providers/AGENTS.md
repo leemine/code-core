@@ -156,3 +156,7 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
 - Mapping changes need the corresponding fake-SDK test updated; keep raw SDK
   objects out of `ProviderEvent` payloads (`to_json_safe` first).
 - Public protocol changes are made in `openjiuwen/harness_protocol` first.
+
+### Scoped host replies and product output
+
+`HarnessIOAdapter.answer_pending` resolves only validated live futures and never falls back to a new input; legacy `send(InteractiveInput)` remains compatible. `publish_output` uses the same bounded queue and its existing budget failure/abort path. Team address scope belongs to the member runtime, not the provider protocol.

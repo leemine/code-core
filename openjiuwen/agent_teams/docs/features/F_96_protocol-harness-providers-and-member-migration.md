@@ -95,7 +95,9 @@ provider-private `notification_observer`）、认证 fallback 持久化（`bind_
 `HarnessIOAdapter(provider_interaction_handler=...)` 应答 `auth_fallback` 请求，`promote()` 返回 `True`
 才 `COMPLETED`，返回 `False` 或抛异常都 `DECLINED`，未绑定 promotion 时直接同意；其它 request type 一律
 `DECLINED`）、MCP 挂载（`bind_mcp_servers`）与 teardown hook（Codex OTel receiver / rollout reader）。
-`resume_external_backend=True` 要求成员 checkpoint 存在并以 `REQUIRE_RESUME` 启动。
+初版 `resume_external_backend=True` 要求成员 checkpoint 存在并以 `REQUIRE_RESUME` 启动。
+当前旧 CLI 路径缺失 checkpoint 时允许新建（见现有兼容测试）；严格宿主须显式使用
+`HarnessContext.resume_policy=REQUIRE_RESUME`，缺失时失败关闭。退出确认增量见 F_113。
 
 `build_cli_runtime` 的 claude / codex 分支改为构造 provider + `HarnessContext` + member runtime；
 `external_cli_spawn` 用 `isinstance(runtime, ExternalHarnessMemberRuntime)` 统一绑定团队工具

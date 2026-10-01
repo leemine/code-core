@@ -514,3 +514,8 @@ descs/<lang>/
 
 所有团队工具 ID 用 `team.{name}` 格式（如 `team.send_message`、`team.create_task`）。加新工具
 时保持一致 —— 下游接线（rail、日志、UI 标签）会解析这个前缀。
+
+### 外部成员的恢复边界（F_114）
+
+`TeamBackend.history_restored` 是已有 `_history_restored` 的只读访问口，供宿主构造端选择
+严格恢复策略。只能通过原 `mark_history_restored()` 标记恢复；不新建恢复状态或独立 store。

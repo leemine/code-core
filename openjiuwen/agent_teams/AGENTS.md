@@ -40,6 +40,11 @@ Loop 控制循环，原子动作不进入该协议层级。
 
 **新增配置项一律走 `TeamAgentSpec`**——曾经的"在 factory 函数上堆参数"路径已物理消失。扩参数列表永远是 hack，扩 Spec 才是设计。
 
+**同 Provider Team（F_114）**：`execution_provider` 默认 Native；显式 External 经原 BuildContext 的
+`TEAM_MEMBER_RUNTIME_FACTORY` 提供构造端口，所有角色仍走 AgentConfigurator，spawn/恢复保留
+Spec 身份。缺工厂、Provider 不匹配、已用 runtime 与恢复时换 Provider 明确拒绝。未适配的
+TinyAgent、Swarmflow、fork、HITT、bridge 和混合 CLI 声明拒绝，不悄悄构造 Native。
+
 **Cold-recover 的低层入口**：`TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` + `await agent.recover_team()`。仅供运维脚本绕过 Runner 直接拿 leader 实例时使用，常规应用走 `Runner.run_agent_team_streaming(agent_team=spec, session=...)` 即可。
 
 **Runner 入口签名收紧**：`Runner.run_agent_team` / `run_agent_team_streaming` 默认接 `str | TeamAgentSpec`——str 是 `team_name`，要求该 team 已被 spec 路径激活过、pool 里有 entry。已 build 的 `TeamAgent` 实例不再是合法入参。要跑 multi_agent 体系的 `BaseTeam`（`str | BaseTeam`），传同一个方法、加 `base=True` 切到 multi_agent 路径——`Runner` 公共表面只有这一对方法，由 `base` 参数分流。
@@ -258,8 +263,9 @@ provider session/Turn 协议合并。
   （`bind_reliability_context`：FAILED terminal / 启动失败 → leader 邮箱失败消息，retrying 诊断 →
   进度事件）、观测桥接（`bind_span_bridge`）、认证 fallback 持久化（`bind_fallback_promotion`：以
   `auth_fallback` provider interaction 先持久化再放行，持久化失败 provider 回退原生端点）与
-  MCP server 挂载（`bind_mcp_servers`）。`resume_external_backend=True` 时要求 checkpoint 存在并以
-  `REQUIRE_RESUME` 启动。Claude Code / Codex 成员都走这一条路径（`build_cli_runtime`），不再有
+  MCP server 挂载（`bind_mcp_servers`）。旧 `resume_external_backend=True` 有 checkpoint 时以 `REQUIRE_RESUME` 启动，缺失时保留新建兼容；
+  宿主显式 `HarnessContext.resume_policy=REQUIRE_RESUME` 才在缺失时失败关闭。退出未确认时保留成员
+  Session 与待清理资源，重复 stop 重试，全部清理完成前禁止 start。Claude Code / Codex 成员都走这一条路径（`build_cli_runtime`），不再有
   `ClaudeSdkRuntime` / `CodexSdkRuntime`。详见 [[F_96_protocol-harness-providers-and-member-migration]]。
 - `external/cli_agent/claude/`：只剩团队侧接线——`sdk_mcp.py`（进程内 SDK MCP 团队工具集，作为
   `McpServerConfig(IN_PROCESS)` 挂到 runtime）、`ssh_transport.py`（Claude SDK ssh transport，经

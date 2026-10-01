@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-08-15 |
+| 最近一次修订日期 | 2026-10-01 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md`、`F_74_leader-member-activity-and-team-idle.md`、`F_81_disband-requires-explicit-intent.md` |
 
 ## 范围 / 边界
@@ -487,4 +487,12 @@ EventBus 自身的运行态：
 - **`S_06_runtime-pool-dispatch`**：跨 team 的对象池、7 路 dispatch truth table、`InteractGate` 等并发门禁归 `runtime/`。本文管单个 TeamAgent 内部的事件循环，不感知 pool。**pause vs stop 决策**也在该 spec：`manager.finalize` / `finalize_member` 在 Runner finally 路径决定是否调本文规约的 `pause()` / `stop()`，并写入 leader pool entry 状态与 teammate `team_member` 持久状态。
 - **harness（已存在 docs）**：`AgentRoundController` 的 `deliver_input / cancel_agent / resume_interrupt` 最终落到 `TeamHarness` → `DeepAgent`；具体 round 状态机（pre-stream / streaming / finalize）与 HITL interrupt 语义归 harness。本文只规约"handler 通过窄 protocol 调进去，host 自己分流到 start/follow_up/steer"。
 - **`S_02_team-agent-architecture`**：TeamAgent 四象限分解（blueprint / state / resources / infra）、`SpawnManager` / `RecoveryManager` / `StreamController` 的职责拆分归该 spec。本文复用 `TeamAgentBlueprint` 与 `TeamInfra` 作为 handler 的注入面，但不规约其内部字段。
-- **`S_22_scheduling-runtime`**（F_62）：leader 侧调度决策引擎。kernel 只做四件事——setup 构造（仅 `spec.dispatch_mode == "scheduled"` 的 leader）、start 组合 wake + 团队已存在时激活、`notify_team_built` 激活、pause/stop 失活；决策语义（开工/验票/升级）与 `SCHEDULER_SCAN` 的消费全部归该 spec。task_board / stale_task 的调度模式类（`ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler`）在构造期按 spec 模式装配（不变量 6）；handler 方法内不出现 dispatch_mode 分支，调度类的行为差异见 S_22 不变量 14。
+- **`S_22_scheduling-runtime`**（F_62）：leader 侧调度决策引擎。kernel 只做四件事——setup 构造（仅 `spec.dispatch_mode == "scheduled"` 的 leader）、start 组合 wake + 团队已存在时激活、`notify_team_built` 激活、pause/stop 失活并等待临时 reviewer 退出确认；决策语义（开工/验票/升级）与 `SCHEDULER_SCAN` 的消费全部归该 spec。task_board / stale_task 的调度模式类（`ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler`）在构造期按 spec 模式装配（不变量 6）；handler 方法内不出现 dispatch_mode 分支，调度类的行为差异见 S_22 不变量 14。
+
+
+### scheduled 清理前置条件（2026-10-01，F_116）
+
+pause/stop 在 leader 回合暂停/取消后等待 scheduler.stop_reviewers。失败不释放 Session、
+transport 或其它资源，不推进 paused/stopped，后续重试同一清理所有者。原 Native
+pause 的回合保留语义不变；一次性 reviewer 在暂停时退出，其缺票部分由原 board
+扫描重新派发，已有票据保留。此处不实现 External Provider 的活动暂停/继续。
