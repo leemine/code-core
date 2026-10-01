@@ -305,3 +305,15 @@ assistant 完成消息、原生 stop 原因、后续 idle 和权威消息回读�
 租约或恢复替换 owner 时，launcher 停止本代 CLI 并退出，由原 KillMode=control-group
 收敛其后代。无宿主租约时禁止启动；不等待新请求重新构造 Provider 才清理孤儿进程。
 这不恢复活动 Turn，不改变已有私有 cgroup/lease 身份核验。
+
+
+### OpenCode token normalization
+
+The pinned OpenCode v1.18.18 native token record contains disjoint buckets.
+Protocol input includes fresh input plus cache reads and cache writes; protocol
+output includes visible output plus reasoning. Cached and reasoning counters
+remain subsets, not extra charges. Native total is preserved, so an inconsistent
+provider total remains detectable. Missing or invalid component counters leave
+the corresponding aggregate unknown; snapshots for the same message are not
+counted twice. This applies to Single, Team members and scheduled reviewers.
+Source: [OpenCode v1.18.18 getUsage](https://github.com/anomalyco/opencode/blob/v1.18.18/packages/opencode/src/session/session.ts).
