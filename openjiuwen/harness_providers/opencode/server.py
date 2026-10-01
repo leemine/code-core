@@ -52,6 +52,20 @@ def lease(path):
     return fd
 
 
+def _config_identity(config):
+    identity = asdict(config)
+    if identity.get("native_plugins") is None:
+        identity.pop("native_plugins")
+    model = identity.get("model")
+    if isinstance(model, dict):
+        # Defaults reproduce the pre-budget configuration and must retain
+        # its existing storage identity. Explicit changes still bind it.
+        for field, default in (("context_window", 32000), ("max_output_tokens", 4096)):
+            if model.get(field) == default:
+                model.pop(field)
+    return identity
+
+
 class ManagedServer:
     def __init__(self, config, context, *, skill_path=None):
         self.config, self.context = config, context
@@ -188,11 +202,7 @@ class ManagedServer:
             plugin_specs=(),
             include_product_mcp=False,
         )
-        config_identity = asdict(self.config)
-        if config_identity.get("native_plugins") is None:
-            # Preserve the OC1-OC6 storage identity for configurations that do
-            # not opt into the new provider-private plugin surface.
-            config_identity.pop("native_plugins")
+        config_identity = _config_identity(self.config)
         fingerprint = hashlib.sha256(
             json.dumps(
                 {"config": config_identity, "native": stable_native_config},
