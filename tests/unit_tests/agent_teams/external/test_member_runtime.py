@@ -970,3 +970,31 @@ async def test_member_pre_run_failure_keeps_partial_session_for_cleanup() -> Non
     assert session.member_session.pre_run_calls == 1
     assert session.member_session.post_run_calls == 2
     assert harness.start_contexts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('exit_fails', [False, True])
+async def test_force_abort_transport_failure_requires_confirmed_provider_exit(exit_fails):
+    class LostTransport(_FakeHarness):
+        async def abort(self, *, mode=AbortMode.GRACEFUL):
+            raise RuntimeError('transport unavailable')
+
+        async def stop(self):
+            if exit_fails and self.stop_calls == 0:
+                self.stop_calls += 1
+                raise RuntimeError('exit unconfirmed')
+            await super().stop()
+
+    harness = LostTransport(capabilities=frozenset({HarnessCapability.FORCE_ABORT}))
+    session = _FakeTeamSession()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    await runtime.start(team_session=session)
+    if exit_fails:
+        with pytest.raises(RuntimeError, match='exit unconfirmed'):
+            await runtime.abort(immediate=True)
+        assert session.member_session.post_run_calls == 0
+        await runtime.stop()
+    else:
+        await runtime.abort(immediate=True)
+    assert session.member_session.post_run_calls == 1
+    assert harness.stop_calls == (2 if exit_fails else 1)
