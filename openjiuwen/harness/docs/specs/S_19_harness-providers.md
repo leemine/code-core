@@ -317,3 +317,12 @@ provider total remains detectable. Missing or invalid component counters leave
 the corresponding aggregate unknown; snapshots for the same message are not
 counted twice. This applies to Single, Team members and scheduled reviewers.
 Source: [OpenCode v1.18.18 getUsage](https://github.com/anomalyco/opencode/blob/v1.18.18/packages/opencode/src/session/session.ts).
+
+
+OpenCode model configuration accepts positive `context_window` and
+`max_output_tokens` (defaults remain 32000/4096); output cannot exceed context.
+These limits are emitted into the owned native configuration and verified by
+normal config readback. They let deployments configure the actual selected
+model budget without private patching. A native completed `finish=length`
+record fails the Turn explicitly as `model_output_limit_exceeded`; it neither
+waits for the overall timeout nor treats an incomplete answer as successful.
