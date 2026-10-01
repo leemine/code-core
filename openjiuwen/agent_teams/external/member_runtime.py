@@ -597,7 +597,19 @@ class ExternalHarnessMemberRuntime:
             await self._commit_team_context()
 
     async def abort(self, *, immediate: bool = False) -> None:
-        await self._adapter.abort(immediate=immediate)
+        from openjiuwen.harness_protocol import UnsupportedHarnessCapabilityError
+        try:
+            await self._adapter.abort(immediate=immediate)
+        except UnsupportedHarnessCapabilityError:
+            raise
+        except Exception:
+            if not immediate:
+                raise
+            # A Provider may already be exiting after a denied interaction.
+            # Force cancellation may stop its whole cycle, but only the normal
+            # stop path can confirm exit and release owned member resources.
+            team_logger.warning("External member force abort failed; confirming full Provider exit")
+            await self.stop()
 
     async def pause(self) -> None:
         await self._adapter.pause()
