@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from openjiuwen.harness_protocol import (
     DeliveryMode,
     EventBufferConfig,
     HarnessCard,
+    HarnessCheckpoint,
     HarnessContext,
     HarnessInput,
     HarnessProtocol,
@@ -28,6 +30,8 @@ from openjiuwen.harness_protocol import (
     HarnessCapability,
     HarnessEvent,
     HostCapability,
+    ToolApprovalRequest,
+    ToolApprovalDecision,
     InteractionResponseStatus,
     ItemEventKind,
     ItemLifecycleEvent,
@@ -258,6 +262,48 @@ def _context() -> HarnessContext:
 
 async def _all_outputs(runtime: ExternalHarnessMemberRuntime) -> list[Any]:
     return [chunk async for chunk in runtime.outputs()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record", [{}, {"backend": "other", "checkpoint": {}},
+                                    {"backend": "fake", "checkpoint": {}}])
+async def test_strict_host_rejects_existing_invalid_record_without_starting_provider(record):
+    session = _FakeTeamSession()
+    session.member_session.state["external_runtime"] = record
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context(), strict_checkpoint_validation=True)
+    with pytest.raises(HarnessStateError, match="invalid checkpoint record"):
+        await runtime.start(team_session=session)
+    assert harness.start_contexts == []
+    assert session.member_session.post_run_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_host_can_route_tool_approval_through_original_member_interaction_channel():
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context(), auto_approve_tools=False)
+    await runtime.start()
+    started = harness.start_contexts[0]
+    assert HostCapability.TOOL_APPROVAL in started.host_capabilities
+    pending = asyncio.create_task(started.interactions.handle(
+        ToolApprovalRequest(request_id="team-approval", call_id="call", tool_name="shell"),
+    ))
+    try:
+        async with asyncio.timeout(1):
+            while not runtime.has_pending_interrupt():
+                await asyncio.sleep(0)
+        reply = InteractiveInput()
+        reply.update("team-approval", {"approved": False, "feedback": "denied by host"})
+        await runtime.send(reply)
+        response = await asyncio.wait_for(pending, timeout=1)
+        assert response.decision is ToolApprovalDecision.DENY
+        assert response.reason == "denied by host"
+        assert harness.send_calls == []
+    finally:
+        await runtime.stop()
+        await asyncio.gather(pending, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -708,3 +754,247 @@ async def test_resume_without_a_saved_checkpoint_starts_a_new_session() -> None:
     assert started.resume_policy is not ResumePolicy.REQUIRE_RESUME
     await runtime.stop()
     logger.info("resume without a checkpoint starts a new session")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+async def test_failed_stop_retains_member_until_same_provider_confirms_exit(failure_type) -> None:
+    class FailingStopHarness(_FakeHarness):
+        async def stop(self) -> None:
+            if self.stop_calls == 0:
+                self.stop_calls += 1
+                raise failure_type("exit unconfirmed")
+            await super().stop()
+
+    harness = FailingStopHarness()
+    session = _FakeTeamSession()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    cleaned: list[str] = []
+
+    async def cleanup() -> None:
+        cleaned.append("owned resource")
+
+    runtime.add_teardown_hook(cleanup)
+    await runtime.start(team_session=session)
+    with pytest.raises(failure_type, match="exit unconfirmed"):
+        await runtime.stop()
+    assert session.member_session.post_run_calls == 0
+    assert cleaned == []
+    with pytest.raises(HarnessStateError, match="already started"):
+        await runtime.start(team_session=_FakeTeamSession())
+    await asyncio.gather(runtime.stop(), runtime.stop())
+    assert harness.stop_calls == 2
+    assert session.member_session.post_run_calls == 1
+    assert cleaned == ["owned resource"]
+    assert harness.events_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_failed_start_and_failed_exit_keep_cleanup_reachable() -> None:
+    class FailingHarness(_FakeHarness):
+        async def start(self, context: HarnessContext) -> None:
+            raise RuntimeError("partial allocation")
+
+        async def stop(self) -> None:
+            if self.stop_calls < 2:
+                self.stop_calls += 1
+                raise RuntimeError("exit unconfirmed")
+            await super().stop()
+
+    harness = FailingHarness()
+    session = _FakeTeamSession()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    with pytest.raises(RuntimeError, match="exit unconfirmed"):
+        await runtime.start(team_session=session)
+    assert session.member_session.post_run_calls == 0
+    with pytest.raises(HarnessStateError, match="already started"):
+        await runtime.start(team_session=_FakeTeamSession())
+    await runtime.stop()
+    assert harness.stop_calls == 3
+    assert session.member_session.post_run_calls == 1
+    assert harness.events_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_teardown_failure_retries_only_failed_hooks_and_preserves_session() -> None:
+    harness = _FakeHarness()
+    session = _FakeTeamSession()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    calls: list[str] = []
+
+    async def flaky() -> None:
+        calls.append("flaky")
+        if calls.count("flaky") == 1:
+            raise RuntimeError("receiver still running")
+
+    async def healthy() -> None:
+        calls.append("healthy")
+
+    runtime.add_teardown_hook(flaky)
+    runtime.add_teardown_hook(healthy)
+    await runtime.start(team_session=session)
+    with pytest.raises(ExceptionGroup, match="member teardown failed") as error:
+        await runtime.stop()
+    assert str(error.value.exceptions[0]) == "receiver still running"
+    assert calls == ["flaky", "healthy"]
+    assert session.member_session.post_run_calls == 0
+    with pytest.raises(HarnessStateError, match="already started"):
+        await runtime.start()
+    await runtime.stop()
+    await runtime.stop()
+    assert calls == ["flaky", "healthy", "flaky"]
+    assert harness.stop_calls == 1
+    assert session.member_session.post_run_calls == 1
+    # Hook completion is scoped to a cycle, not to the member forever.
+    await runtime.start(team_session=_FakeTeamSession())
+    await runtime.stop()
+    assert calls[-2:] == ["flaky", "healthy"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_member_post_run_failure_prevents_restart_until_retry() -> None:
+    class FailingSession(_FakeMemberSession):
+        async def post_run(self) -> None:
+            self.post_run_calls += 1
+            if self.post_run_calls == 1:
+                raise RuntimeError("checkpoint flush failed")
+
+    harness = _FakeHarness()
+    session = _FakeTeamSession()
+    session.member_session = FailingSession()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    await runtime.start(team_session=session)
+    with pytest.raises(RuntimeError, match="checkpoint flush failed"):
+        await runtime.stop()
+    with pytest.raises(HarnessStateError, match="already started"):
+        await runtime.start()
+    await runtime.stop()
+    assert harness.stop_calls == 1
+    assert session.member_session.post_run_calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("state", [None, {"backend": "another-provider", "checkpoint": {}},
+                                  {"backend": "fake", "checkpoint": {}}])
+async def test_explicit_strict_resume_rejects_missing_checkpoint_before_provider_start(state) -> None:
+    harness = _FakeHarness()
+    session = _FakeTeamSession()
+    if state is not None:
+        session.member_session.state["external_runtime"] = state
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness, context=replace(_context(), resume_policy=ResumePolicy.REQUIRE_RESUME),
+        resume_external_backend=True,
+    )
+    with pytest.raises(HarnessStateError, match="requires a saved checkpoint"):
+        await runtime.start(team_session=session)
+    assert harness.start_contexts == []
+    assert harness.events_calls == 0
+    assert session.member_session.post_run_calls == 1
+    await runtime.stop()
+    assert session.member_session.post_run_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_explicit_strict_resume_uses_checkpoint_from_this_member_session() -> None:
+    from openjiuwen.agent_teams.external.member_runtime import checkpoint_to_dict
+
+    checkpoint = HarnessCheckpoint(
+        provider="fake", schema_version="1.0", agent_id="member-agent",
+        host_session_id="team-session", checkpoint_id="saved", sequence=9,
+        provider_session_id="saved-provider-session", data={},
+    )
+    harness = _FakeHarness()
+    session = _FakeTeamSession()
+    session.member_session.state["external_runtime"] = {
+        "backend": "fake", "checkpoint": checkpoint_to_dict(checkpoint),
+    }
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness, context=replace(_context(), resume_policy=ResumePolicy.REQUIRE_RESUME),
+    )
+    await runtime.start(team_session=session)
+    assert harness.start_contexts[0].checkpoint == checkpoint
+    assert harness.start_contexts[0].resume_policy is ResumePolicy.REQUIRE_RESUME
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_context_rejection_closes_prebound_resources_without_starting_provider() -> None:
+    harness = _FakeHarness()
+    closed: list[str] = []
+
+    def reject_context(session) -> HarnessContext:
+        raise ValueError("invalid member scope")
+
+    async def cleanup() -> None:
+        closed.append("observer")
+
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=reject_context)
+    runtime.add_teardown_hook(cleanup)
+    with pytest.raises(ValueError, match="invalid member scope"):
+        await runtime.start()
+    await runtime.stop()
+    assert closed == ["observer"]
+    assert harness.start_contexts == []
+    assert harness.stop_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_member_pre_run_failure_keeps_partial_session_for_cleanup() -> None:
+    class PartialSession(_FakeMemberSession):
+        async def pre_run(self) -> None:
+            self.pre_run_calls += 1
+            raise RuntimeError("member allocation incomplete")
+
+        async def post_run(self) -> None:
+            self.post_run_calls += 1
+            if self.post_run_calls == 1:
+                raise RuntimeError("member exit unconfirmed")
+
+    harness = _FakeHarness()
+    session = _FakeTeamSession()
+    session.member_session = PartialSession()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    with pytest.raises(RuntimeError, match="member exit unconfirmed"):
+        await runtime.start(team_session=session)
+    with pytest.raises(HarnessStateError, match="already started"):
+        await runtime.start()
+    await runtime.stop()
+    assert session.member_session.pre_run_calls == 1
+    assert session.member_session.post_run_calls == 2
+    assert harness.start_contexts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('exit_fails', [False, True])
+async def test_force_abort_transport_failure_requires_confirmed_provider_exit(exit_fails):
+    class LostTransport(_FakeHarness):
+        async def abort(self, *, mode=AbortMode.GRACEFUL):
+            raise RuntimeError('transport unavailable')
+
+        async def stop(self):
+            if exit_fails and self.stop_calls == 0:
+                self.stop_calls += 1
+                raise RuntimeError('exit unconfirmed')
+            await super().stop()
+
+    harness = LostTransport(capabilities=frozenset({HarnessCapability.FORCE_ABORT}))
+    session = _FakeTeamSession()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    await runtime.start(team_session=session)
+    if exit_fails:
+        with pytest.raises(RuntimeError, match='exit unconfirmed'):
+            await runtime.abort(immediate=True)
+        assert session.member_session.post_run_calls == 0
+        await runtime.stop()
+    else:
+        await runtime.abort(immediate=True)
+    assert session.member_session.post_run_calls == 1
+    assert harness.stop_calls == (2 if exit_fails else 1)

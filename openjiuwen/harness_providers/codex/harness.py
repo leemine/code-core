@@ -15,6 +15,7 @@ from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
     AbortMode,
     CheckpointReason,
+    DeliveryMode,
     HarnessCapability,
     HarnessCard,
     HarnessContext,
@@ -25,6 +26,7 @@ from openjiuwen.harness_protocol import (
     InteractionResponseStatus,
     ProviderEvent,
     ResumePolicy,
+    SendReceipt,
     ToolApprovalDecision,
     ToolApprovalRequest,
     TurnError,
@@ -71,6 +73,10 @@ from openjiuwen.harness_providers.skills import install_skills
 ADAPTER_VERSION = "0.1.0"
 _INTERRUPT_TIMEOUT_S = 5.0
 _DRAIN_TIMEOUT_S = 5.0
+
+
+class _SteerNotAccepted(HarnessStateError):
+    """Native acknowledgement proves this input was not consumed."""
 
 
 @dataclass
@@ -189,7 +195,7 @@ class CodexHarness(SerializedTurnHarness):
         self._connecting: asyncio.Future[None] | None = None
         self._session_close_lock = asyncio.Lock()
         self._client_close_lock = asyncio.Lock()
-        self._pending_steers: list[str] = []
+        self._pending_steers: list[tuple[str, asyncio.Future[None]]] = []
         self._active_model: CodexModelConfig | None = self._config.model
         self._fallback_activated = False
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -471,6 +477,18 @@ class CodexHarness(SerializedTurnHarness):
             raise HarnessProtocolError("Codex native turn exit is unconfirmed")
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        try:
+            return await self._execute_codex_turn(turn)
+        finally:
+            self._reject_pending_steers()
+
+    def _reject_pending_steers(self) -> None:
+        pending, self._pending_steers = self._pending_steers, []
+        for _, accepted in pending:
+            if not accepted.done():
+                accepted.set_exception(HarnessStateError("Codex turn ended before steer acknowledgement"))
+
+    async def _execute_codex_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
         text = harness_input_text(turn.content)
         accumulator = CodexTurnAccumulator(turn_id=turn.turn_id)
@@ -503,13 +521,13 @@ class CodexHarness(SerializedTurnHarness):
             try:
                 await self._connect(self._context, model=self._active_model, resume_thread_id=self._thread_id)
             except Exception as exc:
-                self._pending_steers.clear()
+                self._reject_pending_steers()
                 if turn.abort_requested:
                     return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
                 error = exc.error if isinstance(exc, ProviderStartupError) else classify_codex_exception(exc)
                 return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
         if turn.abort_requested:
-            self._pending_steers.clear()
+            self._reject_pending_steers()
             await self._close_session()
             return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
         for _attempt in range(2):
@@ -623,15 +641,27 @@ class CodexHarness(SerializedTurnHarness):
             if turn.abort_requested:
                 await self._interrupt_handle(handle)
             pending_steers, self._pending_steers = self._pending_steers, []
-            for steer_text in pending_steers:
+            for steer_text, accepted in pending_steers:
+                if accepted.done():
+                    continue
                 try:
+                    if turn.abort_requested or native.failure.done():
+                        raise HarnessStateError("Codex turn is no longer accepting steer")
                     await self._steer_handle(handle, steer_text)
+                except _SteerNotAccepted as exc:
+                    # The original turn may have completed successfully before
+                    # its handle arrived. Keep its only reader and result intact.
+                    if not accepted.done():
+                        accepted.set_exception(exc)
                 except Exception as exc:
-                    # Reject the accepted steer without abandoning the only
-                    # reader that can prove native cleanup has finished.
-                    native.failure.set_result(exc)
-                    await self._interrupt_handle(handle)
-                    break
+                    if not accepted.done():
+                        accepted.set_exception(exc)
+                    if not native.failure.done():
+                        native.failure.set_result(exc)
+                        await self._interrupt_handle(handle)
+                else:
+                    if not accepted.done():
+                        accepted.set_result(None)
             will_retry_count = 0
             terminal_seen = False
             stream = handle.stream().__aiter__()
@@ -676,7 +706,7 @@ class CodexHarness(SerializedTurnHarness):
             native.started.set()
             if native.confirmed and self._active_handle is handle:
                 self._active_handle = None
-            self._pending_steers.clear()
+            self._reject_pending_steers()
 
     def _observe(self, notification: Any) -> None:
         observer = self._notification_observer
@@ -687,6 +717,18 @@ class CodexHarness(SerializedTurnHarness):
         except Exception:
             logger.exception("[codex] notification observer raised")
 
+    async def send(
+        self, content: HarnessInput, *, mode: DeliveryMode = DeliveryMode.AUTO,
+    ) -> SendReceipt:
+        try:
+            return await super().send(content, mode=mode)
+        except _SteerNotAccepted:
+            # Only explicit native non-acceptance permits a new input. The base
+            # queue still owns ordering, lifecycle and the truthful receipt.
+            if mode is not DeliveryMode.STEER:
+                raise
+            return await super().send(content, mode=DeliveryMode.FOLLOW_UP)
+
     async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
         text = harness_input_text(content)
         handle = self._active_handle
@@ -695,7 +737,9 @@ class CodexHarness(SerializedTurnHarness):
                 raise HarnessStateError("there is no active Codex turn to steer")
             # ``thread.turn()`` has not returned yet; ``_run_turn`` flushes the
             # queue as soon as the SDK handle exists.
-            self._pending_steers.append(text)
+            accepted = asyncio.get_running_loop().create_future()
+            self._pending_steers.append((text, accepted))
+            await accepted
             return
         await self._steer_handle(handle, text)
 
@@ -704,7 +748,7 @@ class CodexHarness(SerializedTurnHarness):
             await handle.steer(text)
         except Exception as exc:
             if _is_no_active_turn_to_steer(exc):
-                raise HarnessStateError("the Codex turn ended before the steer was accepted") from exc
+                raise _SteerNotAccepted("the Codex turn ended before the steer was accepted") from exc
             raise
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:

@@ -26,6 +26,8 @@ leader itself receives direct input injections (digests / escalations).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from uuid import uuid4
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -55,6 +57,18 @@ if TYPE_CHECKING:
 # escalation timeout (spec-configurable ``review_stall_timeout``) is the
 # knob; this softer step is not worth a spec field.
 _REVIEW_RENUDGE_SECONDS = 600
+_REVIEW_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass
+class _ReviewRun:
+    task: asyncio.Task | None = None
+    runtime: Any = None
+    cleanup: asyncio.Task | None = None
+    cancel_requested: bool = False
+    finished: bool = False
+    submitted: bool = False
+
 
 # Fixpoint bound for one scan: a settle unblocks dependents whose starts the
 # leader's own event echo would only pick up on the next wake; looping the
@@ -108,6 +122,8 @@ class TeamScheduler:
         self._default_max_rounds: int = spec.default_max_review_rounds
         self._stall_timeout_seconds: int = spec.review_stall_timeout
         self._active = False
+        self._review_stopping = False
+        self._review_runs: dict[tuple[str, int, str], _ReviewRun] = {}
         # Per-(task_id, review_round) bookkeeping. All in-memory: a leader
         # restart at worst re-sends one review request / escalation, which a
         # reader can correlate; the board truth itself lives in the DB.
@@ -147,6 +163,9 @@ class TeamScheduler:
         scheduled (warm resume / cold recovery) — activation *is* the
         recovery sweep. Idempotent.
         """
+        if self._review_stopping and self._review_runs:
+            raise RuntimeError("Scheduled reviewer exit is still unconfirmed")
+        self._review_stopping = False
         first = not self._active
         self._active = True
         self._all_done_announced = False
@@ -158,6 +177,65 @@ class TeamScheduler:
     def deactivate(self) -> None:
         """Disarm the scheduler (kernel pause/stop)."""
         self._active = False
+
+    def review_interaction_target(self, owner: str):
+        """Resolve an exact temporary owner from existing live review handles."""
+        if self._review_stopping:
+            return None
+        for run in self._review_runs.values():
+            runtime = run.runtime
+            if runtime is not None and getattr(runtime, "interaction_owner", None) == owner:
+                return runtime
+        return None
+
+    async def stop_reviewers(self) -> None:
+        """Quiesce owned reviews before the kernel releases Team resources.
+
+        Cancellation stops the one-shot call; its finally owns dispose. Never
+        cancel that cleanup or discard its handle on a timeout/failed exit.
+        A later stop retries the same owner, never the review input.
+        """
+        self.deactivate()
+        self._review_stopping = True
+        runs = list(self._review_runs.items())
+        pending = []
+        for _, run in runs:
+            if run.task is not None and not run.task.done():
+                if not run.cancel_requested:
+                    run.cancel_requested = True
+                    run.task.cancel()
+                pending.append(run.task)
+        if pending:
+            _, unfinished = await asyncio.wait(pending, timeout=_REVIEW_DRAIN_TIMEOUT_SECONDS)
+            if unfinished:
+                raise RuntimeError("Scheduled reviewer exit is still unconfirmed")
+        errors = []
+        for key, run in runs:
+            if run.runtime is not None:
+                try:
+                    await asyncio.wait_for(self._dispose_review(run), _REVIEW_DRAIN_TIMEOUT_SECONDS)
+                except Exception as exc:
+                    errors.append(exc)
+            if run.runtime is None and self._review_runs.get(key) is run:
+                self._review_runs.pop(key, None)
+            if run.runtime is None and (
+                    not run.submitted or getattr(self._blueprint.spec, "execution_provider", "native") == "native"):
+                self._review_dispatched.discard(key[:2])
+        if errors:
+            raise RuntimeError("Scheduled reviewer cleanup is still unconfirmed") from errors[0]
+
+    async def _dispose_review(self, run: _ReviewRun) -> None:
+        if run.runtime is None:
+            return
+        if run.cleanup is None or (run.cleanup.done() and (
+                run.cleanup.cancelled() or run.cleanup.exception() is not None)):
+            async def close():
+                await run.runtime.dispose()
+                run.runtime = None
+            run.cleanup = asyncio.create_task(close(), name="team-review-cleanup")
+            # Retrieve late failures even when a stop waiter was cancelled.
+            run.cleanup.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        await asyncio.shield(run.cleanup)
 
     async def on_event(self, event: CoordinationEvent) -> None:
         """Wake hint from the kernel's composed wake callback.
@@ -253,13 +331,19 @@ class TeamScheduler:
                 continue
 
             round_key = (task.task_id, task.review_round)
+            tally = await task_manager.get_review_tally(task)
             if round_key not in self._review_dispatched:
                 self._review_dispatched.add(round_key)
                 for reviewer in reviewers:
-                    await self._dispatch_to_reviewer(reviewer, task)
+                    if reviewer not in tally["voted"]:
+                        await self._dispatch_to_reviewer(reviewer, task)
 
-            tally = await task_manager.get_review_tally(task)
+            # A vote does not prove the one-shot Provider/tools have exited.
+            # Keep the board nonterminal until every owned review has drained.
             verdict = settle_review_tally(tally)
+            if verdict in (VERDICT_PASS, VERDICT_FAIL) and any(
+                    key[:2] == round_key and not run.finished for key, run in self._review_runs.items()):
+                continue
             if verdict == VERDICT_PASS:
                 if await self._settle_pass(task_manager, task):
                     team_logger.info(
@@ -463,10 +547,22 @@ class TeamScheduler:
         run once, and disposed — a crash is logged and the next scheduler
         scan retries via ``_review_dispatched.discard()``.
         """
+        key = (task.task_id, task.review_round, reviewer)
+        if self._review_stopping or key in self._review_runs:
+            return
         team_logger.info("[scheduler] spawning temp harness", reviewer)
-        asyncio.create_task(self._spawn_temp_reviewer(reviewer, task))
+        run = _ReviewRun()
+        self._review_runs[key] = run
+        run.task = asyncio.create_task(self._spawn_temp_reviewer(reviewer, task, run), name="team-review")
 
-    async def _spawn_temp_reviewer(self, reviewer: str, task: Any) -> None:
+        def finished(future):
+            if not future.cancelled():
+                future.exception()
+            if run.runtime is None and self._review_runs.get(key) is run:
+                self._review_runs.pop(key, None)
+        run.task.add_done_callback(finished)
+
+    async def _spawn_temp_reviewer(self, reviewer: str, task: Any, run: _ReviewRun) -> None:
         """Build a one-shot reviewer harness and run ``verify_task`` on it.
 
         The reviewer inherits the team's base agent spec (model, filesystem
@@ -482,6 +578,7 @@ class TeamScheduler:
         from openjiuwen.agent_teams.tools.tool_task import VerifyTaskTool, ViewTaskToolV2
 
         spec = self._blueprint.spec
+        external = getattr(spec, "execution_provider", "native") != "native"
         agents = getattr(spec, "agents", None) or {}
         base_agent_spec = agents.get("teammate") or agents.get("leader")
         if base_agent_spec is None:
@@ -514,10 +611,11 @@ class TeamScheduler:
         tr = make_translator(language, ws_cache=cache)
 
         verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
-        view_tool = ViewTaskToolV2(backend, tr)
+        view_tool = ViewTaskToolV2(reviewer_tm, tr)
 
         member_name = reviewer
         harness = None
+        scan_on_exit = False
         try:
             # Resolve the reviewer's type and instruction from the task's
             # structured reviewer list so the correct prompt template is used.
@@ -566,22 +664,63 @@ class TeamScheduler:
             # Each attempt builds a fresh harness and disposes the old
             # one — ``run_once`` tears down tools on every invocation.
             result = None
-            for attempt in range(3):
-                harness = TeamHarness.build(
-                    agent_spec=reviewer_spec,
-                    role=TeamRole.TEAMMATE,
-                    member_name=member_name,
-                    build_context=reviewer_ctx,
-                )
+            for attempt in range(1 if external else 3):
+                if self._review_stopping:
+                    return
+                if external:
+                    from openjiuwen.agent_teams.agent.runtime_factory import (
+                        TeamReviewRuntime, TeamReviewRuntimeBuild, require_member_runtime_factory,
+                    )
+                    factory = require_member_runtime_factory(spec)
+                    session_manager = getattr(self._host, "session_manager", None)
+                    team_session = getattr(session_manager, "team_session", None)
+                    if team_session is None:
+                        raise ValueError("Scheduled review requires a bound Team Session")
+                    stream_controller = getattr(self._host, "stream_controller", None)
+                    review_queue = getattr(stream_controller, "stream_queue", None)
+
+                    async def forward_review_output(chunk):
+                        # Bind to this round's original Team stream. A later
+                        # round must never inherit an old review's output.
+                        if (review_queue is None
+                                or stream_controller.stream_queue is not review_queue
+                                or session_manager.team_session is not team_session):
+                            raise RuntimeError("Scheduled review output owner is no longer active")
+                        await review_queue.put(chunk)
+
+                    harness = factory.build_review_runtime(TeamReviewRuntimeBuild(
+                        spec=spec, reviewer=reviewer, task_id=task.task_id, review_round=task.review_round,
+                        invocation_id=uuid4().hex, system_prompt=system_prompt, language=language,
+                        tools=(verify_tool, view_tool),
+                        team_session=team_session,
+                        build_context=reviewer_ctx,
+                        output_sink=forward_review_output,
+                    ))
+                    run.runtime = harness
+                    if not isinstance(harness, TeamReviewRuntime):
+                        raise TypeError("Review factory returned an invalid runtime")
+                    if harness.provider_id != spec.execution_provider:
+                        raise ValueError("Review runtime Provider differs from the Team Spec")
+                else:
+                    harness = TeamHarness.build(
+                        agent_spec=reviewer_spec,
+                        role=TeamRole.TEAMMATE,
+                        member_name=member_name,
+                        build_context=reviewer_ctx,
+                    )
+                    run.runtime = harness
+                run.cleanup = None
                 if attempt == 0:
                     team_logger.info(
                         "[reviewer_built] temp reviewer harness built for %s, task=%s",
                         reviewer,
                         task.task_id,
                     )
+                run.submitted = True
                 result = await harness.run_once(review_prompt)
                 output_str = str(result)
-                if "181001" not in output_str:
+                if external or "181001" not in output_str:
+                    scan_on_exit = True
                     break
                 team_logger.warning(
                     "[reviewer_retry] reviewer %s task=%s attempt=%d/3: %s",
@@ -590,10 +729,7 @@ class TeamScheduler:
                     attempt + 1,
                     output_str[:200],
                 )
-                try:
-                    await harness.dispose()
-                except Exception:
-                    team_logger.debug("[scheduler] temp reviewer dispose failed for %s", reviewer)
+                await self._dispose_review(run)
                 await asyncio.sleep(2 * attempt)
             team_logger.info(
                 "[reviewer_finish] reviewer %s, task=%s, output=%s",
@@ -602,7 +738,7 @@ class TeamScheduler:
                 str(result)[:2000] if result else "",
             )
             # If all retries exhausted, let the next scan re-dispatch.
-            if result is not None and "181001" in str(result):
+            if not external and result is not None and "181001" in str(result):
                 self._review_dispatched.discard((task.task_id, task.review_round))
         except Exception:
             team_logger.error(
@@ -611,13 +747,18 @@ class TeamScheduler:
                 task.task_id,
                 exc_info=True,
             )
-            self._review_dispatched.discard((task.task_id, task.review_round))
+            if not external:
+                self._review_dispatched.discard((task.task_id, task.review_round))
         finally:
-            if harness is not None:
+            if run.runtime is not None:
                 try:
-                    await harness.dispose()
+                    await self._dispose_review(run)
                 except Exception:
                     team_logger.debug("[scheduler] temp reviewer dispose failed for %s", reviewer)
+            run.finished = run.runtime is None
+            if run.finished and scan_on_exit and self._active:
+                # Same idempotent board scan, still owned by this review task.
+                await self._scan()
 
     async def _send_as_leader(self, member_name: str, meta: dict) -> None:
         """Leader-identity mailbox handoff + idempotent lazy member startup.

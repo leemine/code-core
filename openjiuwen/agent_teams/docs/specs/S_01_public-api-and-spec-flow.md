@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/__init__.py`、`openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/runtime/manager.py`、`openjiuwen/core/runner/team_runner.py`、`openjiuwen/core/runner/runner.py` |
-| 最近一次修订日期 | 2026-08-19 |
+| 最近一次修订日期 | 2026-10-01 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -284,3 +284,24 @@ async def Runner.release(self, session_id: str, *, force: bool = False) -> None
 - `TeamAgentSpec` 上的 `model_pool` / `model_router` 字段在本规约只承诺"互斥校验 + build 时由 router 展开为 pool"；具体分配策略（round_robin / by_model_name / router）的语义、`inherit_pool_ids` 的行为属于模型分配 spec。
 - `TransportSpec` / `StorageSpec` 的注册表机制是本规约的不变量；**具体内置后端**（inprocess / pyzmq / sqlite / memory）的协议属于 messager / 存储后端的子模块规约。
 - 错误码 `AGENT_TEAM_CONFIG_INVALID`（132004）、`AGENT_TEAM_BUSY_INVALID`（132005）的码段归属与命名规则见 `.claude/rules/error-codes.md`，本规约只锚定它们出现的接口契约。
+
+## 同 Provider Team 构造（2026-09-30，F_114）
+
+`TeamAgentSpec.execution_provider` 默认 `native`，随原 Spec JSON 跨 spawn/恢复持久化。
+显式 External 选择需要在已排除序列化的 `build_context.extras[TEAM_MEMBER_RUNTIME_FACTORY]`
+提供匹配的 `TeamMemberRuntimeFactory`；跨序列化边界由原 seed factory 重建。
+`validate_team_spec` 在任何基础设施构造前运行，不分配资源；`build_member_runtime` 接收
+`TeamMemberRuntimeBuild`（Spec、成员上下文/Card、原 TeamBackend/Workspace/allocator/messager），
+返回未启动的 `ExternalHarnessMemberRuntime`。所有角色共用 AgentConfigurator，调度仍归原 Team。
+
+External 缺工厂、工厂 Provider 不匹配、注入旧 CLI runtime 或恢复时 Provider 变化都失败关闭。
+Native model 校验仅适用于 Native；未接通的 TinyAgent、Swarmflow、Native fork、HITT、bridge 和混合 external
+CLI 配置明确拒绝，不能回退 Native。运行期 handles 不进入 Spec JSON，旧缺省数据仍解释为 Native。
+
+
+### scheduled reviewer 扩展（2026-10-01，F_116）
+
+公开 `TeamReviewRuntimeBuild`、`TeamReviewRuntimeFactory`、`TeamReviewRuntime`；
+它们扩展同一成员 factory 的可选 scheduled 能力，不改变旧 autonomous factory 契约。
+缺 reviewer 端口的显式 External scheduled Spec 在基础设施前拒绝。临时执行的原工具、
+投票、退出所有权与恢复扫描契约见 S_22；不使用普通成员 card/roster/checkpoint 假冒身份。

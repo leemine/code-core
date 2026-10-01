@@ -141,6 +141,14 @@ class TeamAgent(BaseAgent):
     @property
     def build_context(self):
         """Return the assembly BuildContext, or None before configure()."""
+        if self.spec is not None and self.spec.execution_provider != "native":
+            context = self.spec.build_context
+            if context is not None:
+                return context.derive(
+                    member_name=self.blueprint.member_name,
+                    role=self.blueprint.role.value,
+                    member_card_id=self.card.id,
+                )
         harness = self.harness
         if harness is not None:
             return harness.build_context
@@ -171,11 +179,13 @@ class TeamAgent(BaseAgent):
         Returns:
             The cached or newly built :class:`TinyAgent`, or None if undeclared.
         """
+        spec = self.spec
+        if spec is not None and spec.execution_provider != "native":
+            raise ValueError("TinyAgent is not available for this Team execution Provider")
         infra = self.infra
         existing = infra.tiny_agents.get(name)
         if existing is not None:
             return existing
-        spec = self.spec
         tiny_spec = spec.tiny_agents.get(name) if spec is not None else None
         if tiny_spec is None:
             return None
@@ -558,6 +568,8 @@ class TeamAgent(BaseAgent):
         *,
         member_runtime: Optional["MemberRuntime"] = None,
     ) -> "TeamAgent":
+        if spec.execution_provider != "native" and member_runtime is not None:
+            raise ValueError("External Team member runtime must come from its host factory")
         self._setup_infra(spec, context)
         self._setup_agent(spec, context, member_runtime=member_runtime)
         return self
@@ -1718,6 +1730,8 @@ class TeamAgent(BaseAgent):
         # round-trip. Prefer the live runtime spec's context on warm recovery;
         # otherwise rebuild it from the serializable seed so provider-based
         # members survive a cold restart. No-op for legacy.
+        if runtime_spec is not None and runtime_spec.execution_provider != spec.execution_provider:
+            raise ValueError("Team execution Provider is immutable during recovery")
         if runtime_spec is not None and runtime_spec.build_context is not None:
             spec.build_context = runtime_spec.build_context
         # embedding_config is also Field(exclude=True) — reinject from the

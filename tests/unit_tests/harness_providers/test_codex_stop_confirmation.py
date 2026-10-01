@@ -248,8 +248,11 @@ async def test_pending_steer_failure_still_drains_original_native_reader(monkeyp
     receipt = await harness.send(HarnessInput(content="steered"))
     consumer = asyncio.create_task(_turn(harness, receipt.turn_id))
     await asyncio.wait_for(entered.wait(), 2)
-    await harness.send(HarnessInput(content="late steer"), mode=DeliveryMode.STEER)
+    delivery = asyncio.create_task(harness.send(HarnessInput(content="late steer"), mode=DeliveryMode.STEER))
+    await asyncio.sleep(0)
     state.turn_gate.set()
+    with pytest.raises(RuntimeError, match="native turn already ended"):
+        await asyncio.wait_for(delivery, 2)
     assert _terminal(await asyncio.wait_for(consumer, 2)).kind is TurnEventKind.FAILED
     assert harness._native_turn.confirmed
     await asyncio.wait_for(harness.stop(), 2)

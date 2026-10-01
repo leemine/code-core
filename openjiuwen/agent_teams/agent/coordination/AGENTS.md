@@ -68,3 +68,11 @@ sweep 的扫描面、节流与升级规则，以及调度模式两个 handler �
 - `interaction/` 把三视角入口（GodView / Operator / HumanAgent）解析成 `EventMessage` 后才进 dispatcher，不要让 dispatcher / handler 自己解析 mention 字符串——那段已搬到 `interaction/router.py`。
 - 真正干活的 LLM 在 `harness/deep_agent.py`，本目录只装配 + 调度。
 - 跨 team 的对象池 / 派发 / 并发门禁在 `runtime/`，本目录不感知。
+
+
+### scheduled 临时执行退出边界（F_116）
+
+kernel pause/stop 在暂停/取消 leader 后调用原 scheduler.stop_reviewers，再持久化 allocator
+及释放其余资源。临时 reviewer 清理未确认时上抛并保留当前 lifecycle 和 Session，后续
+stop/pause 可重试同一所有者；不作为 best-effort hook 吞掉。此处不增加 Provider 活动
+pause/resume 能力，External 产品仍在准入层拒绝未集成 scheduled。

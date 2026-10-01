@@ -556,11 +556,14 @@ def test_mapping_scopes_snapshots_deltas_usage_and_final():
         delta = acc.consume(event("message.part.delta", messageID="msg_a", partID="prt_t", field="text", delta="a"))
         assert delta[0][0].operation is OutputOperation.DELTA
     acc.consume(event("message.part.updated", part=textpart("aa", time={"end": 1})))
-    completed = info(time={"completed": 1}, finish="stop", tokens={"input": 4, "output": 2, "total": 6})
+    completed = info(
+        time={"completed": 1}, finish="stop",
+        tokens={"input": 4, "output": 2, "total": 6, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+    )
     for _ in range(2):
         acc.consume(event("message.updated", info=completed))
     assert acc.usage().input_tokens == 4
-    assert acc.usage().cached_input_tokens is None
+    assert acc.usage().cached_input_tokens == 0
     assert acc.is_idle(event("session.idle"))
     acc.reconcile({"info": completed, "parts": [textpart("aa", time={"end": 1})]})
     result = acc.result(TurnTiming())
@@ -969,3 +972,133 @@ async def test_completed_session_checkpoint_resumes_without_creating_session():
     rejected = FakeHarness("normal")
     with pytest.raises(HarnessProtocolError, match="confirmed idle session"):
         await rejected.start(context(checkpoint=unsafe, resume_policy=ResumePolicy.REQUIRE_RESUME))
+
+
+@pytest.mark.parametrize("hold_host", [True, False])
+def test_launcher_reaps_native_process_when_host_lease_is_lost(tmp_path, hold_host):
+    import fcntl
+    import os
+    import subprocess
+    import sys
+    import time
+
+    scope = tmp_path / "scope"
+    root = scope / "generation"
+    root.mkdir(parents=True)
+    marker = root / "child-pid"
+    cli = root / "fake-cli"
+    cli.write_text(
+        f"#!{sys.executable}\nimport os,time\nfrom pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n"
+    )
+    cli.chmod(0o700)
+    owner = {"generation": "only-this-test"}
+    (scope / "owner.json").write_text(json.dumps(owner))
+    fd = os.open(scope / "host.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    if hold_host:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    launch = root / "launch.json"
+    launch.write_text(
+        json.dumps(
+            {"owner": owner, "cli": str(cli), "cwd": str(root), "port": 1, "env": {}}
+        )
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-S", _launcher.__file__, str(launch)]
+    )
+    try:
+        if hold_host:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert marker.exists()
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        assert process.wait(timeout=5) == 75
+        if hold_host:
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(marker.read_text()), 0)
+        else:
+            assert not marker.exists()
+    finally:
+        os.close(fd)
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def test_usage_normalizes_disjoint_cache_and_reasoning_buckets():
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    messages = [
+        {"input": 331, "output": 32, "reasoning": 87, "cache": {"read": 17792, "write": 0}, "total": 18242},
+        {"input": 10, "output": 3, "reasoning": 2, "cache": {"read": 20, "write": 5}, "total": 40},
+    ]
+    for index, tokens in enumerate(messages):
+        snapshot = info(id=f"msg_{index}", tokens=tokens)
+        for _ in range(2):
+            acc.consume(event("message.updated", info=snapshot))
+    usage = acc.usage()
+    assert usage.input_tokens == 18158
+    assert usage.output_tokens == 124
+    assert usage.cached_input_tokens == 17812
+    assert usage.reasoning_output_tokens == 89
+    assert usage.input_tokens + usage.output_tokens == usage.total_tokens == 18282
+    assert usage.provider_data["opencode"]["cache_write_tokens"] == 5
+
+
+@pytest.mark.parametrize("cache", [None, {}, {"read": True, "write": 0}, {"read": -1, "write": 0}])
+def test_incomplete_cache_buckets_keep_input_usage_unknown(cache):
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    acc.consume(event("message.updated", info=info(tokens={
+        "input": 4, "output": 2, "reasoning": 1, "cache": cache,
+    })))
+    assert acc.usage().input_tokens is None
+    assert acc.usage().output_tokens == 3
+    assert acc.usage().total_tokens is None
+
+
+def test_missing_reasoning_keeps_output_usage_unknown():
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    acc.consume(event("message.updated", info=info(tokens={
+        "input": 4, "output": 2, "cache": {"read": 0, "write": 0},
+    })))
+    assert acc.usage().input_tokens == 4
+    assert acc.usage().output_tokens is None
+
+
+@pytest.mark.parametrize("values", [
+    {"context_window": 0}, {"max_output_tokens": True},
+    {"context_window": 10, "max_output_tokens": 11},
+])
+def test_model_limits_reject_invalid_values(values):
+    with pytest.raises(ValueError):
+        OpenCodeModelConfig("fixture", "http://127.0.0.1:1/v1", **values)
+
+
+def test_native_config_uses_explicit_model_limits():
+    model = OpenCodeModelConfig("fixture", "http://127.0.0.1:1/v1",
+                               context_window=131072, max_output_tokens=16384)
+    rendered = native_config(OpenCodeHarnessConfig(model=model))
+    assert rendered["provider"]["openjiuwen"]["models"]["fixture"]["limit"] == {
+        "context": 131072, "output": 16384,
+    }
+
+
+def test_completed_output_limit_is_failure_instead_of_waiting_for_timeout():
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    with pytest.raises(OpenCodeError, match="model_output_limit_exceeded"):
+        acc.consume(event("message.updated", info=info(time={"completed": 1}, finish="length")))
+
+
+def test_default_model_budgets_preserve_existing_storage_identity():
+    from dataclasses import asdict
+    from openjiuwen.harness_providers.opencode.server import _config_identity
+
+    original = config()
+    legacy = asdict(original)
+    legacy.pop("native_plugins")
+    legacy["model"].pop("context_window")
+    legacy["model"].pop("max_output_tokens")
+    assert _config_identity(original) == legacy
+    changed = replace(original, model=replace(original.model, context_window=131072, max_output_tokens=16384))
+    assert _config_identity(changed) != legacy
+    assert _config_identity(changed)["model"]["max_output_tokens"] == 16384

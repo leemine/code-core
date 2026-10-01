@@ -157,6 +157,13 @@
     checkpoint 只保存策略 fingerprint 供权限指纹复用判断，策略 revision 不成为 Binding 身份。
     未提供 runtime policy 的旧调用保持原行为。
 
+20. **Codex steer 回执以原生接受为准**：turn/start 尚未返回时仅保存待确认命令与 Future，
+    不提前返回 STEER 回执。原生明确以 `-32600` + `no active turn to steer` 拒绝时，
+    输入尚未被接受，Provider 委托原 `SerializedTurnHarness.send(FOLLOW_UP)` 排队并返回
+    新 Turn 的 FOLLOW_UP 回执。原回合继续由同一 reader 排空、发布自己的终态与用量，
+    不因这次明确拒绝被中断或改判失败。其它错误与未确认结果不自动重发；启动失败、
+    取消或停止释放等待者，未派发的取消命令不送入 SDK。没有第二套 Turn 队列或状态机。
+
 ## 接口契约
 
 ```python
@@ -290,3 +297,35 @@ full-access。
 assistant 完成消息、原生 stop 原因、后续 idle 和权威消息回读一致。异常/超时/断流后停止
 受管服务、禁止未知副作用重试；SSE 断开会取消宿主待答并产生未知失败，不自动重连或重放。活动 Turn/
 待答的冷重建仍不支持，不复制第二套 Turn 状态机。
+
+
+### OpenCode host lease 失效清理
+
+私有 systemd launcher 观察既有 host.lock 与 generation owner 描述。宿主进程崩溃释放
+租约或恢复替换 owner 时，launcher 停止本代 CLI 并退出，由原 KillMode=control-group
+收敛其后代。无宿主租约时禁止启动；不等待新请求重新构造 Provider 才清理孤儿进程。
+这不恢复活动 Turn，不改变已有私有 cgroup/lease 身份核验。
+
+
+### OpenCode token normalization
+
+The pinned OpenCode v1.18.18 native token record contains disjoint buckets.
+Protocol input includes fresh input plus cache reads and cache writes; protocol
+output includes visible output plus reasoning. Cached and reasoning counters
+remain subsets, not extra charges. Native total is preserved, so an inconsistent
+provider total remains detectable. Missing or invalid component counters leave
+the corresponding aggregate unknown; snapshots for the same message are not
+counted twice. This applies to Single, Team members and scheduled reviewers.
+Source: [OpenCode v1.18.18 getUsage](https://github.com/anomalyco/opencode/blob/v1.18.18/packages/opencode/src/session/session.ts).
+
+
+OpenCode model configuration accepts positive `context_window` and
+`max_output_tokens` (defaults remain 32000/4096); output cannot exceed context.
+These limits are emitted into the owned native configuration and verified by
+normal config readback. They let deployments configure the actual selected
+model budget without private patching. A native completed `finish=length`
+record fails the Turn explicitly as `model_output_limit_exceeded`; it neither
+waits for the overall timeout nor treats an incomplete answer as successful.
+
+Default model budgets preserve the historical storage fingerprint byte for byte;
+explicit budget changes remain part of the bound configuration identity.

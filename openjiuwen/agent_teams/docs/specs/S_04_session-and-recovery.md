@@ -484,3 +484,17 @@ session.state
   类型，与 namespace 中的 `lifecycle: "running" | "paused"` 是**不同枚举**
   ——后者是 round 运行时状态，由 coordination 写入。混用会得到错误的恢复
   策略，命名相近务必看清来源。
+# 同 Provider 恢复约束（2026-09-30，F_114）
+
+`execution_provider` 随原 Team Spec 保存；缺省历史仍为 Native。恢复传入的 live runtime_spec
+不得改变已保存 Provider，活工厂经原 BuildContext 或 seed factory 重建；缺失时拒绝，不能
+回退 Native。此约束不新增 Session store；成员 checkpoint 仍归各自 child AgentSession。
+完整 Provider 配置指纹、Workspace 与授权继承须由宿主工厂校验，不以 Provider 名称相同代替。
+
+`TeamBackend.history_restored` 只读返回原 `_history_restored` 标记；宿主据此为冷恢复 leader
+选择 `REQUIRE_RESUME`。不新增恢复存储；成员的损坏记录可通过
+`ExternalHarnessMemberRuntime(strict_checkpoint_validation=True)` 在 Provider 启动前拒绝。
+
+## External 宿主产品未确认状态（F_115）
+
+scoped 成员的交互/产品活动标记保存在原 child AgentSession。严格恢复遇到未确认标记拒绝启动，历史只读不能当作可恢复的 approval 或子 Agent。Provider checkpoint 可恢复并不意味着产品 future 可重建；只在本周期成功启动及所有资源确认退出后清标记。

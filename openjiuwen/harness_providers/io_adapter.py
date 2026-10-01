@@ -201,6 +201,34 @@ class HarnessIOAdapter:
     def has_pending_interrupt(self) -> bool:
         return bool(self._pending)
 
+    def answer_pending(self, user_input: InteractiveInput) -> bool:
+        """Resolve exact live IDs atomically, without falling back to new input."""
+        if user_input.raw_inputs is not None or not user_input.user_inputs:
+            return False
+        responses = []
+        for request_id, value in user_input.user_inputs.items():
+            pending = self._pending.get(request_id)
+            if pending is None or pending.future.done():
+                return False
+            if isinstance(pending.request, ToolApprovalRequest) and (
+                not isinstance(value, dict) or type(value.get("approved")) is not bool
+            ):
+                return False
+            responses.append((pending, _response_for(pending.request, value)))
+        for pending, response in responses:
+            pending.future.set_result(response)
+        return True
+
+    async def publish_output(self, chunk: OutputSchema, *, turn_id: str | None = None) -> None:
+        """Enqueue host product output through the same bounded consumer path."""
+        if self._stopped or self._stopping:
+            raise HarnessStateError("output owner is stopped")
+        try:
+            await self._output_queue.put(ProjectedOutput(turn_id=turn_id, chunk=chunk))
+        except OutputBudgetExceeded as exc:
+            self._fail_output(exc)
+            raise
+
     def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool:
         """Return whether ``user_input`` answers at least one pending interaction."""
         if not isinstance(user_input, InteractiveInput) or not self._pending:

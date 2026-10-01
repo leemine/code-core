@@ -1,6 +1,6 @@
 # Agent Teams Agent
 
-`TeamAgent` 运行时主骨架。`TeamAgent` 是单一实现——同一个类同时承担 leader 和 teammate 两个角色，通过 `TeamRole` 切换行为，内部组合一个 `DeepAgent` 跑 LLM。本目录把 TeamAgent 的内部结构按"四象限"+ 协作层组织。
+`TeamAgent` 运行时主骨架。同一个类承担 leader 和 teammate，通过 `TeamRole` 切换行为；默认组合 Native 的 `TeamHarness`，显式 External 则经宿主构造端口取得 `ExternalHarnessMemberRuntime`。本目录把内部结构按"四象限"+ 协作层组织。
 
 ## 四象限分解
 
@@ -22,6 +22,7 @@
 | `team_agent.py` | `TeamAgent(BaseAgent)` | 唯一对外类。leader / teammate 都是它，行为由 `blueprint.role` 切。`auto_start_member` / `auto_start_all` 用于 interact dispatch 层 best-effort lazy startup |
 | `agent_configurator.py` | `AgentConfigurator` | DeepAgent 装配：team rail 经 `RailSpec` 声明式注入 `build_spec.rails` + live handle 注入 `BuildContext.extras`（不再手动 `new` rail / 不再有 customizer，见 `docs/features/F_32`）；`_resolve_team_mode` 在这里 |
 | `member.py` | `TeamMember` | 成员状态机封装 |
+| `runtime_factory.py` | `TeamMemberRuntimeFactory` | 全角色宿主构造端口，选择身份保存于 `TeamAgentSpec.execution_provider`；活工厂仅放原 BuildContext，不增加注册表或调度器；无副作用准入后返回独立未启动的外部成员运行时（F_114） |
 | `member_factory.py` | `create_member_handle(...)` | 集中 TeamMember 构造，leader / teammate 路径共用一份实现 |
 | `member_activity.py` | `MemberActivityRegistry` + `IdleSignal` + `parse_member_status` | **leader-only** 的全成员状态内存视图（含自己）。唯一问题是"团队里还有没有东西在动"：`record()` 写状态并返回 `IdleSignal`（有人在动→`CANCEL`，全员静止的上升沿→`SCHEDULE`，其余 `NONE`；初始不武装——刚建好的团队天然静止，报 idle 是噪音），`seed()` 用 DB 名册整体替换（团队不存在 / 成员为空不报错）。静止集是 `MEMBER_QUIESCENT_STATUSES`，**不是**完成判定的 `MEMBER_SETTLED_STATUSES`。**本文件不含任何计时概念**——2s 去抖窗口与那个 task 归 `StreamController`；**也不含任务板概念**——idle 的第二条件（任务板无非终态任务）由 `StreamController` 在去抖之后另问，registry 只回答成员那半个问题。见 [[F_74_leader-member-activity-and-team-idle]] / [[F_77_team-idle-requires-a-settled-task-board]] |
 | `payload.py` | `SpawnPayloadBuilder` | spawn teammate 时的**跨进程 wire 格式**。输出键是 `TeamAgent.from_spawn_payload` 的公共契约——改这里的字段要同步改子进程入口 |

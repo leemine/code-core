@@ -37,6 +37,7 @@ from openjiuwen.harness_protocol import (
     HarnessStateError,
     HostCapability,
     InteractionResponseStatus,
+    InteractionCancelReason,
     McpServerConfig,
     ProviderEvent,
     ProviderInteractionRequest,
@@ -48,11 +49,16 @@ from openjiuwen.harness_protocol import (
     TurnEventKind,
     TurnLifecycleEvent,
     TurnResult,
+    ToolApprovalRequest,
+    UserInputRequest,
     json_value_to_builtin,
 )
 from openjiuwen.harness_providers.base import ProviderStartupError
 from openjiuwen.harness_providers.inputs import harness_input_text
-from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, to_harness_input
+from openjiuwen.harness_providers.io_adapter import HarnessIOAdapter, ProjectedOutput, to_harness_input
+from openjiuwen.agent_teams.external.interaction_address import (
+    decode_interaction_address, encode_interaction_address,
+)
 
 _EVENT_STATE = "harness.state"
 _EVENT_ROUND = "harness.round"
@@ -213,12 +219,21 @@ class ExternalHarnessMemberRuntime:
             messages; ``None`` disables team-state delivery.
         stop_on_unsupported_force_abort: Stop the whole cycle when the host
             asks for an immediate abort the provider cannot deliver.
-        resume_external_backend: Require the provider to resume its persisted
-            session from the member checkpoint instead of starting fresh.
+        resume_external_backend: Require resume when a member checkpoint is
+            available; retain legacy new-session behavior when absent. Hosts
+            requiring a checkpoint must set the context's REQUIRE_RESUME policy.
         agent_kind: Reliability vocabulary for this member (``claude`` /
             ``codex``); ``None`` disables the external-runtime reliability loop.
         inject_mcp: Whether the spawn path should mount the team MCP server.
         mcp_server_name: Logical name of the team MCP server.
+        auto_approve_tools: Preserve legacy CLI approval by default. Product
+            hosts can disable it and use the existing interaction channel.
+        strict_checkpoint_validation: Reject an existing but invalid member
+            checkpoint record instead of treating it as a fresh execution.
+        interaction_scope: Optional (team, member, root Session) address scope.
+            Replies then require an exact live ID and the current start cycle.
+        event_observer: Read-only host projection on the original event pump.
+        output_projection: Host mapping on the original bounded output consumer.
     """
 
     def __init__(
@@ -233,11 +248,26 @@ class ExternalHarnessMemberRuntime:
         cli_path: str | None = None,
         inject_mcp: bool = False,
         mcp_server_name: str = "openjiuwen-team",
+        auto_approve_tools: bool = True,
+        strict_checkpoint_validation: bool = False,
+        interaction_scope: tuple[str, str, str] | None = None,
+        event_observer: Callable[[HarnessEvent], Awaitable[None]] | None = None,
+        output_projection: Callable[[ProjectedOutput], Awaitable[OutputSchema | None]] | None = None,
     ) -> None:
         self._harness = harness
         self._context_source = context
         self._team_context_tracker = team_context_tracker
         self._resume_external_backend = resume_external_backend
+        self._strict_checkpoint_validation = strict_checkpoint_validation
+        if interaction_scope is not None and (
+            len(interaction_scope) != 3 or any(not isinstance(value, str) or not value for value in interaction_scope)
+        ):
+            raise ValueError('member interaction scope requires team, member and root Session')
+        self._interaction_scope = tuple(interaction_scope) if interaction_scope is not None else None
+        self._interaction_cycle = ""
+        self._cycle_started = False
+        self._host_event_observer = event_observer
+        self._output_projection = output_projection
         self._agent_kind = agent_kind
         self._cli_path = cli_path
         self.inject_mcp = inject_mcp
@@ -245,7 +275,7 @@ class ExternalHarnessMemberRuntime:
         self._adapter = HarnessIOAdapter(
             harness,
             event_observer=self._on_event,
-            auto_approve_tools=True,
+            auto_approve_tools=auto_approve_tools,
             stop_on_unsupported_force_abort=stop_on_unsupported_force_abort,
             provider_interaction_handler=self._on_provider_interaction,
         )
@@ -265,6 +295,7 @@ class ExternalHarnessMemberRuntime:
         self._span_bridge: MemberSpanBridge | None = None
         self._promote_fallback_model: PromoteFallbackModel | None = None
         self._teardown_hooks: list[Callable[[], Awaitable[None]]] = []
+        self._pending_teardown_hooks: list[Callable[[], Awaitable[None]]] = []
         self._round_seq = 0
         self._current_round_id: int | None = None
         self._last_prompt = ""
@@ -366,26 +397,31 @@ class ExternalHarnessMemberRuntime:
     async def _start(self, team_session: Any | None) -> None:
         if not self._stopped:
             raise HarnessStateError("external harness member runtime is already started")
-        async with self._context_delivery_lock:
-            await self._finalize_member_session()
-        context = await self._resolve_context(team_session)
-        self._member_name = context.agent_name
-        self._member_agent_id = context.agent_id
-        await self._ensure_member_session(team_session)
-        context = self._host_context(context)
-        if self._reliability_ctx is not None:
-            self._reliability_ctx.begin_attempt(phase="startup", round_id=None)
-        try:
-            await self._adapter.start(context)
-        except BaseException as exc:
-            await self._finalize_startup_failure(exc)
-            try:
-                async with self._context_delivery_lock:
-                    await self._finalize_member_session()
-            except Exception:
-                team_logger.exception("external harness member session cleanup failed after start")
-            raise
+        # A failed adapter start can still own a half-started Provider. Keep
+        # this cycle (including pre-bound resources and the member session)
+        # reachable by stop until every resource confirms exit.
         self._stopped = False
+        self._interaction_cycle = uuid.uuid4().hex
+        self._cycle_started = False
+        self._pending_teardown_hooks = list(self._teardown_hooks)
+        try:
+            async with self._context_delivery_lock:
+                await self._finalize_member_session()
+            context = await self._resolve_context(team_session)
+            self._member_name = context.agent_name
+            self._member_agent_id = context.agent_id
+            await self._ensure_member_session(team_session)
+            context = self._host_context(context)
+            if self._reliability_ctx is not None:
+                self._reliability_ctx.begin_attempt(phase="startup", round_id=None)
+            await self._adapter.start(context)
+            self._cycle_started = True
+        except BaseException as exc:
+            try:
+                await self._stop()
+            finally:
+                await self._finalize_startup_failure(exc)
+            raise
 
     def _host_context(self, context: HarnessContext) -> HarnessContext:
         """Inject the host services this runtime owns into the provider context."""
@@ -395,13 +431,23 @@ class ExternalHarnessMemberRuntime:
         resume_policy = context.resume_policy
         member_session = self._member_session
         if member_session is not None:
+            if self._strict_checkpoint_validation and (
+                member_session.get_state('external_member_interaction_pending')
+                or member_session.get_state('external_member_products_active')
+            ):
+                raise HarnessStateError('member recovery has an unconfirmed interaction or product child')
             backend = self._harness.card.name
             if checkpoint is None:
                 checkpoint = read_member_checkpoint(member_session, backend=backend)
+                if (self._strict_checkpoint_validation and checkpoint is None
+                        and member_session.get_state(_EXTERNAL_RUNTIME_STATE_KEY) is not None):
+                    raise HarnessStateError("member recovery contains an invalid checkpoint record")
             if checkpoint_sink is None:
                 checkpoint_sink = _MemberSessionCheckpointSink(member_session, backend=backend)
         if checkpoint_sink is not None:
             capabilities.add(HostCapability.CHECKPOINT_SINK)
+        if resume_policy is ResumePolicy.REQUIRE_RESUME and checkpoint is None:
+            raise HarnessStateError("strict member recovery requires a saved checkpoint")
         if self._resume_external_backend:
             if checkpoint is None:
                 team_logger.warning(
@@ -422,6 +468,7 @@ class ExternalHarnessMemberRuntime:
             checkpoint=checkpoint,
             checkpoint_sink=checkpoint_sink,
             mcp_servers=mcp_servers,
+            interactions=self if self._interaction_scope else context.interactions,
         )
 
     async def stop(self) -> None:
@@ -435,27 +482,85 @@ class ExternalHarnessMemberRuntime:
             async with self._context_delivery_lock:
                 await self._finalize_member_session()
             return
-        try:
-            await self._adapter.stop()
-        finally:
-            await self._events.unregister_namespace(_EVENT_NAMESPACE)
-            self._stopped = True
-            for hook in self._teardown_hooks:
-                try:
-                    await hook()
-                except Exception:
-                    team_logger.exception("external harness teardown hook failed")
-            async with self._context_delivery_lock:
-                await self._finalize_member_session()
+        await self._adapter.stop()
+        errors: list[Exception] = []
+        for hook in tuple(self._pending_teardown_hooks):
+            try:
+                await hook()
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self._pending_teardown_hooks.remove(hook)
+        if errors:
+            raise ExceptionGroup("external harness member teardown failed", errors)
+        if self._cycle_started and self._interaction_scope and self._member_session is not None:
+            self._member_session.update_state({'external_member_interaction_pending': False,
+                                              'external_member_products_active': False})
+            await self._member_session.commit()
+        await self._events.unregister_namespace(_EVENT_NAMESPACE)
+        async with self._context_delivery_lock:
+            await self._finalize_member_session()
+        self._stopped = True
 
     async def dispose(self) -> None:
         await self.stop()
 
     def outputs(self) -> AsyncIterator[Any]:
         bridge = self._span_bridge
+        outputs = self._projected_outputs() if self._interaction_scope or self._output_projection else self._adapter.outputs()
         if isinstance(bridge, ChunkRecordingSpanBridge):
-            return _RecordingOutputs(self._adapter.outputs(), bridge)
-        return self._adapter.outputs()
+            return _RecordingOutputs(outputs, bridge)
+        return outputs
+
+    async def _projected_outputs(self) -> AsyncIterator[Any]:
+        async for item in self._adapter.output_envelopes():
+            chunk = item.chunk
+            if self._interaction_scope and chunk is not None and chunk.type == "__interaction__":
+                payload = chunk.payload.model_copy(update={"id": encode_interaction_address(
+                    *self._interaction_scope, self._interaction_cycle, chunk.payload.id,
+                )})
+                item = dataclasses.replace(item, chunk=chunk.model_copy(update={"payload": payload}))
+            if self._output_projection is not None:
+                chunk = await self._output_projection(item)
+            else:
+                chunk = item.chunk
+            if chunk is not None:
+                yield chunk
+
+    @property
+    def member_session(self) -> Any:
+        """Original member Session, available after start until confirmed exit."""
+        return self._member_session
+
+    async def publish_output(self, chunk: OutputSchema) -> None:
+        await self._adapter.publish_output(chunk)
+
+    async def request_interaction(self, request):
+        """Await a host product question through the original IO interaction channel."""
+        if self._stopped:
+            raise HarnessStateError("interaction owner is stopped")
+        return await self.handle(request)
+
+    async def handle(self, request):
+        if self._interaction_scope and isinstance(request, (ToolApprovalRequest, UserInputRequest)):
+            if self._member_session is not None:
+                self._member_session.update_state({'external_member_interaction_pending': True})
+                await self._member_session.commit()
+        return await self._adapter.handle(request)
+
+    async def cancel(self, request_id, *, reason=InteractionCancelReason.PROVIDER_WITHDREW):
+        await self._adapter.cancel(request_id, reason=reason)
+
+    def _decode_reply(self, content: InteractiveInput) -> InteractiveInput | None:
+        if content.raw_inputs is not None or len(content.user_inputs) != 1:
+            return None
+        key, value = next(iter(content.user_inputs.items()))
+        address = decode_interaction_address(key)
+        if address is None or address[:3] != self._interaction_scope or address[3] != self._interaction_cycle:
+            return None
+        reply = InteractiveInput()
+        reply.update(address[4], value)
+        return reply
 
     # ------------------------------------------------------------------
     # MemberRuntime: interaction
@@ -466,6 +571,11 @@ class ExternalHarnessMemberRuntime:
 
         async with self._context_delivery_lock:
             if isinstance(content, InteractiveInput):
+                if self._interaction_scope:
+                    reply = self._decode_reply(content)
+                    if reply is None or not self._adapter.answer_pending(reply):
+                        raise HarnessStateError("member interaction is stale, unknown or belongs to another owner")
+                    return None
                 return await self._adapter.send(content, immediate=immediate)
             external_input = to_harness_input(content)
             pending_context = await self._pending_team_context()
@@ -487,7 +597,19 @@ class ExternalHarnessMemberRuntime:
             await self._commit_team_context()
 
     async def abort(self, *, immediate: bool = False) -> None:
-        await self._adapter.abort(immediate=immediate)
+        from openjiuwen.harness_protocol import UnsupportedHarnessCapabilityError
+        try:
+            await self._adapter.abort(immediate=immediate)
+        except UnsupportedHarnessCapabilityError:
+            raise
+        except Exception:
+            if not immediate:
+                raise
+            # A Provider may already be exiting after a denied interaction.
+            # Force cancellation may stop its whole cycle, but only the normal
+            # stop path can confirm exit and release owned member resources.
+            team_logger.warning("External member force abort failed; confirming full Provider exit")
+            await self.stop()
 
     async def pause(self) -> None:
         await self._adapter.pause()
@@ -511,6 +633,8 @@ class ExternalHarnessMemberRuntime:
     # ------------------------------------------------------------------
 
     async def _on_event(self, envelope: HarnessEvent) -> None:
+        if self._host_event_observer is not None:
+            await self._host_event_observer(envelope)
         payload = envelope.event
         if isinstance(payload, StateChangedEvent):
             await self._events.trigger(
@@ -672,8 +796,8 @@ class ExternalHarnessMemberRuntime:
             agent_id=self._member_agent_id,
             share_stream_writer=False,
         )
-        await member_session.pre_run()
         self._member_session = member_session
+        await member_session.pre_run()
         return member_session
 
     async def _finalize_member_session(self) -> None:
@@ -702,6 +826,10 @@ class ExternalHarnessMemberRuntime:
         return self._adapter.has_pending_interrupt()
 
     def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool:
+        if self._interaction_scope:
+            if not isinstance(user_input, InteractiveInput):
+                return False
+            user_input = self._decode_reply(user_input)
         return self._adapter.is_pending_interrupt_resume_valid(user_input)
 
     # External harnesses own their own rails, memory, workspace, and tools.

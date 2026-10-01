@@ -31,7 +31,7 @@ leader 侧的调度分发 runtime，与 `coordination/`（唤醒层）平齐：c
 - `CoordinationKernel.setup` 仅在 `spec.dispatch_mode == "scheduled"` 的 leader 上构造（休眠态）；其余 kernel 不构造。
 - 激活点两个：`notify_team_built()`（build_team 成功回调，先于任何 spawn / create_task）与 `kernel.start()`（team 行已存在——warm resume / 冷恢复）。
 - wake 路径：`kernel._build_wake_callback()` 组合 "coordination dispatch → scheduler.on_event"。
-- `pause()` / `stop()` 即 `deactivate()`；内存记账（送审去重 / 催办节流 / 升级去重 / 摘要去重）不持久化——重启后最坏重发一次送审或升级，board 真相在 DB。
+- `pause()` / `stop()` 先 `deactivate()`，再等待 `stop_reviewers()` 确认临时 reviewer 退出，才能释放 Session/DB/transport；超时或清理失败保留原所有者供重试。恢复扫描只派发缺票 reviewer，board 真相仍在 DB。
 - task review feedback callback 不进入状态机关键路径；团队终态 callback 是旁路汇总边界，不改变
   all-done 摘要与 pause/stop 决策。
 
@@ -43,3 +43,24 @@ leader 侧的调度分发 runtime，与 `coordination/`（唤醒层）平齐：c
 `docs/features/F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）与
 `docs/features/F_73_reviewer-feedback-skill-evolution-boundaries.md`（review feedback 外部接入边界）及
 `docs/specs/S_22_scheduling-runtime.md`。
+
+### 临时 reviewer 构造与所有权（F_116）
+
+原 `_spawn_temp_reviewer` 持有一次性执行，区别于 roster 成员与产品子 Agent。Native 沿原
+TeamHarness.build/run_once；显式 External 从同一个成员 factory 的 build_review_runtime
+接缝构造，核对 Provider 与绑定 Team Session，缺端口拒绝，不能降级 Native。请求携带
+原 verify/view 工具与原模板 prompt，票据/settle 仍归原 TaskManager。
+
+原 scheduler 按 task/review_round/reviewer 跟踪 task/runtime/cleanup；清理任务受 shield
+保护，停止等待者取消不取消实际清理。确定性 PASS/FAIL 也必须等待本轮所有临时执行退出；
+未决票据仍沿原催办/升级。成功退出后使用同一幂等 scan；不新增调度器或 Provider 事件消费者。
+External 不沿 Native 的 181001 字符串规则重试未知执行。宿主仍须实现临时执行的授权、
+单消费者历史/交互/用量及持久未知状态保护；core 接缝通过不等于产品 scheduled 已准入。
+
+临时审批寻址只读取 _review_runs 中 invocation 对应 runtime；停止期间拒绝查询，退出
+移除后不可回答（F_117）。宿主负责持久未知状态和历史/用量确认，不把产品准入决定
+搬入 scheduler。
+
+External reviewer 的 output_sink 由原 scheduler 绑定当轮 stream_controller.stream_queue
+和 Team Session，宿主写入带角色/临时身份的既有 TeamOutputSchema；换队列/Session 后
+拒绝旧输出。Team Session 的持久化流不能代替 Runner 消费队列，不增加第二个消费者。

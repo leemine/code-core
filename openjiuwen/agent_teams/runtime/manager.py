@@ -413,6 +413,30 @@ class TeamRuntimeManager:
             return DeliverResult.failure("not_active")
 
         if isinstance(payload, InteractiveInput):
+            if getattr(getattr(entry.agent, "spec", None), "execution_provider", "native") != "native":
+                from openjiuwen.agent_teams.external.interaction_address import decode_interaction_address
+                if payload.raw_inputs is not None or len(payload.user_inputs) != 1:
+                    return DeliverResult.failure("invalid_member_interaction")
+                address = decode_interaction_address(next(iter(payload.user_inputs)))
+                if address is None or address[0] != entry.team_name or address[2] != entry.current_session_id:
+                    return DeliverResult.failure("member_interaction_owner_mismatch")
+                target = (entry.agent if address[1] == entry.agent.blueprint.member_name
+                          else entry.agent.spawn_manager.lookup_inprocess_agent(address[1]))
+                harness = target.harness if target is not None else None
+                if harness is None:
+                    scheduler = getattr(getattr(entry.agent, "coordination", None), "scheduler", None)
+                    if scheduler is not None:
+                        harness = scheduler.review_interaction_target(address[1])
+                if harness is None:
+                    return DeliverResult.failure("member_interaction_unavailable")
+                if not harness.is_pending_interrupt_resume_valid(payload):
+                    return DeliverResult.failure("stale_member_interaction")
+                from openjiuwen.harness_protocol import HarnessStateError
+                try:
+                    await harness.send(payload)
+                except HarnessStateError:
+                    return DeliverResult.failure("stale_member_interaction")
+                return DeliverResult.success(None)
             if entry.agent.has_pending_interrupt():
                 await entry.agent.resume_interrupt(payload)
                 return DeliverResult.success(None)

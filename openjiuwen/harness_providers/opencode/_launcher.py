@@ -14,6 +14,15 @@ import sys
 from pathlib import Path
 
 
+def _host_present(fd):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    return False
+
+
 def main(path):
     launch = json.loads(Path(path).read_text())
     scope = Path(path).parent.parent
@@ -23,13 +32,35 @@ def main(path):
         owner = json.loads((scope / "owner.json").read_text())
         if owner != launch["owner"]:
             return 73
-        os.umask(0o077)
-        return subprocess.call(
-            [launch["cli"], "serve", "--hostname", "127.0.0.1", "--port", str(launch["port"])],
-            cwd=launch["cwd"],
-            env=launch["env"],
-            close_fds=True,
-        )
+        host_fd = os.open(scope / "host.lock", os.O_RDWR | os.O_NOFOLLOW)
+        process = None
+        try:
+            if not _host_present(host_fd):
+                return 75
+            os.umask(0o077)
+            # Lifetime is bounded by the host lease and finalized below.
+            process = subprocess.Popen(  # pylint: disable=consider-using-with
+                [launch["cli"], "serve", "--hostname", "127.0.0.1", "--port", str(launch["port"])],
+                cwd=launch["cwd"], env=launch["env"], close_fds=True,
+            )
+            while True:
+                try:
+                    return process.wait(timeout=0.25)
+                except subprocess.TimeoutExpired:
+                    if (not _host_present(host_fd)
+                            or json.loads((scope / "owner.json").read_text()) != launch["owner"]):
+                        # Main service exit also lets systemd reap the remaining
+                        # owned cgroup. Never keep a detached CLI after host loss.
+                        return 75
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            os.close(host_fd)
     finally:
         os.close(fd)
 

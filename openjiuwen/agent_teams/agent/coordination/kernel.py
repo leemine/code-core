@@ -318,6 +318,8 @@ class CoordinationKernel:
         # ``drain_agent_task`` → ``abort(immediate=True)``, which threw away
         # everything the member had done in the round it interrupted mid-way.
         await self.pause_agent_round()
+        if self._scheduler is not None:
+            await self._scheduler.stop_reviewers()
         host.persist_allocator_state()
         # Extract team memories while the session is still bound and the DB
         # is accessible. Moved from finalize_round so extraction runs once
@@ -525,6 +527,8 @@ class CoordinationKernel:
         if self._scheduler is not None:
             self._scheduler.deactivate()
         await self.drain_agent_task()
+        if self._scheduler is not None:
+            await self._scheduler.stop_reviewers()
         host.persist_allocator_state()
         if on_quiesced is not None:
             try:
