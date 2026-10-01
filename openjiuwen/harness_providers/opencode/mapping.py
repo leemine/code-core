@@ -255,14 +255,21 @@ class Accumulator:
             return None
 
         def count(key, nested=None):
-            values = [(t.get(nested, {}) if nested else t).get(key) for t in tokens]
+            buckets = [t.get(nested) if nested else t for t in tokens]
+            values = [bucket.get(key) if isinstance(bucket, dict) else None for bucket in buckets]
             return (
                 sum(values) if all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in values) else None
             )
 
+        def inclusive(*counts):
+            return sum(counts) if all(value is not None for value in counts) else None
+
+        # OpenCode v1.18.18 stores disjoint billing buckets: input excludes
+        # cache reads/writes and output excludes reasoning. Protocol totals
+        # include those subsets, as do the other built-in Providers.
         return TurnUsage(
-            input_tokens=count("input"),
-            output_tokens=count("output"),
+            input_tokens=inclusive(count("input"), count("read", "cache"), count("write", "cache")),
+            output_tokens=inclusive(count("output"), count("reasoning")),
             cached_input_tokens=count("read", "cache"),
             reasoning_output_tokens=count("reasoning"),
             total_tokens=count("total"),
