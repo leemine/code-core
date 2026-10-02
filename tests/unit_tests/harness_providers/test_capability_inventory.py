@@ -6,10 +6,20 @@ import pytest
 
 from openjiuwen.harness_protocol import (
     AgentExecutionSpec,
+    ProviderCapability,
     ProviderCapabilityKind,
     RuntimeSurface,
 )
 from openjiuwen.harness_providers.construction import configured_provider_capabilities
+
+
+def test_capability_name_admits_canonical_plugin_identity() -> None:
+    capability = ProviderCapability(
+        "native-plugin@local-market",
+        ProviderCapabilityKind.PLUGIN,
+    )
+
+    assert capability.name == "native-plugin@local-market"
 
 
 def _skill(root: Path, name: str) -> Path:

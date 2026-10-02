@@ -54,6 +54,7 @@ from openjiuwen.harness_providers.codex.failure_classifier import (
     classify_turn_error,
 )
 from openjiuwen.harness_providers.codex.harness import USER_INPUT_METHOD, _answers_from_response
+from openjiuwen.harness_providers.codex.mapping import CodexTurnAccumulator
 from openjiuwen.harness_providers.codex.options import (
     USER_INPUT_FEATURE_OVERRIDE,
     build_thread_options,
@@ -283,8 +284,12 @@ class _FakeCodex:
         self.closed = False
         self._client = SimpleNamespace(
             _sync=SimpleNamespace(
-                _approval_handler=None, _proc=None, config=config, start=lambda: None,
-                _start_reader_thread=lambda: None, _start_stderr_drain_thread=lambda: None,
+                _approval_handler=None,
+                _proc=None,
+                config=config,
+                start=lambda: None,
+                _start_reader_thread=lambda: None,
+                _start_stderr_drain_thread=lambda: None,
             ),
             request=self._request,
         )
@@ -299,9 +304,11 @@ class _FakeCodex:
         self.state.thread_calls.append((method.split("/")[-1], params))
         thread_id = params.get("threadId", self.state.next_thread_id)
         effective = {
-            "approvalPolicy": params["approvalPolicy"], "approvalsReviewer": params["approvalsReviewer"],
+            "approvalPolicy": params["approvalPolicy"],
+            "approvalsReviewer": params["approvalsReviewer"],
             "sandbox": {"type": "readOnly" if params.get("sandbox", "read-only") == "read-only" else "workspaceWrite"},
-            "thread": {"id": thread_id}, "model": _thread_model(params),
+            "thread": {"id": thread_id},
+            "model": _thread_model(params),
             "activePermissionProfile": {"id": params["permissionProfile"]} if "permissionProfile" in params else None,
         }
         return response_model.model_validate(effective)
@@ -385,6 +392,68 @@ def _terminal(events: list[HarnessEvent]) -> TurnLifecycleEvent:
     return payload
 
 
+def test_codex_maps_native_hook_lifecycle_without_hook_output_text() -> None:
+    accumulator = CodexTurnAccumulator(turn_id="turn")
+    run = SimpleNamespace(
+        id="hook-1",
+        event_name="preToolUse",
+        handler_type="command",
+        execution_mode="sync",
+        scope="turn",
+        source="user",
+        status="completed",
+        status_message="Checked",
+        duration_ms=12,
+        entries=[SimpleNamespace(kind="context", text="secret output")],
+    )
+    mapped, retry = accumulator.consume(_notification("hook/completed", run=run, thread_id="thread", turn_id="turn"))
+    assert retry is None
+    event = mapped[0].payload
+    assert isinstance(event, ProviderEvent)
+    assert event.event_type == "native_hook/completed"
+    assert event.payload["entry_kinds"] == ("context",)
+    assert event.payload["entry_count"] == 1
+    assert "secret output" not in repr(event.payload)
+
+
+def test_codex_maps_internal_subagents_as_read_only_provider_events() -> None:
+    accumulator = CodexTurnAccumulator(turn_id="turn")
+    collab = SimpleNamespace(
+        id="call-1",
+        type="collabAgentToolCall",
+        tool="spawnAgent",
+        sender_thread_id="parent",
+        receiver_thread_ids=["child"],
+        agents_states={"child": SimpleNamespace(status="running", message=None)},
+        status="inProgress",
+        prompt="Inspect tests",
+        model="gpt-5",
+        reasoning_effort="high",
+    )
+    mapped, retry = accumulator.consume(_notification("item/started", **_item(**collab.__dict__).__dict__))
+    assert retry is None
+    event = mapped[0].payload
+    assert isinstance(event, ProviderEvent)
+    assert event.event_type == "internal_subagent/status"
+    assert event.payload["subagent_id"] == "child"
+    assert event.payload["status"] == "running"
+    assert event.payload["controllable"] is False
+
+    activity = SimpleNamespace(
+        id="activity-1",
+        type="subAgentActivity",
+        agent_thread_id="child",
+        agent_path="child/worker",
+        kind="interacted",
+    )
+    mapped, _ = accumulator.consume(_notification("item/completed", **_item(**activity.__dict__).__dict__))
+    event = mapped[0].payload
+    assert isinstance(event, ProviderEvent)
+    assert event.event_type == "internal_subagent/activity"
+    assert event.payload["activity_kind"] == "interacted"
+    assert event.payload["entity_kind"] == "codex_internal_subagent"
+
+
 def test_config_validation_and_option_rendering() -> None:
     config = CodexHarnessConfig.from_mapping(
         {"cwd": "/w", "mcp_env_passthrough": ["A"], "model": {"model": "m", "provider": "deepseek", "api_key": "k"}}
@@ -403,7 +472,9 @@ def test_config_validation_and_option_rendering() -> None:
         "features.enable_request_compression=false",
     )
     overrides = codex_mcp_config_overrides(
-        McpServerConfig(name="openjiuwen-team", transport=McpTransport.STDIO, command=("mcp", "--flag"), env={"A": "1"}),
+        McpServerConfig(
+            name="openjiuwen-team", transport=McpTransport.STDIO, command=("mcp", "--flag"), env={"A": "1"}
+        ),
         env_passthrough=("JOIN",),
         startup_timeout_s=120,
         required=True,
@@ -434,14 +505,24 @@ async def test_full_turn_maps_notifications_to_protocol_events(monkeypatch: pyte
         [
             _notification("turn/started", turn_id="turn-hi"),
             _notification("item/agentMessage/delta", delta="Hel", item_id="msg-1", thread_id="t", turn_id="turn-hi"),
-            _notification("item/reasoning/summaryTextDelta", delta="think", item_id="r-1", thread_id="t", turn_id="turn-hi"),
+            _notification(
+                "item/reasoning/summaryTextDelta", delta="think", item_id="r-1", thread_id="t", turn_id="turn-hi"
+            ),
             _notification(
                 "item/started",
                 **_item(id="cmd-1", type="commandExecution", command="ls", cwd="/w").__dict__,
             ),
             _notification(
                 "item/completed",
-                **_item(id="cmd-1", type="commandExecution", command="ls", cwd="/w", aggregated_output="a.py", status="completed", error=None).__dict__,
+                **_item(
+                    id="cmd-1",
+                    type="commandExecution",
+                    command="ls",
+                    cwd="/w",
+                    aggregated_output="a.py",
+                    status="completed",
+                    error=None,
+                ).__dict__,
             ),
             _notification("item/completed", **_item(id="msg-1", type="agentMessage", text="Hello").__dict__),
             _notification(
@@ -449,14 +530,22 @@ async def test_full_turn_maps_notifications_to_protocol_events(monkeypatch: pyte
                 thread_id="t",
                 turn_id="turn-hi",
                 token_usage=SimpleNamespace(
-                    last=SimpleNamespace(input_tokens=10, output_tokens=4, cached_input_tokens=1, reasoning_output_tokens=2, total_tokens=17),
+                    last=SimpleNamespace(
+                        input_tokens=10,
+                        output_tokens=4,
+                        cached_input_tokens=1,
+                        reasoning_output_tokens=2,
+                        total_tokens=17,
+                    ),
                     total=SimpleNamespace(total_tokens=17),
                 ),
             ),
             _turn_completed("turn-hi", _Status.completed),
         ]
     )
-    config = CodexHarnessConfig(inherit_process_env=False, cwd="/w", model=CodexModelConfig(model="m", provider="p", api_key="k"))
+    config = CodexHarnessConfig(
+        inherit_process_env=False, cwd="/w", model=CodexModelConfig(model="m", provider="p", api_key="k")
+    )
     harness = CodexHarness(config)
     await harness.start(
         _context(mcp_servers=(McpServerConfig(name="team", transport=McpTransport.STDIO, command=("mcp",)),))
@@ -508,7 +597,13 @@ async def test_steer_abort_and_failure_paths(monkeypatch: pytest.MonkeyPatch) ->
     state.scripts.append([_wait])
     state.scripts.append(
         [
-            _notification("error", error=SimpleNamespace(message="overloaded", codex_error_info=None), will_retry=True, thread_id="t", turn_id="x"),
+            _notification(
+                "error",
+                error=SimpleNamespace(message="overloaded", codex_error_info=None),
+                will_retry=True,
+                thread_id="t",
+                turn_id="x",
+            ),
             _turn_completed("turn-fail", _Status.failed, error=SimpleNamespace(message="bad", codex_error_info=None)),
         ]
     )
@@ -740,7 +835,8 @@ class _RatificationHandler:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host_approvals", [False, True, "profile"])
 async def test_auth_failure_activates_fallback_after_host_ratification(
-    monkeypatch: pytest.MonkeyPatch, host_approvals: bool | str,
+    monkeypatch: pytest.MonkeyPatch,
+    host_approvals: bool | str,
 ) -> None:
     sdk, state = _install_fake_sdk(monkeypatch)
 
@@ -756,7 +852,8 @@ async def test_auth_failure_activates_fallback_after_host_ratification(
     harness = CodexHarness(_fallback_config())
     if host_approvals == "profile":
         state.security_config = {
-            "default_permissions": "test", "permissions": {"test": {"filesystem": {":minimal": "read"}}},
+            "default_permissions": "test",
+            "permissions": {"test": {"filesystem": {":minimal": "read"}}},
         }
     capabilities = {HostCapability.PROVIDER_INTERACTION}
     if host_approvals:
@@ -770,7 +867,8 @@ async def test_auth_failure_activates_fallback_after_host_ratification(
     assert handler.requests[0].payload["model"] == "fallback-model"
     assert [call[0] for call in state.thread_calls] == ["start", "resume"]
     assert any(
-        isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated" for event in events
+        isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated"
+        for event in events
     )
     # The fallback switch announces the live model for failure attribution.
     model_events = [
@@ -783,15 +881,17 @@ async def test_auth_failure_activates_fallback_after_host_ratification(
         assert all(options["approvalPolicy"] == "untrusted" for _, options in state.thread_calls)
         assert all(options["approvalsReviewer"] == "user" for _, options in state.thread_calls)
     if host_approvals == "profile":
-        assert all(options["permissionProfile"] == "test" and "sandbox" not in options
-                   for _, options in state.thread_calls)
+        assert all(
+            options["permissionProfile"] == "test" and "sandbox" not in options for _, options in state.thread_calls
+        )
     await harness.stop()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host_approvals", [False, True, "profile"])
 async def test_declined_fallback_ratification_restores_the_native_thread(
-    monkeypatch: pytest.MonkeyPatch, host_approvals: bool | str,
+    monkeypatch: pytest.MonkeyPatch,
+    host_approvals: bool | str,
 ) -> None:
     sdk, state = _install_fake_sdk(monkeypatch)
 
@@ -803,7 +903,8 @@ async def test_declined_fallback_ratification_restores_the_native_thread(
     harness = CodexHarness(_fallback_config())
     if host_approvals == "profile":
         state.security_config = {
-            "default_permissions": "test", "permissions": {"test": {"filesystem": {":minimal": "read"}}},
+            "default_permissions": "test",
+            "permissions": {"test": {"filesystem": {":minimal": "read"}}},
         }
     capabilities = {HostCapability.PROVIDER_INTERACTION}
     if host_approvals:
@@ -824,7 +925,8 @@ async def test_declined_fallback_ratification_restores_the_native_thread(
     assert not state.clients[2].closed
     assert harness.provider_session_id == "thread-1"
     assert not any(
-        isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated" for event in events
+        isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated"
+        for event in events
     )
     # The native endpoint is restored and announced again after the decline.
     model_events = [
@@ -837,8 +939,9 @@ async def test_declined_fallback_ratification_restores_the_native_thread(
         assert all(options["approvalPolicy"] == "untrusted" for _, options in state.thread_calls)
         assert all(options["approvalsReviewer"] == "user" for _, options in state.thread_calls)
     if host_approvals == "profile":
-        assert all(options["permissionProfile"] == "test" and "sandbox" not in options
-                   for _, options in state.thread_calls)
+        assert all(
+            options["permissionProfile"] == "test" and "sandbox" not in options for _, options in state.thread_calls
+        )
     await harness.stop()
 
 
@@ -859,7 +962,12 @@ async def test_failed_native_reconnect_recovers_on_later_input(monkeypatch):
     monkeypatch.setattr(CodexHarness, "_connect", connect)
     state.scripts = [[_auth_failure("turn-hi")], [_turn_completed("turn-hi", _Status.completed)]]
     harness = CodexHarness(_fallback_config())
-    await harness.start(_context(interactions=_RatificationHandler(InteractionResponseStatus.DECLINED), host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION})))
+    await harness.start(
+        _context(
+            interactions=_RatificationHandler(InteractionResponseStatus.DECLINED),
+            host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION}),
+        )
+    )
     try:
         for expected in [TurnEventKind.FAILED, TurnEventKind.FAILED, TurnEventKind.FINISHED]:
             receipt = await harness.send(HarnessInput(content="hi"))
@@ -908,16 +1016,24 @@ async def test_append_developer_instructions_reads_effective_config():
     from unittest.mock import AsyncMock
     from openjiuwen.harness_providers.codex.options import append_developer_instructions, build_thread_options
 
-    sdk = SimpleNamespace(generated=SimpleNamespace(v2_all=SimpleNamespace(ConfigReadResponse=object)),
-                          ApprovalMode=SimpleNamespace(deny_all="deny", auto_review="auto"))
+    sdk = SimpleNamespace(
+        generated=SimpleNamespace(v2_all=SimpleNamespace(ConfigReadResponse=object)),
+        ApprovalMode=SimpleNamespace(deny_all="deny", auto_review="auto"),
+    )
     request = AsyncMock(return_value=SimpleNamespace(config=SimpleNamespace(developer_instructions="Existing rules")))
     client = SimpleNamespace(_ensure_initialized=AsyncMock(), _client=SimpleNamespace(request=request))
     config = CodexHarnessConfig(system_prompt_mode="append")
     for _ in range(2):
-        assert await append_developer_instructions(client, sdk, config, cwd="/work", system_prompt="Host rules") == "Existing rules\n\nHost rules"
+        assert (
+            await append_developer_instructions(client, sdk, config, cwd="/work", system_prompt="Host rules")
+            == "Existing rules\n\nHost rules"
+        )
     assert request.call_args.args == ("config/read", {"cwd": "/work", "includeLayers": False})
     config = CodexHarnessConfig(system_prompt_mode="append", thread_config={"developer_instructions": "Thread rules"})
-    assert await append_developer_instructions(client, sdk, config, cwd="/work", system_prompt="Host rules") == "Thread rules\n\nHost rules"
+    assert (
+        await append_developer_instructions(client, sdk, config, cwd="/work", system_prompt="Host rules")
+        == "Thread rules\n\nHost rules"
+    )
     replace = CodexHarnessConfig(system_prompt_mode="replace")
     options = build_thread_options(sdk=sdk, config=replace, model=None, cwd="/work", system_prompt="Host rules")
     assert options["developer_instructions"] == "Host rules"
@@ -928,13 +1044,18 @@ async def test_append_developer_instructions_reads_effective_config():
 @pytest.mark.asyncio
 async def test_append_read_failure_closes_codex_client(monkeypatch):
     from unittest.mock import AsyncMock
+
     sdk, state = _install_fake_sdk(monkeypatch)
-    monkeypatch.setattr("openjiuwen.harness_providers.codex.harness.append_developer_instructions", AsyncMock(side_effect=RuntimeError("config unavailable")))
+    monkeypatch.setattr(
+        "openjiuwen.harness_providers.codex.harness.append_developer_instructions",
+        AsyncMock(side_effect=RuntimeError("config unavailable")),
+    )
     harness = CodexHarness(CodexHarnessConfig(system_prompt_mode="append", inherit_process_env=False))
     with pytest.raises(Exception, match="startup failed"):
         await harness.start(_context())
     assert state.clients[0].closed
     assert not state.thread_calls
+
 
 def test_bad_request_is_classified_as_request_rejected() -> None:
     """A 400 names a rejected request, which needs configuration action, not a retry."""

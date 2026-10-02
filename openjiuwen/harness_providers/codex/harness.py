@@ -90,6 +90,8 @@ class _NativeTurnDrain:
     reader: asyncio.Task[None] | None = None
     confirmed: bool = False
     project_events: bool = True
+
+
 _APPROVAL_WAIT_TIMEOUT_S = 600.0
 # A human answering a question has no natural deadline; the reader thread
 # re-checks the event loop between slices instead of giving up.
@@ -240,16 +242,10 @@ class CodexHarness(SerializedTurnHarness):
             resume_thread_id = restored_thread
         elif context.resume_policy is ResumePolicy.REQUIRE_RESUME:
             raise HarnessProtocolError("Codex checkpoint does not carry a thread id to resume")
-        runtime_policy_fingerprint = (
-            context.runtime_policy.fingerprint
-            if context.runtime_policy is not None
-            else None
-        )
+        runtime_policy_fingerprint = context.runtime_policy.fingerprint if context.runtime_policy is not None else None
         self._runtime_policy_fingerprint = runtime_policy_fingerprint
         restored_policy_fingerprint = (
-            restored.get("runtime_policy_fingerprint")
-            if resume_thread_id and restored
-            else None
+            restored.get("runtime_policy_fingerprint") if resume_thread_id and restored else None
         )
         self._permission_fingerprint = (
             restored.get("permission_fingerprint")
@@ -268,8 +264,13 @@ class CodexHarness(SerializedTurnHarness):
             raise HarnessProtocolError("Codex native plugin snapshot changed since session activation")
         self._startup_source_fingerprint = source_fingerprint
         self._native_plugin_fingerprint = plugin_fingerprint
-        await asyncio.to_thread(install_skills, config.skills, provider="codex",
-                                cwd=context.cwd or config.cwd, conflict=config.skill_conflict)
+        await asyncio.to_thread(
+            install_skills,
+            config.skills,
+            provider="codex",
+            cwd=context.cwd or config.cwd,
+            conflict=config.skill_conflict,
+        )
         self._sdk = load_codex_sdk()
         self._loop = asyncio.get_running_loop()
         self._active_model = config.model
@@ -293,17 +294,23 @@ class CodexHarness(SerializedTurnHarness):
             raise ProviderStartupError(f"Codex startup failed: {type(exc).__name__}", error=error) from exc
         await self._emit_model_changed()
         await self._publish_checkpoint(
-            {"thread_id": self._thread_id, "resumed": resume_thread_id is not None,
-             "permission_fingerprint": self._permission_fingerprint,
-             "runtime_policy_fingerprint": runtime_policy_fingerprint,
-             "startup_source_fingerprint": self._startup_source_fingerprint,
-             "native_plugin_fingerprint": self._native_plugin_fingerprint},
+            {
+                "thread_id": self._thread_id,
+                "resumed": resume_thread_id is not None,
+                "permission_fingerprint": self._permission_fingerprint,
+                "runtime_policy_fingerprint": runtime_policy_fingerprint,
+                "startup_source_fingerprint": self._startup_source_fingerprint,
+                "native_plugin_fingerprint": self._native_plugin_fingerprint,
+            },
             reason=CheckpointReason.SESSION_ACTIVATED,
         )
         return self._thread_id
 
     async def _connect(
-        self, context: HarnessContext, *, model: CodexModelConfig | None,
+        self,
+        context: HarnessContext,
+        *,
+        model: CodexModelConfig | None,
         resume_thread_id: str | None,
     ) -> None:
         if self._stopping:
@@ -359,11 +366,13 @@ class CodexHarness(SerializedTurnHarness):
                 _install_approval_handler(client, self._approval_handler)
             if not config.inherit_process_env or sys.platform == "linux":
                 isolate_process_environment(client, sdk)
-            await validate_native_plugin_inventory(client, config.native_plugins, cwd=cwd)
-            if (
-                source_fingerprint is not None
-                and HostCapability.TOOL_APPROVAL not in context.host_capabilities
-            ):
+            await validate_native_plugin_inventory(
+                client,
+                config.native_plugins,
+                cwd=cwd,
+                env=process_env,
+            )
+            if source_fingerprint is not None and HostCapability.TOOL_APPROVAL not in context.host_capabilities:
                 await validate_effective_startup_sources(
                     client=client,
                     cwd=cwd,
@@ -374,13 +383,21 @@ class CodexHarness(SerializedTurnHarness):
                 )
             if config.system_prompt_mode == "append" and context.system_prompt:
                 options["developer_instructions"] = await append_developer_instructions(
-                    client, sdk, config, cwd=cwd, system_prompt=context.system_prompt,
+                    client,
+                    sdk,
+                    config,
+                    cwd=cwd,
+                    system_prompt=context.system_prompt,
                 )
             confirmed_model = ""
             if HostCapability.TOOL_APPROVAL in context.host_capabilities:
                 thread, confirmed_model, fingerprint = await connect_with_host_approvals(
-                    client=client, sdk=sdk, options=options, resume_thread_id=resume_thread_id,
-                    raw_events=config.experimental_raw_events, expected_fingerprint=self._permission_fingerprint,
+                    client=client,
+                    sdk=sdk,
+                    options=options,
+                    resume_thread_id=resume_thread_id,
+                    raw_events=config.experimental_raw_events,
+                    expected_fingerprint=self._permission_fingerprint,
                     source_fingerprint=source_fingerprint,
                     allow_native_plugins=config.native_plugins is not None,
                     managed_mcp_names=tuple(server.name for server in context.mcp_servers),
@@ -589,8 +606,11 @@ class CodexHarness(SerializedTurnHarness):
                 continue
             if turn.abort_requested:
                 return TurnEventKind.ABORTED, interrupted_result(
-                    turn, provider_name=PROVIDER_NAME, timing=timing,
-                    messages=tuple(accumulator.messages), final_output=accumulator.last_text_output,
+                    turn,
+                    provider_name=PROVIDER_NAME,
+                    timing=timing,
+                    messages=tuple(accumulator.messages),
+                    final_output=accumulator.last_text_output,
                     usage=accumulator.total_usage,
                 )
             return kind, result
@@ -629,8 +649,12 @@ class CodexHarness(SerializedTurnHarness):
                 native.project_events = False
 
     async def _read_native_turn(
-        self, native: _NativeTurnDrain, thread: Any, turn: PendingTurn,
-        text: str, accumulator: CodexTurnAccumulator,
+        self,
+        native: _NativeTurnDrain,
+        thread: Any,
+        turn: PendingTurn,
+        text: str,
+        accumulator: CodexTurnAccumulator,
     ) -> None:
         handle = None
         try:
@@ -673,13 +697,17 @@ class CodexHarness(SerializedTurnHarness):
                     else:
                         try:
                             notification = await asyncio.wait_for(
-                                asyncio.shield(pending), timeout=self._config.turn_idle_timeout_s,
+                                asyncio.shield(pending),
+                                timeout=self._config.turn_idle_timeout_s,
                             )
                         except asyncio.TimeoutError:
                             interrupted = await self._interrupt_handle(handle)
-                            native.failure.set_result(_TurnIdleTimeout(
-                                notifications_seen=accumulator.notifications_seen, interrupted=interrupted,
-                            ))
+                            native.failure.set_result(
+                                _TurnIdleTimeout(
+                                    notifications_seen=accumulator.notifications_seen,
+                                    interrupted=interrupted,
+                                )
+                            )
                             # Keep the same SDK read alive: cancelling anext
                             # unregisters its queue while to_thread can keep
                             # consuming the only terminal notification.
@@ -718,7 +746,10 @@ class CodexHarness(SerializedTurnHarness):
             logger.exception("[codex] notification observer raised")
 
     async def send(
-        self, content: HarnessInput, *, mode: DeliveryMode = DeliveryMode.AUTO,
+        self,
+        content: HarnessInput,
+        *,
+        mode: DeliveryMode = DeliveryMode.AUTO,
     ) -> SendReceipt:
         try:
             return await super().send(content, mode=mode)
@@ -876,11 +907,15 @@ class CodexHarness(SerializedTurnHarness):
         self._fallback_activated = True
         await self._emit_model_changed()
         await self._publish_checkpoint(
-            {"thread_id": self._thread_id, "resumed": True, "fallback": True,
-             "permission_fingerprint": self._permission_fingerprint,
-             "runtime_policy_fingerprint": self._runtime_policy_fingerprint,
-             "startup_source_fingerprint": self._startup_source_fingerprint,
-             "native_plugin_fingerprint": self._native_plugin_fingerprint},
+            {
+                "thread_id": self._thread_id,
+                "resumed": True,
+                "fallback": True,
+                "permission_fingerprint": self._permission_fingerprint,
+                "runtime_policy_fingerprint": self._runtime_policy_fingerprint,
+                "startup_source_fingerprint": self._startup_source_fingerprint,
+                "native_plugin_fingerprint": self._native_plugin_fingerprint,
+            },
             reason=CheckpointReason.STATE_CHANGED,
         )
         await self._emit(
@@ -981,8 +1016,13 @@ class CodexHarness(SerializedTurnHarness):
         request = ToolApprovalRequest(
             request_id=f"codex-approval:{item_id}",
             call_id=item_id,
-            tool_name=(f"mcp__{params['serverName']}" if mcp_approval else
-                       "apply_patch" if method == "item/fileChange/requestApproval" else "shell"),
+            tool_name=(
+                f"mcp__{params['serverName']}"
+                if mcp_approval
+                else "apply_patch"
+                if method == "item/fileChange/requestApproval"
+                else "shell"
+            ),
             arguments=arguments,
             description=str(params.get("message") or "") if mcp_approval else None,
             provider_session_id=self._thread_id,
@@ -991,7 +1031,8 @@ class CodexHarness(SerializedTurnHarness):
         )
         response = await self._request_interaction(request)
         allowed = response is not None and response.decision in (
-            ToolApprovalDecision.ALLOW, ToolApprovalDecision.ALLOW_FOR_SESSION,
+            ToolApprovalDecision.ALLOW,
+            ToolApprovalDecision.ALLOW_FOR_SESSION,
         )
         if mcp_approval:
             return {"action": "accept", "content": {}} if allowed else {"action": "decline"}

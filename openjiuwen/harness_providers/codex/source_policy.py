@@ -27,15 +27,37 @@ from openjiuwen.harness_protocol import (
 from openjiuwen.harness_providers.codex.config import CodexHarnessConfig
 
 # Restricted startup accepts only configuration with understood source behavior.
-_CONFIG_KEYS = frozenset({
-    "default_permissions", "permissions", "model", "model_provider", "model_providers",
-    "approval_policy", "approvals_reviewer", "sandbox_mode", "sandbox_workspace_write",
-    "model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "service_tier",
-    "project_doc_max_bytes", "allow_login_shell", "features",
-})
-_DISABLED_FEATURES = frozenset({
-    "auth_elicitation", "memories", "mentions_v2", "plugins", "remote_control", "remote_plugin", "tool_suggest",
-})
+_CONFIG_KEYS = frozenset(
+    {
+        "default_permissions",
+        "permissions",
+        "model",
+        "model_provider",
+        "model_providers",
+        "approval_policy",
+        "approvals_reviewer",
+        "sandbox_mode",
+        "sandbox_workspace_write",
+        "model_reasoning_effort",
+        "model_reasoning_summary",
+        "model_verbosity",
+        "service_tier",
+        "project_doc_max_bytes",
+        "allow_login_shell",
+        "features",
+    }
+)
+_DISABLED_FEATURES = frozenset(
+    {
+        "auth_elicitation",
+        "memories",
+        "mentions_v2",
+        "plugins",
+        "remote_control",
+        "remote_plugin",
+        "tool_suggest",
+    }
+)
 _FEATURE_KEYS = frozenset({"enable_request_compression", "default_mode_request_user_input"}) | _DISABLED_FEATURES
 RESTRICTED_STARTUP_OVERRIDES = ("project_doc_max_bytes=0", "allow_login_shell=false") + tuple(
     f"features.{name}=false" for name in sorted(_DISABLED_FEATURES)
@@ -43,19 +65,54 @@ RESTRICTED_STARTUP_OVERRIDES = ("project_doc_max_bytes=0", "allow_login_shell=fa
 # 0.144.4 materializes these defaults even when no source supplied them. Only
 # these exact inert values are accepted; an explicit source still cannot set them.
 _EFFECTIVE_DEFAULTS = {
-    "mcp_servers": {}, "plugins": {}, "marketplaces": {}, "profiles": {},
-    "project_doc_fallback_filenames": [], "hide_agent_reasoning": False,
+    "mcp_servers": {},
+    "plugins": {},
+    "marketplaces": {},
+    "profiles": {},
+    "project_doc_fallback_filenames": [],
+    "hide_agent_reasoning": False,
     "history": {"max_bytes": None, "persistence": "save-all"},
-    "shell_environment_policy": dict.fromkeys((
-        "exclude", "experimental_use_profile", "ignore_default_excludes", "include_only", "inherit", "set",
-    )),
+    "shell_environment_policy": dict.fromkeys(
+        (
+            "exclude",
+            "experimental_use_profile",
+            "ignore_default_excludes",
+            "include_only",
+            "inherit",
+            "set",
+        )
+    ),
 }
 _BEARER_TOKEN_RE = re.compile(r"Bearer [A-Za-z0-9._~-]{32,}")
-_EFFECTIVE_MCP_KEYS = frozenset({
-    "url", "http_headers", "required", "startup_timeout_sec",
-    "default_tools_approval_mode", "enabled_tools", "disabled_tools",
-    "enabled", "environment_id", "tool_timeout_sec",
-})
+_HOOK_HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_EFFECTIVE_HOOK_EVENTS = frozenset(
+    {
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "PreCompact",
+        "PostCompact",
+        "SessionStart",
+        "UserPromptSubmit",
+        "SubagentStart",
+        "SubagentStop",
+        "Stop",
+    }
+)
+_EFFECTIVE_MCP_KEYS = frozenset(
+    {
+        "url",
+        "http_headers",
+        "required",
+        "startup_timeout_sec",
+        "default_tools_approval_mode",
+        "enabled_tools",
+        "disabled_tools",
+        "enabled",
+        "environment_id",
+        "tool_timeout_sec",
+    }
+)
 
 
 def _loopback_http_url(value: str) -> bool:
@@ -86,9 +143,7 @@ def _validate_managed_mcp_server(server: McpServerConfig) -> None:
         or set(headers) != {"Authorization"}
         or _BEARER_TOKEN_RE.fullmatch(authorization) is None
     ):
-        raise HarnessProtocolError(
-            "Codex restricted startup admits only authenticated loopback HTTP MCP"
-        )
+        raise HarnessProtocolError("Codex restricted startup admits only authenticated loopback HTTP MCP")
 
 
 def _validate_effective_managed_mcp_servers(
@@ -105,9 +160,7 @@ def _validate_effective_managed_mcp_servers(
             raise HarnessProtocolError("Codex effective MCP server configuration is invalid")
         unsupported = sorted(set(server) - _EFFECTIVE_MCP_KEYS)
         if unsupported:
-            raise HarnessProtocolError(
-                f"Codex effective MCP server has unsupported settings: {unsupported}"
-            )
+            raise HarnessProtocolError(f"Codex effective MCP server has unsupported settings: {unsupported}")
         if not _loopback_http_url(server.get("url")):
             raise HarnessProtocolError("Codex effective MCP server is not loopback HTTP")
         headers = server.get("http_headers")
@@ -120,21 +173,14 @@ def _validate_effective_managed_mcp_servers(
         if server.get("required") is not True:
             raise HarnessProtocolError("Codex managed MCP server must remain required")
         if server.get("default_tools_approval_mode") != expected_approval_mode:
-            raise HarnessProtocolError(
-                "Codex managed MCP tools changed their effective approval mode"
-            )
+            raise HarnessProtocolError("Codex managed MCP tools changed their effective approval mode")
         if (
             server.get("enabled") is not True
             or server.get("environment_id") != "local"
             or server.get("tool_timeout_sec") is not None
         ):
-            defaults = {
-                key: server.get(key)
-                for key in ("enabled", "environment_id", "tool_timeout_sec")
-            }
-            raise HarnessProtocolError(
-                f"Codex managed MCP server changed its effective defaults: {defaults}"
-            )
+            defaults = {key: server.get(key) for key in ("enabled", "environment_id", "tool_timeout_sec")}
+            raise HarnessProtocolError(f"Codex managed MCP server changed its effective defaults: {defaults}")
 
 
 def _untrusted_project(cwd: str | None) -> dict[str, dict[str, str]]:
@@ -147,7 +193,8 @@ def restricted_startup_overrides(cwd: str | None, *, allow_native_plugins: bool 
     """Pin ephemeral cwd trust; never persist or admit user project trust tables."""
     project = next(iter(_untrusted_project(cwd)))
     overrides = tuple(
-        override for override in RESTRICTED_STARTUP_OVERRIDES
+        override
+        for override in RESTRICTED_STARTUP_OVERRIDES
         if not (allow_native_plugins and override == "features.plugins=false")
     )
     return (*overrides, f'projects={{{json.dumps(project)}={{trust_level="untrusted"}}}}')
@@ -164,7 +211,7 @@ def validate_source_config(
     require_permissions: bool = True,
 ) -> None:
     """Fail closed on config sources/extensions this restricted mode cannot admit."""
-    allowed_keys = _CONFIG_KEYS | ({"plugins", "marketplaces"} if allow_native_plugins else set())
+    allowed_keys = _CONFIG_KEYS | ({"plugins", "marketplaces", "hooks"} if allow_native_plugins else set())
     disabled_features = _DISABLED_FEATURES - ({"plugins"} if allow_native_plugins else set())
     for key, value in values.items():
         if effective and value is None:
@@ -179,6 +226,31 @@ def validate_source_config(
         if effective and key in _EFFECTIVE_DEFAULTS and value == _EFFECTIVE_DEFAULTS[key]:
             continue
         if effective and key == "projects" and value == _untrusted_project(cwd):
+            continue
+        if allow_native_plugins and key == "hooks":
+            state = value.get("state") if isinstance(value, Mapping) else None
+            allowed_hook_keys = {"state"} | (_EFFECTIVE_HOOK_EVENTS if effective else set())
+            if (
+                not isinstance(value, Mapping)
+                or set(value) != allowed_hook_keys
+                or not isinstance(state, Mapping)
+                or effective
+                and any(value[event] != [] for event in _EFFECTIVE_HOOK_EVENTS)
+            ):
+                raise HarnessProtocolError("Codex restricted startup admits only native hook trust state")
+            for hook_key, record in state.items():
+                if (
+                    not isinstance(hook_key, str)
+                    or not hook_key
+                    or not isinstance(record, Mapping)
+                    or set(record) != {"trusted_hash"}
+                    or not isinstance(record.get("trusted_hash"), str)
+                    or _HOOK_HASH_RE.fullmatch(record["trusted_hash"]) is None
+                ):
+                    raise HarnessProtocolError("Codex native hook trust state is invalid")
+            # This source can only persist hashes, not executable definitions.
+            # Exact enabled hook source, bytes, definition, hash and trust are
+            # independently verified through hooks/list before Session start.
             continue
         if key not in allowed_keys:
             raise HarnessProtocolError(f"Codex restricted startup does not admit configuration key {key!r}")
@@ -234,9 +306,8 @@ def validate_startup_sources(config: CodexHarnessConfig, context: HarnessContext
         return None
     if config.inherit_process_env:
         raise HarnessProtocolError("Codex restricted startup requires an isolated env")
-    if (
-        not config.bypass_approvals_and_sandbox
-        and (HostCapability.TOOL_APPROVAL not in context.host_capabilities or context.interactions is None)
+    if not config.bypass_approvals_and_sandbox and (
+        HostCapability.TOOL_APPROVAL not in context.host_capabilities or context.interactions is None
     ):
         raise HarnessProtocolError("Codex restricted startup requires host tool approvals")
     if context.mcp_servers:
@@ -310,15 +381,41 @@ def validate_startup_sources(config: CodexHarnessConfig, context: HarnessContext
         if not Path(source.dir).is_absolute():
             raise HarnessProtocolError("Codex restricted skill sources must use absolute paths")
         _admit_tree(Path(source.dir), roots)
-    scope = {"roots": [str(root) for root in roots], "cwd": str(cwd),
-             "homes": {key: str(path) for key, path in homes.items()},
-             "skills": [(str(Path(source.dir).resolve()), source.mode, source.enabled_skills)
-                        for source in config.skills],
-             "native_plugins": [
-                 (plugin.plugin_id, plugin.source_type, str(Path(plugin.source_locator).resolve()),
-                  plugin.version, plugin.content_sha256, plugin.enabled,
-                  plugin.required_components, plugin.mcp_server_names)
-                 for plugin in config.native_plugins or ()
-             ] if managed_plugins else None,
-             "managed_mcp_names": sorted(server.name for server in context.mcp_servers)}
+    scope = {
+        "roots": [str(root) for root in roots],
+        "cwd": str(cwd),
+        "homes": {key: str(path) for key, path in homes.items()},
+        "skills": [(str(Path(source.dir).resolve()), source.mode, source.enabled_skills) for source in config.skills],
+        "native_plugins": [
+            (
+                plugin.plugin_id,
+                plugin.source_type,
+                str(Path(plugin.source_locator).resolve()),
+                plugin.version,
+                plugin.content_sha256,
+                plugin.enabled,
+                plugin.required_components,
+                plugin.mcp_server_names,
+                [
+                    (
+                        hook.key,
+                        hook.event_name,
+                        hook.current_hash,
+                        hook.command,
+                        hook.command_windows,
+                        hook.matcher,
+                        hook.async_mode,
+                        hook.timeout_s,
+                        hook.status_message,
+                        hook.additional_context_limit,
+                    )
+                    for hook in plugin.hooks
+                ],
+            )
+            for plugin in config.native_plugins or ()
+        ]
+        if managed_plugins
+        else None,
+        "managed_mcp_names": sorted(server.name for server in context.mcp_servers),
+    }
     return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()

@@ -328,6 +328,44 @@ def test_full_access_effective_sources_do_not_require_a_permission_profile(tmp_p
     )
 
 
+def test_native_hook_sources_admit_only_trust_hash_state(tmp_path):
+    values = tomllib.loads(
+        "\n".join(restricted_startup_overrides(str(tmp_path), allow_native_plugins=True))
+    )
+    state = {"state": {"plugin:key": {"trusted_hash": "sha256:" + "a" * 64}}}
+    values["hooks"] = {
+        **{event: [] for event in (
+            "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact",
+            "PostCompact", "SessionStart", "UserPromptSubmit", "SubagentStart",
+            "SubagentStop", "Stop",
+        )},
+        **state,
+    }
+
+    validate_source_config(
+        values,
+        effective=True,
+        cwd=str(tmp_path),
+        allow_native_plugins=True,
+        require_permissions=False,
+    )
+    validate_source_config(
+        {"hooks": state},
+        effective=False,
+        cwd=str(tmp_path),
+        allow_native_plugins=True,
+        require_permissions=False,
+    )
+    with pytest.raises(HarnessProtocolError, match="only native hook trust state"):
+        validate_source_config(
+            {"hooks": {"UserPromptSubmit": []}},
+            effective=False,
+            cwd=str(tmp_path),
+            allow_native_plugins=True,
+            require_permissions=False,
+        )
+
+
 @pytest.mark.asyncio
 async def test_full_access_reads_back_effective_source_controls_before_start(tmp_path):
     from types import SimpleNamespace

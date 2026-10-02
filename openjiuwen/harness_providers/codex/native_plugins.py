@@ -26,8 +26,98 @@ from openjiuwen.harness_providers.native_plugin_snapshot import (
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _IDENTITY_PART_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-_SUPPORTED_COMPONENTS = frozenset({"skills", "mcp"})
-_UNSUPPORTED_MANIFEST_COMPONENTS = ("hooks", "commands", "agents", "apps", "appTemplates")
+_SUPPORTED_COMPONENTS = frozenset({"skills", "mcp", "hooks"})
+_UNSUPPORTED_MANIFEST_COMPONENTS = ("commands", "agents", "apps", "appTemplates")
+_HOOK_EVENTS = {
+    "PreToolUse": "preToolUse",
+    "PermissionRequest": "permissionRequest",
+    "PostToolUse": "postToolUse",
+    "PreCompact": "preCompact",
+    "PostCompact": "postCompact",
+    "SessionStart": "sessionStart",
+    "UserPromptSubmit": "userPromptSubmit",
+    "SubagentStart": "subagentStart",
+    "SubagentStop": "subagentStop",
+    "Stop": "stop",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class CodexNativeHookConfig:
+    """One host-reviewed command hook at its exact Codex trust hash.
+
+    Codex owns trust persistence.  The host never writes that private store;
+    it only requires ``hooks/list`` to report the definition the user reviewed
+    as trusted before a Session may start.
+    """
+
+    key: str
+    event_name: str
+    current_hash: str
+    command: str
+    command_windows: str | None = None
+    matcher: str | None = None
+    async_mode: bool = False
+    timeout_s: int = 600
+    status_message: str | None = None
+    additional_context_limit: int = 2500
+
+    def __post_init__(self) -> None:
+        for name in ("key", "event_name", "current_hash", "command"):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or len(value.encode("utf-8")) > 4096
+                or any(ord(char) < 32 for char in value)
+            ):
+                raise ValueError(f"Codex native hook {name} must be a bounded normalized string")
+        if self.event_name not in _HOOK_EVENTS.values():
+            raise ValueError(f"unsupported Codex native hook event: {self.event_name}")
+        if self.matcher is not None and (not isinstance(self.matcher, str) or len(self.matcher.encode("utf-8")) > 4096):
+            raise TypeError("Codex native hook matcher must be a bounded string or null")
+        if self.command_windows is not None and (
+            not isinstance(self.command_windows, str)
+            or not self.command_windows
+            or len(self.command_windows.encode("utf-8")) > 4096
+        ):
+            raise TypeError("Codex native hook command_windows must be a bounded string or null")
+        if not isinstance(self.async_mode, bool):
+            raise TypeError("Codex native hook async_mode must be a boolean")
+        if isinstance(self.timeout_s, bool) or not isinstance(self.timeout_s, int) or self.timeout_s < 0:
+            raise ValueError("Codex native hook timeout_s must be a non-negative integer")
+        if self.status_message is not None and (
+            not isinstance(self.status_message, str) or len(self.status_message.encode("utf-8")) > 4096
+        ):
+            raise TypeError("Codex native hook status_message must be a bounded string or null")
+        if (
+            isinstance(self.additional_context_limit, bool)
+            or not isinstance(self.additional_context_limit, int)
+            or self.additional_context_limit < 0
+        ):
+            raise ValueError("Codex native hook additional_context_limit must be a non-negative integer")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "CodexNativeHookConfig":
+        if not isinstance(value, Mapping):
+            raise TypeError("Codex native hook configuration must be an object")
+        known = {
+            "key",
+            "event_name",
+            "current_hash",
+            "command",
+            "command_windows",
+            "matcher",
+            "async_mode",
+            "timeout_s",
+            "status_message",
+            "additional_context_limit",
+        }
+        unknown = sorted(set(value) - known)
+        if unknown:
+            raise ValueError(f"unknown Codex native hook fields: {', '.join(unknown)}")
+        return cls(**dict(value))  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +137,7 @@ class CodexNativePluginConfig:
     enabled: bool = True
     required_components: tuple[str, ...] = ("skills", "mcp")
     mcp_server_names: tuple[str, ...] = ()
+    hooks: tuple[CodexNativeHookConfig, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("plugin_id", "source_type", "source_locator", "version"):
@@ -60,7 +151,7 @@ class CodexNativePluginConfig:
         if not _IDENTITY_PART_RE.fullmatch(self.version):
             raise ValueError("Codex native plugin version must be a path-safe identifier")
         if self.source_type != "local":
-            raise ValueError("Codex C1 native plugins currently require a prepared local marketplace source")
+            raise ValueError("Codex native plugins currently require a prepared local marketplace source")
         if not Path(self.source_locator).is_absolute():
             raise ValueError("Codex local native plugin source_locator must be an absolute path")
         if not isinstance(self.content_sha256, str) or not _DIGEST_RE.fullmatch(self.content_sha256):
@@ -83,19 +174,43 @@ class CodexNativePluginConfig:
             raise ValueError(f"unsupported Codex native plugin components: {', '.join(sorted(unsupported))}")
         if "mcp" not in self.required_components and self.mcp_server_names:
             raise ValueError("Codex native plugin MCP server names require the mcp component")
+        if not isinstance(self.hooks, (list, tuple)) or any(
+            not isinstance(hook, CodexNativeHookConfig) for hook in self.hooks
+        ):
+            raise TypeError("Codex native plugin hooks must be an array of CodexNativeHookConfig values")
+        if len({hook.key for hook in self.hooks}) != len(self.hooks):
+            raise ValueError("Codex native plugin hook keys must be unique")
+        object.__setattr__(self, "hooks", tuple(self.hooks))
+        if "hooks" not in self.required_components and self.hooks:
+            raise ValueError("Codex native plugin hook snapshots require the hooks component")
+        if "hooks" in self.required_components and not self.hooks:
+            raise ValueError("Codex native plugin hooks component requires reviewed hook snapshots")
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "CodexNativePluginConfig":
         if not isinstance(value, Mapping):
             raise TypeError("Codex native plugin configuration must be an object")
         known = {
-            "plugin_id", "source_type", "source_locator", "version", "content_sha256",
-            "enabled", "required_components", "mcp_server_names",
+            "plugin_id",
+            "source_type",
+            "source_locator",
+            "version",
+            "content_sha256",
+            "enabled",
+            "required_components",
+            "mcp_server_names",
+            "hooks",
         }
         unknown = sorted(set(value) - known)
         if unknown:
             raise ValueError(f"unknown Codex native plugin fields: {', '.join(unknown)}")
-        return cls(**dict(value))  # type: ignore[arg-type]
+        values = dict(value)
+        if "hooks" in values:
+            raw_hooks = values["hooks"]
+            if not isinstance(raw_hooks, (list, tuple)):
+                raise TypeError("Codex native plugin hooks must be an array")
+            values["hooks"] = tuple(CodexNativeHookConfig.from_mapping(hook) for hook in raw_hooks)
+        return cls(**values)  # type: ignore[arg-type]
 
 
 class _PluginResponse(BaseModel):
@@ -162,19 +277,125 @@ def _manifest_path(root: Path, value: Any, *, default: str, label: str) -> Path:
     return resolved
 
 
+def _hook_paths(root: Path, value: Any) -> tuple[Path, ...]:
+    raw = "hooks/hooks.json" if value is None else value
+    values = (raw,) if isinstance(raw, str) else tuple(raw) if isinstance(raw, list) else ()
+    if not values or any(not isinstance(item, str) for item in values):
+        raise HarnessProtocolError("managed Codex native plugin hooks require relative JSON path declarations")
+    paths = tuple(_manifest_path(root, item, default="hooks/hooks.json", label="hooks") for item in values)
+    if len(set(paths)) != len(paths):
+        raise HarnessProtocolError("Codex native plugin hook paths must be unique")
+    return paths
+
+
+def _package_hook_definitions(root: Path, manifest: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    definitions: list[dict[str, Any]] = []
+    for path in _hook_paths(root, manifest.get("hooks")):
+        configured = _load_json(path, label="hooks").get("hooks")
+        if not isinstance(configured, Mapping):
+            raise HarnessProtocolError(f"Codex native plugin hooks must contain a hooks object: {path}")
+        for event, groups in configured.items():
+            event_name = _HOOK_EVENTS.get(str(event))
+            if event_name is None or not isinstance(groups, list):
+                raise HarnessProtocolError(f"unsupported Codex native plugin hook event: {event}")
+            for group in groups:
+                if not isinstance(group, Mapping) or not isinstance(group.get("hooks"), list):
+                    raise HarnessProtocolError("Codex native plugin hook matcher group is invalid")
+                matcher = group.get("matcher")
+                if matcher is not None and not isinstance(matcher, str):
+                    raise HarnessProtocolError("Codex native plugin hook matcher must be a string")
+                for handler in group["hooks"]:
+                    if not isinstance(handler, Mapping) or handler.get("type") != "command":
+                        raise HarnessProtocolError("Codex native plugins admit only command hook handlers")
+                    command = handler.get("command")
+                    if not isinstance(command, str) or not command.strip():
+                        raise HarnessProtocolError("Codex native plugin hook command is required")
+                    timeout = handler.get("timeout", handler.get("timeoutSec", 600))
+                    async_mode = handler.get("async", False)
+                    status_message = handler.get("statusMessage")
+                    command_windows = handler.get("commandWindows")
+                    additional_context_limit = handler.get("additionalContextLimit", 2500)
+                    if (
+                        isinstance(timeout, bool)
+                        or not isinstance(timeout, int)
+                        or timeout < 0
+                        or not isinstance(async_mode, bool)
+                        or status_message is not None
+                        and not isinstance(status_message, str)
+                        or command_windows is not None
+                        and not isinstance(command_windows, str)
+                        or isinstance(additional_context_limit, bool)
+                        or not isinstance(additional_context_limit, int)
+                        or additional_context_limit < 0
+                    ):
+                        raise HarnessProtocolError("Codex native plugin hook handler settings are invalid")
+                    unsupported = set(handler) - {
+                        "type",
+                        "command",
+                        "commandWindows",
+                        "timeout",
+                        "timeoutSec",
+                        "async",
+                        "statusMessage",
+                        "additionalContextLimit",
+                    }
+                    if unsupported:
+                        raise HarnessProtocolError(
+                            f"unsupported Codex native plugin hook settings: {', '.join(sorted(unsupported))}"
+                        )
+                    definitions.append(
+                        {
+                            "event_name": event_name,
+                            "command": command,
+                            "command_windows": command_windows,
+                            "matcher": matcher,
+                            "async_mode": async_mode,
+                            "timeout_s": timeout,
+                            "status_message": status_message,
+                            "additional_context_limit": additional_context_limit,
+                        }
+                    )
+    return tuple(definitions)
+
+
+def _configured_hook_definitions(plugin: CodexNativePluginConfig) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "event_name": hook.event_name,
+            "command": hook.command,
+            "command_windows": hook.command_windows,
+            "matcher": hook.matcher,
+            "async_mode": hook.async_mode,
+            "timeout_s": hook.timeout_s,
+            "status_message": hook.status_message,
+            "additional_context_limit": hook.additional_context_limit,
+        }
+        for hook in plugin.hooks
+    )
+
+
+def _definition_sort_key(value: Mapping[str, Any]) -> str:
+    return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
+
+
+def _is_path_inside(path: Path, root: Path) -> bool:
+    return path.is_absolute() and path.resolve().is_relative_to(root)
+
+
 def validate_native_plugin_packages(
     plugins: tuple[CodexNativePluginConfig, ...] | None,
     *,
     env: Mapping[str, str],
     protocol_mcp_names: tuple[str, ...] = (),
 ) -> str | None:
-    """Validate prepared package bytes and C1 component boundaries."""
+    """Validate prepared package bytes and admitted native component boundaries."""
     if plugins is None:
         return None
     codex_home = _codex_home(env)
     if len({plugin.plugin_id for plugin in plugins}) != len(plugins):
         raise HarnessProtocolError("Codex native plugin IDs must be unique")
     native_mcp_names: set[str] = set()
+    native_hook_keys: set[str] = set()
     fingerprint = hashlib.sha256()
     for plugin in sorted(plugins, key=lambda item: item.plugin_id):
         source = Path(plugin.source_locator)
@@ -196,7 +417,7 @@ def validate_native_plugin_packages(
         forbidden = [key for key in _UNSUPPORTED_MANIFEST_COMPONENTS if manifest.get(key)]
         if forbidden:
             raise HarnessProtocolError(
-                f"Codex native plugin {plugin.plugin_id} requires unsupported C2 components: {', '.join(forbidden)}"
+                f"Codex native plugin {plugin.plugin_id} requires unsupported components: {', '.join(forbidden)}"
             )
         if "skills" in plugin.required_components:
             skills = _manifest_path(root, manifest.get("skills"), default="skills", label="Skills")
@@ -221,6 +442,19 @@ def validate_native_plugin_packages(
                     f"Codex native plugin MCP server name conflict: {', '.join(sorted(overlap))}"
                 )
             native_mcp_names.update(actual_names)
+        if "hooks" in plugin.required_components:
+            overlap = native_hook_keys & {hook.key for hook in plugin.hooks}
+            if overlap:
+                raise HarnessProtocolError(f"Codex native plugin hook key conflict: {', '.join(sorted(overlap))}")
+            native_hook_keys.update(hook.key for hook in plugin.hooks)
+            actual_hooks = _package_hook_definitions(root, manifest)
+            expected_hooks = _configured_hook_definitions(plugin)
+            if sorted(actual_hooks, key=_definition_sort_key) != sorted(expected_hooks, key=_definition_sort_key):
+                raise HarnessProtocolError(f"Codex native plugin hook definition snapshot changed: {plugin.plugin_id}")
+        elif manifest.get("hooks") or (root / "hooks/hooks.json").exists():
+            raise HarnessProtocolError(
+                f"Codex native plugin {plugin.plugin_id} declares hooks without an authorized snapshot"
+            )
         snapshot = {
             "plugin_id": plugin.plugin_id,
             "source_type": plugin.source_type,
@@ -230,6 +464,21 @@ def validate_native_plugin_packages(
             "enabled": plugin.enabled,
             "required_components": plugin.required_components,
             "mcp_server_names": plugin.mcp_server_names,
+            "hooks": [
+                {
+                    "key": hook.key,
+                    "event_name": hook.event_name,
+                    "current_hash": hook.current_hash,
+                    "command": hook.command,
+                    "command_windows": hook.command_windows,
+                    "matcher": hook.matcher,
+                    "async_mode": hook.async_mode,
+                    "timeout_s": hook.timeout_s,
+                    "status_message": hook.status_message,
+                    "additional_context_limit": hook.additional_context_limit,
+                }
+                for hook in plugin.hooks
+            ],
         }
         fingerprint.update(json.dumps(snapshot, sort_keys=True).encode())
     protocol_names = {name.replace("-", "_") for name in protocol_mcp_names}
@@ -264,6 +513,7 @@ async def validate_native_plugin_inventory(
     plugins: tuple[CodexNativePluginConfig, ...] | None,
     *,
     cwd: str | None,
+    env: Mapping[str, str],
 ) -> None:
     """Ask the native loader to confirm exact enablement and components."""
     if plugins is None:
@@ -286,13 +536,12 @@ async def validate_native_plugin_inventory(
                 summaries[summary["id"]] = resolved
     expected_ids = {plugin.plugin_id for plugin in plugins}
     unexpected_enabled = sorted(
-        plugin_id for plugin_id, summary in summaries.items()
+        plugin_id
+        for plugin_id, summary in summaries.items()
         if summary.get("installed") is True and summary.get("enabled") is True and plugin_id not in expected_ids
     )
     if unexpected_enabled:
-        raise HarnessProtocolError(
-            f"unapproved Codex native plugins are enabled: {', '.join(unexpected_enabled)}"
-        )
+        raise HarnessProtocolError(f"unapproved Codex native plugins are enabled: {', '.join(unexpected_enabled)}")
     for plugin in plugins:
         summary = summaries.get(plugin.plugin_id)
         if (summary is None or summary.get("installed") is not True) and not plugin.enabled:
@@ -320,12 +569,77 @@ async def validate_native_plugin_inventory(
         detail = read.model_dump(mode="json").get("plugin") or {}
         if not isinstance(detail, Mapping):
             raise HarnessProtocolError(f"Codex native plugin details are unavailable: {plugin.plugin_id}")
-        if detail.get("hooks"):
-            raise HarnessProtocolError(f"Codex native plugin hooks are outside C1: {plugin.plugin_id}")
+        actual_hook_summaries = {
+            (str(item.get("eventName") or ""), str(item.get("key") or ""))
+            for item in detail.get("hooks") or ()
+            if isinstance(item, Mapping)
+        }
+        expected_hook_summaries = {(hook.event_name, hook.key) for hook in plugin.hooks}
+        if actual_hook_summaries != expected_hook_summaries:
+            raise HarnessProtocolError(f"Codex native plugin hook inventory changed: {plugin.plugin_id}")
         if "skills" in plugin.required_components and not detail.get("skills"):
             raise HarnessProtocolError(f"Codex native plugin Skills were not loaded: {plugin.plugin_id}")
         if "mcp" in plugin.required_components and set(detail.get("mcpServers") or ()) != set(plugin.mcp_server_names):
             raise HarnessProtocolError(f"Codex native plugin MCP inventory changed: {plugin.plugin_id}")
+    await _validate_native_hook_inventory(client, plugins, cwd=cwd, env=env)
+
+
+async def _validate_native_hook_inventory(
+    client: Any,
+    plugins: tuple[CodexNativePluginConfig, ...],
+    *,
+    cwd: str | None,
+    env: Mapping[str, str],
+) -> None:
+    expected = {hook.key: (plugin, hook) for plugin in plugins if plugin.enabled for hook in plugin.hooks}
+    if not expected:
+        return
+    response = await client._client.request(
+        "hooks/list",
+        {"cwds": [cwd] if cwd else []},
+        response_model=_PluginResponse,
+    )
+    data = response.model_dump(mode="json").get("data") or []
+    if len(data) != 1 or not isinstance(data[0], Mapping):
+        raise HarnessProtocolError("Codex native plugin hook inventory is unavailable")
+    entry = data[0]
+    if entry.get("errors") or entry.get("warnings"):
+        raise HarnessProtocolError("Codex native plugin hook inventory contains errors or warnings")
+    actual = {str(item.get("key") or ""): item for item in entry.get("hooks") or () if isinstance(item, Mapping)}
+    if set(actual) != set(expected):
+        raise HarnessProtocolError("Codex native plugin enabled hook set changed")
+    codex_home = _codex_home(env)
+    for key, (plugin, hook) in expected.items():
+        item = actual[key]
+        source_path = Path(str(item.get("sourcePath") or ""))
+        # Source paths are read back from Codex and must remain inside the exact
+        # package whose bytes were already hashed before process startup.
+        root = _package_root(codex_home, plugin)
+        if not _is_path_inside(source_path, root):
+            raise HarnessProtocolError(f"Codex native plugin hook source changed: {plugin.plugin_id}")
+        plugin_id = item.get("pluginId")
+        if plugin_id not in {plugin.plugin_id, plugin.plugin_id.split("@", 1)[0]}:
+            raise HarnessProtocolError(f"Codex native plugin hook identity changed: {plugin.plugin_id}")
+        fields = {
+            "eventName": hook.event_name,
+            "handlerType": "command",
+            "currentHash": hook.current_hash,
+            "matcher": hook.matcher,
+            "timeoutSec": hook.timeout_s,
+            "statusMessage": hook.status_message,
+            "isManaged": False,
+            "enabled": True,
+            "trustStatus": "trusted",
+        }
+        # Codex expands PLUGIN_ROOT/PLUGIN_DATA in the reported command.  The
+        # immutable package snapshot above verifies the literal command while
+        # currentHash binds this exact resolved definition to the user's native
+        # trust decision, so comparing the expanded display form would be both
+        # redundant and installation-path dependent.
+        if any(item.get(name) != value for name, value in fields.items()):
+            raise HarnessProtocolError(
+                f"Codex native plugin hook is not the trusted reviewed definition: {plugin.plugin_id}:{key}"
+            )
 
 
 async def validate_native_plugin_mcp_runtime(
@@ -346,12 +660,13 @@ async def validate_native_plugin_mcp_runtime(
     if not expected:
         return
     response = await client._client.request(
-        "mcpServerStatus/list", {"threadId": thread_id}, response_model=_PluginResponse,
+        "mcpServerStatus/list",
+        {"threadId": thread_id},
+        response_model=_PluginResponse,
     )
     payload = response.model_dump(mode="json")
     available = {
-        item.get("name") for item in payload.get("data") or []
-        if isinstance(item, Mapping) and item.get("tools")
+        item.get("name") for item in payload.get("data") or [] if isinstance(item, Mapping) and item.get("tools")
     }
     missing = sorted(expected - available)
     if missing:
@@ -359,6 +674,7 @@ async def validate_native_plugin_mcp_runtime(
 
 
 __all__ = [
+    "CodexNativeHookConfig",
     "CodexNativePluginConfig",
     "native_plugin_content_digest",
     "native_plugin_overrides",
