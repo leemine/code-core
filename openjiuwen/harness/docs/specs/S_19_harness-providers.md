@@ -329,3 +329,15 @@ waits for the overall timeout nor treats an incomplete answer as successful.
 
 Default model budgets preserve the historical storage fingerprint byte for byte;
 explicit budget changes remain part of the bound configuration identity.
+
+### OpenCode terminal error diagnostics
+
+Native `session.error` and assistant `message.updated` errors preserve a finite
+`native_error_name` and `error_source` in `TurnError.provider_data.opencode`.
+Allowed names are `UnknownError`, `MessageAbortedError`, `ProviderAuthError`, and
+`APIError`; other non-null values become `unrecognized`. The safe labels also
+appear in the existing terminal message so message-only host history keeps the
+diagnostic. Raw native messages, response bodies, and request content are never
+included. Existing error codes, HTTP status categories, retryability and actual
+abort handling remain authoritative; these labels do not diagnose historical
+failures or authorize replay.
