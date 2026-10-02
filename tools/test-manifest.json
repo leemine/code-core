@@ -27,6 +27,7 @@
         "code-core.python.goal-control",
         "code-core.python.native-interaction",
         "code-core.python.codex-lifecycle",
+        "code-core.python.opencode-errors",
         "code-core.python.agent-builder",
         "code-core.python.dev-tools",
         "code-core.python.harness-protocol",
@@ -371,6 +372,49 @@
         "tests/unit_tests/harness_providers/test_codex_security.py",
         "tests/unit_tests/harness_providers/test_codex_stop_confirmation.py",
         "tests/unit_tests/harness_providers/test_codex_process_scope.py",
+        "-q",
+        "-o",
+        "addopts=",
+        "-p",
+        "no:cacheprovider",
+        "--timeout=30",
+        "--timeout-method=signal",
+        "--junitxml={junit}"
+      ]
+    },
+    {
+      "id": "code-core.python.opencode-errors",
+      "owner": "harness-providers",
+      "tier": "unit",
+      "runner": "pytest",
+      "workdir": ".",
+      "writable_workdir": true,
+      "capabilities": [
+        "filesystem"
+      ],
+      "required": true,
+      "shard_timeout_seconds": 180,
+      "discover": {
+        "command": [
+          "{python}",
+          "-m",
+          "pytest",
+          "tests/unit_tests/harness_providers/test_opencode.py",
+          "--collect-only",
+          "-q",
+          "-o",
+          "addopts=",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "parser": "pytest",
+        "timeout_seconds": 60
+      },
+      "command": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/unit_tests/harness_providers/test_opencode.py",
         "-q",
         "-o",
         "addopts=",

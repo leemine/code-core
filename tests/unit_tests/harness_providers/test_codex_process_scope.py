@@ -22,7 +22,10 @@ root, level, natural, detached = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sy
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 if detached == 'yes':
     os.setsid()
-(root / ('pid-' + str(level))).write_text(str(os.getpid()))
+# Publish only complete markers: existence is the parent's readiness signal.
+marker = root / ('.pid-' + str(level) + '.tmp')
+marker.write_text(str(os.getpid()))
+marker.replace(root / ('pid-' + str(level)))
 if level:
     subprocess.Popen([sys.executable, __file__, str(root), str(level-1), 'no', detached])
 if natural == 'yes':
