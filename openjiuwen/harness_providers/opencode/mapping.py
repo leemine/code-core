@@ -35,16 +35,17 @@ def native_id(value, prefix):
     return value
 
 
-def native_error(error):
+def native_error(error, *, source=None):
     if not isinstance(error, dict):
-        return OpenCodeError("native_error")
+        return OpenCodeError("native_error", source=source)
     name = error.get("name")
     data = error.get("data", {})
     status = data.get("statusCode") if isinstance(data, dict) else None
     if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
-        return http_error(status)
-    category = {"ProviderAuthError": "auth_required", "APIError": "server_unavailable"}.get(name, "sdk_error")
-    return OpenCodeError("native_error", category=category)
+        return http_error(status, native_name=name, source=source)
+    category = ({"ProviderAuthError": "auth_required", "APIError": "server_unavailable"}.get(name, "sdk_error")
+                if isinstance(name, str) else "sdk_error")
+    return OpenCodeError("native_error", category=category, native_name=name, source=source)
 
 
 class Accumulator:
@@ -68,7 +69,7 @@ class Accumulator:
         if kind in {"permission.asked", "question.asked"}:
             raise OpenCodeError("interaction_event_not_routed")
         if kind == "session.error":
-            raise native_error(props.get("error"))
+            raise native_error(props.get("error"), source=kind)
         if kind == "message.updated":
             info = props["info"]
             if (
@@ -91,7 +92,7 @@ class Accumulator:
                     self.aborted_id = mid
                     self.final_id = None
                     return []
-                raise native_error(info["error"])
+                raise native_error(info["error"], source=kind)
             self.infos[mid] = info
             self.parts.setdefault(mid, {})
             if info.get("time", {}).get("completed") and info.get("finish") == "length":
