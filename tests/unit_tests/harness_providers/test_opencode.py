@@ -596,6 +596,38 @@ def test_mapping_errors_are_nonsecret(kind):
     assert "test-secret" not in repr(failure.value.turn_error())
 
 
+@pytest.mark.parametrize("kind", ["session.error", "message.updated"])
+@pytest.mark.parametrize("name,status", [("APIError", 429), ("UnknownError", None),
+                                        ("MessageAbortedError", None), ("ProviderAuthError", None)])
+def test_native_error_diagnostics_survive_terminal_without_raw_details(kind, name, status):
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    error = {"name": name, "data": {"message": "test-secret", "responseBody": "private prompt",
+                                     "statusCode": status}}
+    raw = event(kind, error=error) if kind == "session.error" else event(kind, info=info(error=error))
+    with pytest.raises(OpenCodeError) as failure:
+        acc.consume(raw)
+    result = acc.result(TurnTiming(), error=failure.value)
+    assert result.status is TurnStatus.FAILED
+    detail = result.error
+    assert detail.provider_data["opencode"]["native_error_name"] == name
+    assert detail.provider_data["opencode"]["error_source"] == kind
+    assert name in detail.message and kind in detail.message
+    assert "test-secret" not in repr(detail) and "private prompt" not in repr(detail)
+    if status:
+        assert detail.provider_data["opencode"]["http_status"] == status
+        assert detail.category == "rate_limited"
+
+
+@pytest.mark.parametrize("name", ["test-secret", {"token": "test-secret"}, ["test-secret"]])
+def test_native_error_unknown_names_are_not_durable_strings(name):
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    with pytest.raises(OpenCodeError) as failure:
+        acc.consume(event("session.error", error={"name": name, "data": {"message": "test-secret"}}))
+    detail = failure.value.turn_error()
+    assert detail.provider_data["opencode"]["native_error_name"] == "unrecognized"
+    assert "test-secret" not in repr(detail)
+
+
 def test_interaction_ledger_rejects_cross_turn_and_conflicting_duplicates():
     acc = Accumulator("ses_s", "msg_u", 10000)
     acc.consume(event("message.updated", info=info()))
