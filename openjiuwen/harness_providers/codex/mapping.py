@@ -49,6 +49,8 @@ _REASONING_METHODS = frozenset({"item/reasoning/summaryTextDelta", "item/reasoni
 # Raw model-response items are large and only useful to observability
 # bridges, which read them through the provider-private observer.
 _SILENT_METHODS = frozenset({"rawResponseItem/completed", "rawResponse/completed"})
+_INTERNAL_AGENT_ITEM_TYPES = frozenset({"collabAgentToolCall", "subAgentActivity"})
+_MAX_PROVIDER_TEXT_BYTES = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +108,8 @@ class CodexTurnAccumulator:
             return [], None
         if method == "model/rerouted":
             return self._model_rerouted(payload), None
+        if method in {"hook/started", "hook/completed"}:
+            return self._hook_lifecycle(method, payload), None
         if method in _SILENT_METHODS:
             return [], None
         return [self._provider_event(method or "unknown-notification", to_json_object(payload))], None
@@ -133,6 +137,8 @@ class CodexTurnAccumulator:
         item = _thread_item(payload)
         item_type = _item_type(item)
         item_id = str(getattr(item, "id", "") or "unknown-item")
+        if item_type in _INTERNAL_AGENT_ITEM_TYPES:
+            return self._internal_agent_events(item, phase="started")
         if item_type not in TOOL_ITEM_TYPES:
             return []
         tool_name = _tool_name(item)
@@ -151,6 +157,8 @@ class CodexTurnAccumulator:
         item = _thread_item(payload)
         item_type = _item_type(item)
         item_id = str(getattr(item, "id", "") or "unknown-item")
+        if item_type in _INTERNAL_AGENT_ITEM_TYPES:
+            return self._internal_agent_events(item, phase="completed")
         if item_type in TOOL_ITEM_TYPES:
             status = _enum_value(getattr(item, "status", None))
             error = getattr(item, "error", None)
@@ -241,6 +249,94 @@ class CodexTurnAccumulator:
                     data=freeze_json_object(to_json_object(item)),
                 ),
                 item_id=item_id,
+            )
+        ]
+
+    def _internal_agent_events(self, item: Any, *, phase: str) -> list[MappedCodexEvent]:
+        item_type = _item_type(item)
+        item_id = str(getattr(item, "id", "") or "unknown-item")
+        if item_type == "subAgentActivity":
+            thread_id = _bounded_text(getattr(item, "agent_thread_id", None))
+            if not thread_id:
+                return []
+            return [
+                self._provider_event(
+                    "internal_subagent/activity",
+                    {
+                        "activity_id": item_id,
+                        "subagent_id": thread_id,
+                        "agent_path": _bounded_text(getattr(item, "agent_path", None)),
+                        "activity_kind": _enum_value(getattr(item, "kind", None)),
+                        "item_phase": phase,
+                        "entity_kind": "codex_internal_subagent",
+                        "controllable": False,
+                    },
+                )
+            ]
+
+        states = getattr(item, "agents_states", None)
+        receivers = getattr(item, "receiver_thread_ids", None)
+        state_by_id = states if isinstance(states, dict) else {}
+        thread_ids = list(
+            dict.fromkeys(
+                [str(value) for value in receivers or () if value] + [str(value) for value in state_by_id if value]
+            )
+        )
+        events: list[MappedCodexEvent] = []
+        for thread_id in thread_ids:
+            state = state_by_id.get(thread_id)
+            status = _enum_value(getattr(state, "status", None))
+            if not status:
+                status = "running" if phase == "started" else _enum_value(getattr(item, "status", None))
+            events.append(
+                self._provider_event(
+                    "internal_subagent/status",
+                    {
+                        "subagent_id": _bounded_text(thread_id),
+                        "tool_call_id": item_id,
+                        "operation": _enum_value(getattr(item, "tool", None)),
+                        "sender_thread_id": _bounded_text(getattr(item, "sender_thread_id", None)),
+                        "status": status,
+                        "message": _bounded_text(getattr(state, "message", None)),
+                        "prompt": _bounded_text(getattr(item, "prompt", None)),
+                        "model": _bounded_text(getattr(item, "model", None)),
+                        "reasoning_effort": _enum_value(getattr(item, "reasoning_effort", None)),
+                        "item_phase": phase,
+                        "entity_kind": "codex_internal_subagent",
+                        "controllable": False,
+                    },
+                )
+            )
+        return events
+
+    def _hook_lifecycle(self, method: str, payload: Any) -> list[MappedCodexEvent]:
+        run = getattr(payload, "run", None)
+        if run is None:
+            return []
+        entries = getattr(run, "entries", None)
+        entry_kinds = [
+            _enum_value(getattr(entry, "kind", None))
+            for entry in entries or ()
+            if getattr(entry, "kind", None) is not None
+        ]
+        return [
+            self._provider_event(
+                "native_hook/started" if method == "hook/started" else "native_hook/completed",
+                {
+                    "run_id": _bounded_text(getattr(run, "id", None)),
+                    "thread_id": _bounded_text(getattr(payload, "thread_id", None)),
+                    "turn_id": _bounded_text(getattr(payload, "turn_id", None)),
+                    "event_name": _enum_value(getattr(run, "event_name", None)),
+                    "handler_type": _enum_value(getattr(run, "handler_type", None)),
+                    "execution_mode": _enum_value(getattr(run, "execution_mode", None)),
+                    "scope": _enum_value(getattr(run, "scope", None)),
+                    "source": _enum_value(getattr(run, "source", None)),
+                    "status": _enum_value(getattr(run, "status", None)),
+                    "status_message": _bounded_text(getattr(run, "status_message", None)),
+                    "duration_ms": _non_negative(getattr(run, "duration_ms", None)),
+                    "entry_count": len(entry_kinds),
+                    "entry_kinds": entry_kinds[:64],
+                },
             )
         ]
 
@@ -483,6 +579,16 @@ def _non_negative(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _bounded_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = str(value)
+    encoded = raw.encode("utf-8")
+    if len(encoded) <= _MAX_PROVIDER_TEXT_BYTES:
+        return raw
+    return encoded[:_MAX_PROVIDER_TEXT_BYTES].decode("utf-8", errors="ignore")
 
 
 # Public aliases for observability bridges that read raw thread items.

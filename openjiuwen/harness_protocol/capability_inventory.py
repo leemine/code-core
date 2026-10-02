@@ -11,7 +11,7 @@ from enum import Enum
 
 from openjiuwen.harness_protocol.runtime_policy import RuntimeSurface
 
-_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}")
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}")
 
 
 class ProviderCapabilityKind(str, Enum):

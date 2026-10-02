@@ -16,6 +16,7 @@ from openjiuwen.harness_protocol import (
 )
 from openjiuwen.harness_providers.codex import (
     CodexHarnessConfig,
+    CodexNativeHookConfig,
     CodexNativePluginConfig,
     native_plugin_content_digest,
 )
@@ -45,7 +46,7 @@ def _package(tmp_path: Path, *, hooks: bool = False) -> tuple[Path, Path]:
                 "version": "1.2.3",
                 "skills": "./skills",
                 "mcpServers": "./.mcp.json",
-                "hooks": ["unsafe"] if hooks else [],
+                **({"hooks": "./hooks/hooks.json"} if hooks else {}),
             }
         ),
         encoding="utf-8",
@@ -55,6 +56,31 @@ def _package(tmp_path: Path, *, hooks: bool = False) -> tuple[Path, Path]:
         json.dumps({"mcpServers": {"fixed_marker": {"command": "/prepared/mcp"}}}),
         encoding="utf-8",
     )
+    if hooks:
+        (root / "hooks").mkdir()
+        (root / "hooks/hooks.json").write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "shell",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "python3 $PLUGIN_ROOT/hooks/check.py",
+                                        "timeout": 7,
+                                        "statusMessage": "Checking command",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "hooks/check.py").write_text("print('{}')\n", encoding="utf-8")
     market.mkdir()
     return root, market
 
@@ -72,6 +98,18 @@ def _snapshot(root: Path, market: Path, **overrides: Any) -> CodexNativePluginCo
     return CodexNativePluginConfig(**values)
 
 
+def _hook() -> CodexNativeHookConfig:
+    return CodexNativeHookConfig(
+        key="plugin:fixed:preToolUse:0:0",
+        event_name="preToolUse",
+        current_hash="sha256:reviewed-definition",
+        command="python3 $PLUGIN_ROOT/hooks/check.py",
+        matcher="shell",
+        timeout_s=7,
+        status_message="Checking command",
+    )
+
+
 def test_fixed_package_snapshot_and_mcp_namespace(tmp_path: Path) -> None:
     root, market = _package(tmp_path)
     plugin = _snapshot(root, market)
@@ -86,11 +124,35 @@ def test_fixed_package_snapshot_and_mcp_namespace(tmp_path: Path) -> None:
         validate_native_plugin_packages((plugin,), env=env)
 
 
-def test_c1_rejects_hooks_and_ambient_or_override_control(tmp_path: Path) -> None:
+def test_c2_admits_only_exact_reviewed_command_hooks(tmp_path: Path) -> None:
     root, market = _package(tmp_path, hooks=True)
     plugin = _snapshot(root, market)
-    with pytest.raises(HarnessProtocolError, match="unsupported C2"):
+    with pytest.raises(HarnessProtocolError, match="authorized snapshot"):
         validate_native_plugin_packages((plugin,), env={"CODEX_HOME": str(tmp_path / "codex")})
+    plugin = _snapshot(
+        root,
+        market,
+        required_components=("skills", "mcp", "hooks"),
+        hooks=(_hook(),),
+    )
+    assert validate_native_plugin_packages((plugin,), env={"CODEX_HOME": str(tmp_path / "codex")})
+    hooks_file = root / "hooks/hooks.json"
+    definitions = json.loads(hooks_file.read_text(encoding="utf-8"))
+    definitions["hooks"]["PreToolUse"][0]["hooks"][0]["type"] = "prompt"
+    hooks_file.write_text(json.dumps(definitions), encoding="utf-8")
+    plugin = _snapshot(
+        root,
+        market,
+        required_components=("skills", "mcp", "hooks"),
+        hooks=(_hook(),),
+    )
+    with pytest.raises(HarnessProtocolError, match="only command"):
+        validate_native_plugin_packages((plugin,), env={"CODEX_HOME": str(tmp_path / "codex")})
+
+
+def test_native_plugin_rejects_ambient_or_override_control(tmp_path: Path) -> None:
+    root, market = _package(tmp_path)
+    plugin = _snapshot(root, market)
     with pytest.raises(ValueError, match="inherit_process_env"):
         CodexHarnessConfig(native_plugins=(plugin,))
     with pytest.raises(ValueError, match="config_overrides"):
@@ -225,9 +287,77 @@ async def test_native_loader_inventory_and_required_mcp_are_confirmed(tmp_path: 
             "mcpServerStatus/list": {"data": [{"name": "fixed_marker", "tools": {"marker": {}}}]},
         }
     )
-    await validate_native_plugin_inventory(client, (plugin,), cwd=str(tmp_path))
+    await validate_native_plugin_inventory(
+        client,
+        (plugin,),
+        cwd=str(tmp_path),
+        env={"CODEX_HOME": str(tmp_path / "codex")},
+    )
     await validate_native_plugin_mcp_runtime(client, (plugin,), thread_id="thread")
     assert client.calls == ["initialize", "plugin/list", "plugin/read", "mcpServerStatus/list"]
+
+
+@pytest.mark.asyncio
+async def test_native_loader_requires_exact_trusted_hook_hash(tmp_path: Path) -> None:
+    root, market = _package(tmp_path, hooks=True)
+    plugin = _snapshot(
+        root,
+        market,
+        required_components=("skills", "mcp", "hooks"),
+        hooks=(_hook(),),
+    )
+    hook_metadata = {
+        "key": plugin.hooks[0].key,
+        "eventName": "preToolUse",
+        "handlerType": "command",
+        "currentHash": plugin.hooks[0].current_hash,
+        "command": plugin.hooks[0].command,
+        "matcher": "shell",
+        "timeoutSec": 7,
+        "statusMessage": "Checking command",
+        "source": "user",
+        "sourcePath": str(root / "hooks/hooks.json"),
+        "pluginId": plugin.plugin_id,
+        "isManaged": False,
+        "enabled": True,
+        "trustStatus": "trusted",
+    }
+    responses = {
+        "plugin/list": {
+            "marketplaces": [
+                {
+                    "path": str(market / ".agents/plugins/marketplace.json"),
+                    "plugins": [
+                        {
+                            "id": plugin.plugin_id,
+                            "installed": True,
+                            "enabled": True,
+                            "localVersion": plugin.version,
+                            "source": {"type": "local", "path": str(market)},
+                        }
+                    ],
+                }
+            ]
+        },
+        "plugin/read": {
+            "plugin": {
+                "hooks": [{"eventName": "preToolUse", "key": plugin.hooks[0].key}],
+                "skills": [{"name": "fixed:marker"}],
+                "mcpServers": ["fixed_marker"],
+            }
+        },
+        "hooks/list": {"data": [{"cwd": str(tmp_path), "errors": [], "warnings": [], "hooks": [hook_metadata]}]},
+    }
+    env = {"CODEX_HOME": str(tmp_path / "codex")}
+    client = _Client(responses)
+    await validate_native_plugin_inventory(client, (plugin,), cwd=str(tmp_path), env=env)
+    assert client.calls == ["initialize", "plugin/list", "plugin/read", "hooks/list"]
+
+    for trust_status in ("untrusted", "modified"):
+        hook_metadata["trustStatus"] = trust_status
+        client = _Client(responses)
+        with pytest.raises(HarnessProtocolError, match="not the trusted reviewed definition"):
+            await validate_native_plugin_inventory(client, (plugin,), cwd=str(tmp_path), env=env)
 
 
 @pytest.mark.asyncio
@@ -256,7 +386,12 @@ async def test_native_loader_rejects_unapproved_enabled_plugin(tmp_path: Path) -
         }
     )
     with pytest.raises(HarnessProtocolError, match="unapproved"):
-        await validate_native_plugin_inventory(client, (plugin,), cwd=str(tmp_path))
+        await validate_native_plugin_inventory(
+            client,
+            (plugin,),
+            cwd=str(tmp_path),
+            env={"CODEX_HOME": str(tmp_path / "codex")},
+        )
 
 
 @pytest.mark.asyncio
@@ -264,5 +399,10 @@ async def test_disabled_native_plugin_may_be_omitted_by_the_loader(tmp_path: Pat
     root, market = _package(tmp_path)
     plugin = _snapshot(root, market, enabled=False)
     client = _Client({"plugin/list": {"marketplaces": []}})
-    await validate_native_plugin_inventory(client, (plugin,), cwd=str(tmp_path))
+    await validate_native_plugin_inventory(
+        client,
+        (plugin,),
+        cwd=str(tmp_path),
+        env={"CODEX_HOME": str(tmp_path / "codex")},
+    )
     assert client.calls == ["initialize", "plugin/list"]
