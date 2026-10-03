@@ -341,3 +341,33 @@ diagnostic. Raw native messages, response bodies, and request content are never
 included. Existing error codes, HTTP status categories, retryability and actual
 abort handling remain authoritative; these labels do not diagnose historical
 failures or authorize replay.
+
+### OpenCode mandatory preflight（固定 1.18.18）
+
+声明 `HarnessContext.tool_authorizer` 的 OpenCode 必须在第一次 `start` 前调用
+`bind_preflight_endpoint(OpenCodePreflightEndpoint(...))`，且只能绑定一次。该 Provider 私有值对象
+只接受 authenticated `127.0.0.1` HTTP endpoint；令牌不进入 repr、JSON 配置或 checkpoint。
+宿主 listener 先验证 Bearer、generation 与自身生命周期，再调用 `authorize_preflight(payload)`。
+不满足接线条件在进程分配前拒绝；无 mandatory authorizer 的旧路径保持原有行为。
+
+受管模式使用唯一内置 `tool.execute.before` gate，复用 native plugin staging、精确库存、文件摘要、
+有效配置回读和每 Turn 来源核验。gate 固定原始参数对象后 awaited 宿主决策，拒绝/超时/异常必须抛错，
+从而不进入原生执行体；不能用晚于 write/edit 原内容读取的 `permission.asked` 代替。
+首版原生参数仅接受 read/write/edit/bash 的明确字段与规范绝对路径，拒绝额外原生插件、portable
+skills、普通 MCP、其他原生工具与未证明组合；这些限制不代表相关能力已验收。
+
+请求为 `{version:1,generation,nonce,session_id,call_id,tool,args}`，响应严格为 `{allowed,nonce}`。
+每次授权捕获当前 Turn/context/callback/native Session/generation，await 前后核对相同记录；后续
+原生 permission 必须匹配同 call 的原工具/参数。审批及审批后复核沿用原交互通道，拒绝参数重写、
+未知/重复/迟到 permission。完整记录每 Turn 退出或取消清理；generation 内仅保留有界 call/nonce
+去重标记，256 calls/Turn、4096 calls/generation，满后拒绝且不驱逐复活，结束 lifecycle 后销毁。
+
+唯一保留产品 MCP 可与 gate 共存：必须与 endpoint 同 listener、同 Bearer，server 名固定为
+`jiuwenswarm_product_tools`，原工具名由宿主 bound ToolGateway 编译为 endpoint 的不可变精确名单。
+固定 CLI 生成 `sanitize(server) + '_' + sanitize(tool)`，该 server 的命名空间不能覆盖原生工具。
+gate 与 permission 对此类记录只复核精确来源/名单和当前范围并执行原审批；资源授权仍在产品
+ToolGateway.invoke 的最终执行边界，不通过 native mapper 推断。仅匹配前缀不能获得权限。
+固定 gate 源码和产品名单进入稳定配置/checkpoint 指纹；临时 URL、token、generation 不进入。
+
+该接缝不是 OS 沙箱，也不证明符号链接竞争、所有 CLI 内部读取或完整 Provider/Team 验收。
+宿主仍须实现当前文件 read/write 资源映射、可信路径政策及最终产品工具授权。

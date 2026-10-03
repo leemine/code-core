@@ -203,3 +203,28 @@ call_tool、结果回送和 transport 关闭。初轮因 CLI 回读新增 enable
 验证：214 项定向单测/接缝回归，29 项真实 CLI + 本地 Responses 回归通过。新增可写启动/冷恢复写入、越界读取、配置不变；后台 git 的 legacy 正对照、受限正常/失败关闭负对照。已授权火山 glm-5.2 的 3 项真实可写允许/拒绝与越界读验证通过，所有配置保持不变且无插件缓存残留。Ruff、文档和 diff 检查通过；本地 dirty 开发来源，不是正式配对 CI。
 
 已知遗留：本修复阻止受限模式的插件启动后台任务，不承诺旧模式所有后代进程均被 SDK 回收；历史探针退出 2 的精确异常仍未还原。部署 UID/挂载隔离、远端恢复/活动停止、原生插件隔离验收另续。
+
+## 2026-10-04 OpenCode 原生读取前 mandatory gate
+
+范围为 OpenCode Provider 私有 `preflight.py`、装配/来源接缝与确定性测试；CLI 保持 1.18.18。
+固定二进制源码表明 write/edit 在 `permission.asked` 之前读取原内容，但原生执行 wrapper 会先
+await `tool.execute.before`。因此仅拒绝晚期 permission 不能代表未读取文件。
+
+决策：宿主在 start 前一次性注入私有 authenticated loopback endpoint；core 通过原插件 staging 和
+库存握手装配唯一内置 gate，冻结实际原始 args 对象，复用现有 tool_authorizer、SerializedTurnHarness
+的 active Turn 和原审批。每次 await 前后固定同一 callback/身份范围；审批仍引用前置记录中的
+原工具和参数。Turn 记录及时清理，generation 仅保存有界重放标记且不驱逐。完整接口见 S_19。
+
+保留唯一产品 MCP 的精确冻结工具名单和同 listener/Bearer 约束。固定 CLI 对 MCP 名称加 server
+前缀，不能覆盖原生工具；产品记录不伪装为 native read/write，最终资源检查仍在 ToolGateway。
+未证明的其他插件、MCP、skills 和原生工具组合明确拒绝，没有静默删除配置后启动。
+
+拒绝的方案：不升级 CLI；不复制 Turn 状态机或新增公共协议字段；不以 permission.asked 充当
+读取前授权；不按任意插件名字排序声称最终裁决；不通过替换 output.args 假装替换真实执行参数；
+不把 prefix 白名单或受管进程存活当成授权证明。
+
+验证：Provider 确定性回归 496 passed、1 个既有 DSH timing 用例跳过；其中新增 45 项 preflight
+用例包含实际 Node 执行生成 JS、合成 fetch、参数冻结/异常/超时/名单/重放/取消及旧审批接缝。
+先前 sandbox 扩大回归在线程池退出超时，宿主隔离 HOME 重跑完成；不将超时记作通过。
+未运行新的真实 CLI、真实模型、对抗读取探针或 Team 验收；宿主 transport 接线、路径资源映射和
+最终配对 stable/来源核验仍由集成完成。本次实现及拒绝反例不能宣称完整动态文件权限验收。
