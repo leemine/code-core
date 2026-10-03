@@ -377,6 +377,7 @@ Provider 必须在派发前执行该检查；审批等待结束后重新检查�
 | Provider | 非空回调的实际边界 |
 | --- | --- |
 | Native | 普通审批 rail 之后运行最终权限 rail；直接装配时可使用 `ToolPermissionHost.authorize_tool`，输入为 `PermissionSceneHookInput` |
+| NativeHarnessProtocolAdapter / native_v2 | 独立启动路径尚未接线，非空回调在分配前拒绝；无回调保持旧行为 |
 | OpenCode | 静态工具 allow 转为 ask、deny 保留，审批前后均检查；仍需 `TOOL_APPROVAL` handler，记忆允许也仅回复 once |
 | Codex 0.144.4 | 启动前拒绝；view_image 绕过宿主审批且原生 hook 错误/超时不能失败关闭 |
 | 其他未支持的 Provider | 分配进程/Session 前拒绝，不能忽略或自动降级 |

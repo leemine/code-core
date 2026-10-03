@@ -281,3 +281,7 @@ component, so changing it invalidates Binding identity, including transitions
 between `None` and explicit `False`. Hosts must not rewrite old identities or
 skip scope/fingerprint checks during cold restoration. This additive optional
 contract does not change event, interaction or checkpoint wire formats.
+
+`NativeHarnessProtocolAdapter` (`native_v2`) uses its own startup assembly and does not install
+DeepAgentHarness's final authority rail. It explicitly rejects a non-null `tool_authorizer`
+before allocation until that independent path is wired and verified; callers omitting it remain compatible.

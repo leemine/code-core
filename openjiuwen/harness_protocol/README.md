@@ -286,3 +286,7 @@ for arbitrary shell commands; a grant to its shell covers the trusted local
 process resource scope. Do not describe this as confinement to a workspace or
 remote OS isolation. Full product, Team and remote-provider acceptance is
 separate from these Provider boundary probes.
+
+`NativeHarnessProtocolAdapter` (`native_v2`) uses its own startup assembly and does not install
+DeepAgentHarness's final authority rail. It explicitly rejects a non-null `tool_authorizer`
+before allocation until that independent path is wired and verified; callers omitting it remain compatible.

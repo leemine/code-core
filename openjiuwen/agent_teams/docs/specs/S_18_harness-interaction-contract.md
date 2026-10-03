@@ -1,6 +1,6 @@
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-08-13
+最近一次修订日期：2026-10-04
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -215,3 +215,8 @@ BLOCK 背压遵循公共协议：stop 时消费者需继续排空事件。
 统一工厂也支持 `create_harness(manifest, provider="native_v2", config={"deep_agent": {...}})`，
 相应 context 使用 `build_harness_context(manifest, provider="native_v2", ...)`。该路径通过
 `NativeV2HarnessProvider` 转发到本构造入口，manifest 的 persona/MCP/rails 仍由原生装配处理。
+
+`NativeHarnessProtocolAdapter` / `native_v2` 独立覆写启动装配，并不继承 DeepAgentHarness 的
+最终工具权限 rail。当前显式拒绝非空 `HarnessContext.tool_authorizer`，在构造 NativeHarness、
+创建 Session 或启动 supervisor 前抛出 `UnsupportedHarnessCapabilityError`；不传回调的旧路径
+保持兼容。独立接线并验证普通、恢复与子 Agent 执行边界前，不得通过继承支持标记开放该能力。

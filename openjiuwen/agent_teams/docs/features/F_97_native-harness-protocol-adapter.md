@@ -38,3 +38,11 @@ card 和 checkpoint provider 名均为 `native_v2`，独立构造入口仍可用
 `tests/unit_tests/agent_teams/harness/test_protocol_adapter.py` 使用真实 NativeHarness supervisor、
 任务循环、session 流和暂停快照，仅替换模型执行：验证独立排队、终态输出排空、模型/工具阶段暂停、
 同 Turn 恢复、两种 abort、暂停时 stop、早期 abort、ask-user 与工具/思考输出、模板装配和 cycle 重建。
+
+## 2026-10-04 必需工具权限兼容修正
+
+该适配器覆写 `_open_session`，未运行 DeepAgentHarness 的最终工具权限 rail 装配。因此明确
+关闭继承而来的 `supports_tool_authorizer`，在原生实例/Session 分配前拒绝非空回调；不传回调
+保持原路径。不采用“仅继承能力标记”或忽略回调的方案，避免宿主以为必需权限已经生效。
+相邻 `test_mandatory_authority.py` 覆盖启动前不分配、回调不执行，以及无回调旧路径仍可进入
+原生构造；既有 protocol adapter 回归覆盖原生命周期。独立完整接线与恢复验证保持后续范围。
