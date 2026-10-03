@@ -1413,6 +1413,22 @@ async def test_governed_permission_rechecks_after_approval_without_native_rememb
     native_request = harness._transport.request
 
     async def request(method, path, body=None):
+        if method == "GET" and path.endswith("/message"):
+            root = harness._preflight.root_message
+            return [
+                {"info": {"id": root, "role": "user", "sessionID": "ses_s"}, "parts": []},
+                {
+                    "info": info(parentID=root),
+                    "parts": [
+                        textpart(
+                            type="tool",
+                            tool="bash",
+                            callID="call_1",
+                            state={"status": "running", "input": {"command": "echo ok", "description": "synthetic"}},
+                        )
+                    ],
+                },
+            ]
         if path.endswith("/prompt_async"):
             result = await harness.authorize_preflight(
                 {

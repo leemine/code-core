@@ -54,6 +54,27 @@ def context(callback):
     )
 
 
+def native_messages(body=None, root="msg_root"):
+    body = body or payload()
+    return [
+        {"info": {"id": root, "role": "user", "sessionID": body["session_id"]}, "parts": []},
+        {
+            "info": {"id": "msg_assistant", "role": "assistant", "parentID": root, "sessionID": body["session_id"]},
+            "parts": [
+                {
+                    "id": "prt_tool",
+                    "type": "tool",
+                    "messageID": "msg_assistant",
+                    "sessionID": body["session_id"],
+                    "callID": body["call_id"],
+                    "tool": body["tool"],
+                    "state": {"status": "running", "input": body["args"]},
+                }
+            ],
+        },
+    ]
+
+
 def prepared(callback=None):
     async def allow(_):
         return True
@@ -63,7 +84,16 @@ def prepared(callback=None):
     harness._context = context(callback or allow)
     harness._session_id = "ses_one"
     harness._active_turn = SimpleNamespace(turn_id="turn-one", abort_requested=False, stop_requested=False)
-    harness._preflight.begin(harness._active_turn)
+
+    async def request(method, path):
+        assert (method, path) == ("GET", "/session/ses_one/message")
+        return native_messages()
+
+    async def close():
+        pass
+
+    harness._transport = SimpleNamespace(request=request, close=close)
+    harness._preflight.begin(harness._active_turn, "msg_root")
     return harness
 
 
@@ -145,6 +175,7 @@ async def test_original_args_and_callback_are_frozen_across_permission_checks():
         "call_one",
         {
             "sessionID": "ses_one",
+            "tool": {"messageID": "msg_assistant"},
             "permission": "edit",
             "metadata": {"filepath": "/work/file"},
         },
@@ -207,7 +238,7 @@ async def test_replay_is_rejected_during_await_and_in_later_turn():
     harness._preflight.clear()
     assert harness._preflight.records == {}
     harness._active_turn = SimpleNamespace(turn_id="later", abort_requested=False, stop_requested=False)
-    harness._preflight.begin(harness.active_turn)
+    harness._preflight.begin(harness.active_turn, "msg_root")
     assert not (await harness.authorize_preflight(payload()))["allowed"]
     assert not (await harness.authorize_preflight(payload(call_id="other")))["allowed"]
     assert not (await harness.authorize_preflight(payload(nonce="b" * 32)))["allowed"]
@@ -264,7 +295,7 @@ async def test_tombstone_capacity_never_evicts_and_authority_failure_denies(monk
     monkeypatch.setattr(preflight, "_MAX_GENERATION_CALLS", 1)
     harness = prepared()
     assert (await harness.authorize_preflight(payload()))["allowed"]
-    harness._preflight.begin(harness.active_turn)
+    harness._preflight.begin(harness.active_turn, "msg_root")
     assert not (await harness.authorize_preflight(payload(call_id="next", nonce="b" * 32)))["allowed"]
 
     async def broken(_):
@@ -381,15 +412,21 @@ async def test_product_inventory_uses_scope_and_final_gateway_not_native_authori
             ),
         ),
     )
-    harness._preflight.begin(harness.active_turn)
+    harness._preflight.begin(harness.active_turn, "msg_root")
     tool = "jiuwenswarm_product_tools_read"
     body = payload(tool=tool, args={"query": {"nested": [1, True, None]}})
+
+    async def product_request(method, path):
+        return native_messages(body)
+
+    harness._transport = SimpleNamespace(request=product_request)
     assert (await harness.authorize_preflight(body))["allowed"]
     record = harness._preflight.claim(
         harness,
         "call_one",
         {
             "sessionID": "ses_one",
+            "tool": {"messageID": "msg_assistant"},
             "permission": tool,
             "metadata": {},
         },
@@ -471,6 +508,7 @@ async def test_missing_preflight_record_denies_permission_without_ordinary_appro
         "call_one",
         {
             "sessionID": "ses_one",
+            "tool": {"messageID": "msg_assistant"},
             "permission": "edit",
             "metadata": {"filepath": "/work/file"},
         },
@@ -551,3 +589,151 @@ async def test_native_authority_timeout_denies_and_does_not_retry():
     assert not (await harness.authorize_preflight(payload()))["allowed"]
     assert not (await harness.authorize_preflight(payload()))["allowed"]
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_first_delivery_from_cancelled_turn_cannot_borrow_next_turn_callback():
+    calls = []
+
+    async def allow(request):
+        calls.append(request)
+        return True
+
+    harness = prepared(allow)
+    harness._preflight.clear()
+    harness._active_turn = SimpleNamespace(turn_id="new-turn", abort_requested=False, stop_requested=False)
+    harness._preflight.begin(harness.active_turn, "msg_new_root")
+    # Previously unseen call/nonce; native persistence still attributes it to the old root.
+    assert not harness._preflight.calls
+    assert not (await harness.authorize_preflight(payload()))["allowed"]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "missing_root",
+        "duplicate_call",
+        "duplicate_root",
+        "bad_role",
+        "bad_parent",
+        "bad_session",
+        "bad_message",
+        "bad_part_session",
+        "bad_tool",
+        "bad_input",
+        "pending",
+        "completed",
+        "malformed",
+        "query_error",
+        "wrong_root_role",
+    ],
+)
+async def test_unproven_native_call_never_reaches_host_callback(mutation):
+    calls = []
+
+    async def allow(request):
+        calls.append(request)
+        return True
+
+    harness = prepared(allow)
+    messages = native_messages()
+    info, part = messages[1]["info"], messages[1]["parts"][0]
+    if mutation == "missing":
+        messages[1]["parts"] = []
+    elif mutation == "missing_root":
+        messages.pop(0)
+    elif mutation == "duplicate_call":
+        messages[1]["parts"].append(dict(part))
+    elif mutation == "duplicate_root":
+        messages.insert(0, messages[0])
+    elif mutation == "bad_role":
+        info["role"] = "user"
+    elif mutation == "bad_parent":
+        info["parentID"] = "msg_old"
+    elif mutation == "bad_session":
+        info["sessionID"] = "ses_other"
+    elif mutation == "bad_message":
+        part["messageID"] = "msg_other"
+    elif mutation == "bad_part_session":
+        part["sessionID"] = "ses_other"
+    elif mutation == "bad_tool":
+        part["tool"] = "edit"
+    elif mutation == "bad_input":
+        part["state"]["input"] = {"filePath": "/private", "content": "synthetic"}
+    elif mutation in {"pending", "completed"}:
+        part["state"]["status"] = mutation
+    elif mutation == "malformed":
+        messages[1]["parts"] = None
+    elif mutation == "wrong_root_role":
+        messages[0]["info"]["role"] = "assistant"
+
+    async def request(method, path):
+        if mutation == "query_error":
+            raise RuntimeError("synthetic query unavailable")
+        return messages
+
+    harness._transport = SimpleNamespace(request=request)
+    assert not (await harness.authorize_preflight(payload()))["allowed"]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["turn", "context", "session", "generation", "transport", "root", "abort"])
+async def test_scope_change_while_native_query_is_pending_cannot_reach_authority(change):
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def allow(request):
+        calls.append(request)
+        return True
+
+    harness = prepared(allow)
+
+    async def query(method, path):
+        entered.set()
+        await release.wait()
+        return native_messages()
+
+    harness._transport = SimpleNamespace(request=query)
+    task = asyncio.create_task(harness.authorize_preflight(payload()))
+    await entered.wait()
+    if change == "turn":
+        harness._active_turn = SimpleNamespace(turn_id="new", abort_requested=False, stop_requested=False)
+        harness._preflight.begin(harness.active_turn, "msg_new")
+    elif change == "context":
+        harness._context = replace(harness.context, agent_name="new")
+    elif change == "session":
+        harness._session_id = "ses_other"
+    elif change == "generation":
+        harness._preflight.endpoint = replace(harness._preflight.endpoint, generation="new")
+    elif change == "transport":
+        harness._transport = SimpleNamespace(request=query)
+    elif change == "root":
+        harness._preflight.root_message = "msg_other"
+    else:
+        harness.active_turn.abort_requested = True
+    release.set()
+    assert not (await task)["allowed"]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_permission_cannot_claim_a_different_native_assistant_message():
+    harness = prepared()
+    assert (await harness.authorize_preflight(payload()))["allowed"]
+    assert (
+        harness._preflight.claim(
+            harness,
+            "call_one",
+            {
+                "sessionID": "ses_one",
+                "permission": "edit",
+                "metadata": {"filepath": "/work/file"},
+                "tool": {"messageID": "msg_other"},
+            },
+        )
+        is None
+    )
