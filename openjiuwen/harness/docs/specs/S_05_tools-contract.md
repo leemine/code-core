@@ -5,14 +5,14 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/tools/`（131 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-09-28 |
+| 关联模块 | `openjiuwen/harness/tools/`、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`、最终强制授权） |
+| 最近一次修订日期 | 2026-10-04 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_provider-neutral-subagent-execution.md` |
 
 ## 范围 / 边界
 
 本规约定义 harness 的工具（tools）子系统契约：工具形态、注册/发现、分组工具、描述与
-i18n、工具生命周期。`tools/` 是 harness 最大的子模块（131 文件），但每类只钉**契约**，
+i18n、工具生命周期。`tools/` 是 harness 最大的子模块，但每类只钉**契约**，
 具体工具的 docstring / 实现细节不在此展开。
 
 具体覆盖：
@@ -266,3 +266,10 @@ Fetch 在受限来源模式下禁用 jina reader 回退。
 因此该设置不是网络访问隔离边界。严格访问隔离应由网络层实施。
 
 决策与限制见 `../features/F_01_task-scoped-web-research.md`。
+
+## 最终执行权限接缝
+
+存在强制授权时，输入 callback/transform 不被禁用；授权在转换后的真实 invoke 前运行。
+公开接缝为 `core.foundation.tool.bind_tool_authorizer` 和 `current_tool_invocation`，
+后者返回仅在授权期间有效的 `ToolInvocation` 本地证明。工具实例被替换或其 invoke
+被未登记包装器替换时拒绝，不能绕过生命周期检查。详见 S_08 与 F_20。

@@ -5,9 +5,9 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/security/`（14 文件）、`openjiuwen/harness/rails/security/` |
-| 最近一次修订日期 | 2026-08-23 |
-| 关联 feature | N/A |
+| 关联模块 | `openjiuwen/harness/security/`、`openjiuwen/harness/rails/security/` |
+| 最近一次修订日期 | 2026-10-04 |
+| 关联 feature | `F_20_native-final-tool-authority.md` |
 
 ## 范围 / 边界
 
@@ -60,7 +60,7 @@
    把严重度折成 `PermissionLevel`；`_tool_category` 给工具分类。内置规则路径经
    `get_package_builtin_rules_path()` 解析。
 7. **宿主接口**：`ToolPermissionHost` 是工具的权限宿主协议；`RequestPermissionConfirmationHook`
-   （`PermissionSceneHookInput` → `PermissionConfirmationResult`）是确认回调契约；
+   （`PermissionConfirmationRequest` → `PermissionConfirmationResult`）是确认回调契约；
    `PermissionConfirmationRequest` 携带确认请求。
 8. **到 rail 的桥唯一**：`security/factory.py:build_permission_interrupt_rail(...)` 构造
    `PermissionInterruptRail`；`deep_agent.py` 的 `build_permission_interrupt_rail` 导入路径
@@ -146,3 +146,16 @@ def write_permissions_section_to_agent_config_yaml(...) -> None
   的 shell 工具定义配套 —— `S_05`。
 - 与 `agent_teams` 的 `tools/AGENTS.md` 权限体系是同一 `core` 权限基座的不同宿主面，
   各自独立维护。
+
+## Native 最终工具授权
+
+非空 `ToolPermissionHost.authorize_tool` 除保留审批前、审批后的强制检查，还在当前
+`AbilityManager` 单次工具上下文绑定最终授权。`Tool._ToolMeta` 在全部输入转换与
+`TOOL_CALL_STARTED` 回调后、真实 `invoke` 方法之前，使用最终参数重新生成不可变
+`BeforeToolContext`。仅精确 True 允许；异常、参数或执行器在 await 期间改变均拒绝。
+
+`bind_tool_authorizer(ctx, callback)` 仅接受当前单次调用上下文，追加且同一回调幂等；
+`current_tool_invocation()` 仅在最终回调动态范围给出真实 executor、原始 bound invoke 和
+agent context 的本地证明。证明退出即失效，子任务复制 ContextVar 不延长授权。
+无强制授权保持旧工具和 callback 行为；受保护 Tool.stream 与非 Tool ability 目前明确拒绝。
+此接缝不建立路径沙箱，也不替代宿主对当前主体、Session、资源和凭据的逐次复核。
