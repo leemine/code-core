@@ -154,6 +154,40 @@ class Accumulator:
         self.denied_calls.add(call_id)
 
     @property
+    def failed_id(self):
+        """A model terminal candidate, authoritative only after idle/readback.
+
+        Tool-call messages are intermediate steps. A newer message supersedes
+        an older terminal candidate; neither stale events nor stream closure
+        prove that the native execution has finished.
+        """
+        if not self.infos:
+            return None
+        mid = next(reversed(self.infos))
+        info = self.infos[mid]
+        finish = info.get("finish")
+        if (
+            info.get("time", {}).get("completed")
+            and not info.get("error")
+            and isinstance(finish, str)
+            and finish
+            and finish not in {"stop", "tool-calls"}
+        ):
+            return mid
+        return None
+
+    def finish_error(self):
+        mid = self.failed_id
+        if mid is None:
+            raise OpenCodeError("terminal_reconciliation_failed")
+        finish = self.infos[mid]["finish"]
+        reason = {
+            "length": "model_output_limit_exceeded",
+            "content-filter": "model_content_filtered",
+        }.get(finish, "model_finish_unsuccessful")
+        return OpenCodeError(reason)
+
+    @property
     def rejected_id(self):
         if not self.infos:
             return None
@@ -226,12 +260,15 @@ class Accumulator:
             and props.get("status", {}).get("type") == "idle"
         )
 
-    def reconcile(self, message, *, rejected=False):
+    def reconcile(self, message, *, rejected=False, failed=False):
         info = message["info"]
-        expected_id = self.rejected_id if rejected else self.final_id
-        expected_finish = "tool-calls" if rejected else "stop"
+        expected_id = self.failed_id if failed else self.rejected_id if rejected else self.final_id
+        expected_finish = self.infos[expected_id]["finish"] if failed and expected_id else (
+            "tool-calls" if rejected else "stop"
+        )
         if (
-            info.get("id") != expected_id
+            expected_id is None
+            or info.get("id") != expected_id
             or info.get("parentID") != self.user_id
             or info.get("sessionID") != self.session_id
             or info.get("role") != "assistant"
@@ -311,7 +348,7 @@ class Accumulator:
             ),
             messages=tuple(messages),
             final_output=final or None,
-            stop_reason="stop" if not (stopped or error) else None,
+            stop_reason="stop" if not (stopped or aborted or error) else None,
             termination=(
                 TurnTermination(TurnTerminationKind.HARNESS_STOP if stopped else TurnTerminationKind.USER_ABORT)
                 if stopped or aborted

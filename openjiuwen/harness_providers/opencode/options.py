@@ -152,7 +152,11 @@ def native_config(
                 "name": "OpenJiuwen managed model",
                 "options": {"baseURL": model.api_base, "apiKey": model.api_key or "not-required"},
                 "models": {
-                    model.model: {"name": model.model, "tool_call": True, "limit": {"context": 32000, "output": 4096}}
+                    model.model: {
+                        "name": model.model,
+                        "tool_call": True,
+                        "limit": {"context": model.context_window, "output": model.max_output_tokens},
+                    }
                 },
             }
         },
