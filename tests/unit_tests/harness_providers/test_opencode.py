@@ -4,7 +4,7 @@
 import asyncio
 import json
 import os
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,7 +45,7 @@ from openjiuwen.harness_providers.opencode import OpenCodeHarness, OpenCodeHarne
 from openjiuwen.harness_providers.opencode.errors import OpenCodeError
 from openjiuwen.harness_providers.opencode.mapping import Accumulator
 from openjiuwen.harness_providers.opencode.options import environment, native_config, validate_readback
-from openjiuwen.harness_providers.opencode.server import ManagedServer, lease, write_private
+from openjiuwen.harness_providers.opencode.server import ManagedServer, _config_identity, lease, write_private
 from openjiuwen.harness_providers.opencode.source import private_directory, sealed_snapshot
 from openjiuwen.harness_providers.opencode.transport import Transport, sse_events
 from tests.system_tests.harness_providers._contract import assert_turn_invariants, collect_turn, terminal_of
@@ -557,7 +557,8 @@ def test_mapping_scopes_snapshots_deltas_usage_and_final():
         assert delta[0][0].operation is OutputOperation.DELTA
     acc.consume(event("message.part.updated", part=textpart("aa", time={"end": 1})))
     completed = info(
-        time={"completed": 1}, finish="stop",
+        time={"completed": 1},
+        finish="stop",
         tokens={"input": 4, "output": 2, "total": 6, "reasoning": 0, "cache": {"read": 0, "write": 0}},
     )
     for _ in range(2):
@@ -597,12 +598,13 @@ def test_mapping_errors_are_nonsecret(kind):
 
 
 @pytest.mark.parametrize("kind", ["session.error", "message.updated"])
-@pytest.mark.parametrize("name,status", [("APIError", 429), ("UnknownError", None),
-                                        ("MessageAbortedError", None), ("ProviderAuthError", None)])
+@pytest.mark.parametrize(
+    "name,status",
+    [("APIError", 429), ("UnknownError", None), ("MessageAbortedError", None), ("ProviderAuthError", None)],
+)
 def test_native_error_diagnostics_survive_terminal_without_raw_details(kind, name, status):
     acc = Accumulator("ses_s", "msg_u", 10000)
-    error = {"name": name, "data": {"message": "test-secret", "responseBody": "private prompt",
-                                     "statusCode": status}}
+    error = {"name": name, "data": {"message": "test-secret", "responseBody": "private prompt", "statusCode": status}}
     raw = event(kind, error=error) if kind == "session.error" else event(kind, info=info(error=error))
     with pytest.raises(OpenCodeError) as failure:
         acc.consume(raw)
@@ -1030,14 +1032,8 @@ def test_launcher_reaps_native_process_when_host_lease_is_lost(tmp_path, hold_ho
     if hold_host:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     launch = root / "launch.json"
-    launch.write_text(
-        json.dumps(
-            {"owner": owner, "cli": str(cli), "cwd": str(root), "port": 1, "env": {}}
-        )
-    )
-    process = subprocess.Popen(
-        [sys.executable, "-I", "-S", _launcher.__file__, str(launch)]
-    )
+    launch.write_text(json.dumps({"owner": owner, "cli": str(cli), "cwd": str(root), "port": 1, "env": {}}))
+    process = subprocess.Popen([sys.executable, "-I", "-S", _launcher.__file__, str(launch)])
     try:
         if hold_host:
             deadline = time.monotonic() + 5
@@ -1080,9 +1076,19 @@ def test_usage_normalizes_disjoint_cache_and_reasoning_buckets():
 @pytest.mark.parametrize("cache", [None, {}, {"read": True, "write": 0}, {"read": -1, "write": 0}])
 def test_incomplete_cache_buckets_keep_input_usage_unknown(cache):
     acc = Accumulator("ses_s", "msg_u", 10000)
-    acc.consume(event("message.updated", info=info(tokens={
-        "input": 4, "output": 2, "reasoning": 1, "cache": cache,
-    })))
+    acc.consume(
+        event(
+            "message.updated",
+            info=info(
+                tokens={
+                    "input": 4,
+                    "output": 2,
+                    "reasoning": 1,
+                    "cache": cache,
+                }
+            ),
+        )
+    )
     assert acc.usage().input_tokens is None
     assert acc.usage().output_tokens == 3
     assert acc.usage().total_tokens is None
@@ -1090,47 +1096,272 @@ def test_incomplete_cache_buckets_keep_input_usage_unknown(cache):
 
 def test_missing_reasoning_keeps_output_usage_unknown():
     acc = Accumulator("ses_s", "msg_u", 10000)
-    acc.consume(event("message.updated", info=info(tokens={
-        "input": 4, "output": 2, "cache": {"read": 0, "write": 0},
-    })))
+    acc.consume(
+        event(
+            "message.updated",
+            info=info(
+                tokens={
+                    "input": 4,
+                    "output": 2,
+                    "cache": {"read": 0, "write": 0},
+                }
+            ),
+        )
+    )
     assert acc.usage().input_tokens == 4
     assert acc.usage().output_tokens is None
 
 
-@pytest.mark.parametrize("values", [
-    {"context_window": 0}, {"max_output_tokens": True},
-    {"context_window": 10, "max_output_tokens": 11},
-])
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"context_window": 0},
+        {"context_window": -1},
+        {"context_window": True},
+        {"max_output_tokens": True},
+        {"max_output_tokens": "8192"},
+        {"max_output_tokens": 0},
+        {"max_output_tokens": 1.5},
+        {"context_window": 10, "max_output_tokens": 11},
+    ],
+)
 def test_model_limits_reject_invalid_values(values):
     with pytest.raises(ValueError):
         OpenCodeModelConfig("fixture", "http://127.0.0.1:1/v1", **values)
 
 
-def test_native_config_uses_explicit_model_limits():
-    model = OpenCodeModelConfig("fixture", "http://127.0.0.1:1/v1",
-                               context_window=131072, max_output_tokens=16384)
-    rendered = native_config(OpenCodeHarnessConfig(model=model))
-    assert rendered["provider"]["openjiuwen"]["models"]["fixture"]["limit"] == {
-        "context": 131072, "output": 16384,
-    }
-
-
-def test_completed_output_limit_is_failure_instead_of_waiting_for_timeout():
-    acc = Accumulator("ses_s", "msg_u", 10000)
-    with pytest.raises(OpenCodeError, match="model_output_limit_exceeded"):
-        acc.consume(event("message.updated", info=info(time={"completed": 1}, finish="length")))
-
-
-def test_default_model_budgets_preserve_existing_storage_identity():
-    from dataclasses import asdict
-    from openjiuwen.harness_providers.opencode.server import _config_identity
-
+def test_model_limits_compile_and_preserve_default_storage_identity():
     original = config()
     legacy = asdict(original)
     legacy.pop("native_plugins")
     legacy["model"].pop("context_window")
     legacy["model"].pop("max_output_tokens")
     assert _config_identity(original) == legacy
-    changed = replace(original, model=replace(original.model, context_window=131072, max_output_tokens=16384))
-    assert _config_identity(changed) != legacy
-    assert _config_identity(changed)["model"]["max_output_tokens"] == 16384
+    limits = native_config(original)["provider"]["openjiuwen"]["models"]["fixture"]["limit"]
+    assert limits == {"context": 32000, "output": 4096}
+    changed = OpenCodeHarnessConfig.from_mapping(
+        {
+            "model": {
+                "model": "fixture",
+                "api_base": "http://127.0.0.1:1/v1",
+                "context_window": 131072,
+                "max_output_tokens": 8192,
+            },
+        }
+    )
+    assert _config_identity(changed)["model"]["max_output_tokens"] == 8192
+    assert native_config(changed)["provider"]["openjiuwen"]["models"]["fixture"]["limit"] == {
+        "context": 131072,
+        "output": 8192,
+    }
+    assert changed.model == OpenCodeModelConfig.from_mapping(asdict(changed.model))
+
+
+def test_old_terminal_candidate_does_not_override_new_message():
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    old = info(time={"completed": 1}, finish="length")
+    acc.consume(event("message.updated", info=old))
+    assert acc.failed_id == "msg_a"
+    acc.consume(event("message.updated", info=info(mid="msg_b")))
+    acc.consume(event("message.updated", info=old))
+    assert acc.failed_id is None and acc.final_id is None
+    acc.consume(event("message.updated", info=info(mid="msg_b", time={"completed": 2}, finish="stop")))
+    assert acc.failed_id is None and acc.final_id == "msg_b"
+
+
+@pytest.mark.parametrize("finish", ["tool-calls", "stop", None, ""])
+def test_intermediate_or_successful_message_is_not_failed_terminal(finish):
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    acc.consume(event("message.updated", info=info(time={"completed": 1}, finish=finish)))
+    assert acc.failed_id is None
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"id": "msg_other"},
+        {"parentID": "msg_other"},
+        {"sessionID": "ses_other"},
+        {"role": "user"},
+        {"time": {}},
+        {"finish": "stop"},
+        {"error": {"name": "APIError"}},
+    ],
+)
+def test_failed_terminal_readback_must_match_completed_root_message(update):
+    acc = Accumulator("ses_s", "msg_u", 10000)
+    completed = info(time={"completed": 1}, finish="length")
+    acc.consume(event("message.updated", info=completed))
+    with pytest.raises(OpenCodeError, match="terminal_reconciliation_failed"):
+        acc.reconcile({"info": {**completed, **update}, "parts": []}, failed=True)
+
+
+class TerminalTransport(FakeTransport):
+    def __init__(self, finish, *, mode="normal"):
+        super().__init__(mode)
+        self.finish = finish
+        self.next_called = asyncio.Event()
+        self.release = asyncio.Event()
+        self.release.set()
+        self.readback_hook = None
+
+    async def request(self, method, path, body=None):
+        if method == "POST" and path.endswith("/prompt_async"):
+            self.requests.append((method, path, body))
+            self.completed = info(
+                parentID=body["messageID"],
+                finish=self.finish,
+                time={"completed": 1},
+                tokens={"input": 3, "output": 2, "reasoning": 4},
+            )
+            self.history = [{"info": self.completed, "parts": [textpart("partial")]}]
+            await self.queue.put(event("message.updated", info=self.completed))
+            if self.mode == "eof":
+                await self.queue.put(None)
+            elif self.mode != "no-idle":
+                await self.queue.put(event("session.idle"))
+            self.next_called.set()
+            return None
+        if method == "GET" and "/message/msg_" in path:
+            self.requests.append((method, path, body))
+            if self.readback_hook:
+                await self.readback_hook()
+            return {
+                "info": {**self.completed, **({"finish": "stop"} if self.mode == "mismatch" else {})},
+                "parts": [textpart("partial")],
+            }
+        return await super().request(method, path, body)
+
+    async def next_event(self):
+        await self.release.wait()
+        return await super().next_event()
+
+
+class TerminalHarness(FakeHarness):
+    def __init__(self, finish, *, mode="normal"):
+        super().__init__(mode)
+        self.transport = TerminalTransport(finish, mode=mode)
+        self.saved_checkpoints = []
+
+    async def _open_session(self, ctx):
+        self._transport = self.transport
+        return "ses_s"
+
+    async def _publish_session_checkpoint(self, **kwargs):
+        self.saved_checkpoints.append(kwargs)
+
+    async def _interrupt_turn(self, turn, mode):
+        # Native aborted/error delivery is covered by the interaction fixture.
+        # This fixture holds the completed/idle delivery at the abort race.
+        pass
+
+
+@pytest.mark.parametrize(
+    "finish,code",
+    [
+        ("length", "model_output_limit_exceeded"),
+        ("content-filter", "model_content_filtered"),
+        ("error", "model_finish_unsuccessful"),
+        ("unknown", "model_finish_unsuccessful"),
+        ("provider-private-secret", "model_finish_unsuccessful"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failed_model_terminal_is_one_failure_and_next_turn_works(finish, code):
+    harness = TerminalHarness(finish)
+    await harness.start(context())
+    try:
+        receipt = await harness.send(HarnessInput("first"))
+        events = await collect_turn(harness, receipt.turn_id)
+        assert_turn_invariants(events, receipt.turn_id)
+        terminal = terminal_of(events)
+        assert terminal.kind is TurnEventKind.FAILED
+        assert terminal.result.status is TurnStatus.FAILED
+        assert terminal.result.error.code == code and not terminal.result.error.retryable
+        assert "provider-private-secret" not in repr(terminal.result.error)
+        assert terminal.result.final_output is None and terminal.result.stop_reason is None
+        assert terminal.result.messages[0].content[0].content == "partial"
+        assert terminal.result.usage.reasoning_output_tokens == 4
+        assert harness.saved_checkpoints[-1]["resumable"] is True
+        assert not harness._poisoned
+        harness.transport.finish = "stop"
+        receipt = await harness.send(HarnessInput("second"))
+        events = await collect_turn(harness, receipt.turn_id)
+        assert_turn_invariants(events, receipt.turn_id)
+        assert terminal_of(events).kind is TurnEventKind.FINISHED
+        assert len([r for r in harness.transport.requests if r[1].endswith("/prompt_async")]) == 2
+    finally:
+        await harness.stop()
+    assert harness.transport.closed.is_set()
+
+
+@pytest.mark.parametrize(
+    "mode,code",
+    [
+        ("eof", "event_stream_closed"),
+        ("no-idle", "turn_timeout"),
+        ("mismatch", "terminal_reconciliation_failed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unconfirmed_model_terminal_does_not_enable_resume(mode, code):
+    harness = TerminalHarness("length", mode=mode)
+    await harness.start(context())
+    try:
+        receipt = await harness.send(HarnessInput("first"))
+        events = await collect_turn(harness, receipt.turn_id)
+        assert_turn_invariants(events, receipt.turn_id)
+        assert terminal_of(events).result.error.code == code
+        assert not any(c["resumable"] for c in harness.saved_checkpoints)
+        assert harness._poisoned and harness.transport.closed.is_set()
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.parametrize("during_readback", [False, True])
+@pytest.mark.asyncio
+async def test_abort_racing_failed_model_terminal_remains_interrupted(during_readback):
+    harness = TerminalHarness("length")
+    await harness.start(context())
+    try:
+        harness.transport.release.clear()
+        receipt = await harness.send(HarnessInput("first"))
+        await harness.transport.next_called.wait()
+        if during_readback:
+
+            async def abort():
+                await harness.abort(mode=AbortMode.GRACEFUL)
+
+            harness.transport.readback_hook = abort
+        else:
+            await harness.abort(mode=AbortMode.GRACEFUL)
+        harness.transport.release.set()
+        events = await collect_turn(harness, receipt.turn_id)
+        assert_turn_invariants(events, receipt.turn_id)
+        result = terminal_of(events)
+        assert result.kind is TurnEventKind.ABORTED and result.result.status is TurnStatus.INTERRUPTED
+        assert result.result.error is None and result.result.stop_reason is None
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_queued_followup_is_not_replayed_or_lost_after_model_failure():
+    harness = TerminalHarness("length")
+    await harness.start(context())
+    try:
+        harness.transport.release.clear()
+        first = await harness.send(HarnessInput("first"))
+        await harness.transport.next_called.wait()
+        second = await harness.send(HarnessInput("queued followup"))
+        harness.transport.finish = "stop"
+        harness.transport.release.set()
+        first_events = await collect_turn(harness, first.turn_id)
+        second_events = await collect_turn(harness, second.turn_id)
+        assert_turn_invariants(first_events, first.turn_id)
+        assert_turn_invariants(second_events, second.turn_id)
+        assert terminal_of(first_events).kind is TurnEventKind.FAILED
+        assert terminal_of(second_events).kind is TurnEventKind.FINISHED
+        assert len([r for r in harness.transport.requests if r[1].endswith("/prompt_async")]) == 2
+    finally:
+        await harness.stop()
