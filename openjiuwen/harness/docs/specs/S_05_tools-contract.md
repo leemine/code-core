@@ -181,8 +181,10 @@ def build_subagent_tools(parent_agent: Any, *,
                          execution_factory: SubagentExecutionFactory | None = None,
                          ...) -> list[Tool]: ...
 
-class EnterPlanModeTool(Tool): ...
-class ExitPlanModeTool(Tool): ...
+class EnterPlanModeTool(Tool):
+    def __init__(self, agent_ref, language="cn", *, instructions: str | None = None): ...
+class ExitPlanModeTool(Tool):
+    def __init__(self, agent_ref, language="cn", *, notification: str | None = None): ...
 class SwitchModeTool(Tool): ...
 
 def resolve_plan_file_path(workspace_root: str, plan_slug: str) -> Path
@@ -273,3 +275,10 @@ Fetch 在受限来源模式下禁用 jina reader 回退。
 公开接缝为 `core.foundation.tool.bind_tool_authorizer` 和 `current_tool_invocation`，
 后者返回仅在授权期间有效的 `ToolInvocation` 本地证明。工具实例被替换或其 invoke
 被未登记包装器替换时拒绝，不能绕过生命周期检查。详见 S_08 与 F_20。
+
+### 计划模式工具的结果说明
+
+AgentModeRail 将配置的 enter instructions / exit notification 传入工具构造器。
+非空文本由工具原始 invoke 在既有结果后追加两个换行，空配置保持旧返回。
+不得在 Tool 构造后替换 invoke 追加内容；强制最终授权仍拒绝未知外层包装器。
+读取计划、建立路径、保存状态和退出模式均发生在最终授权通过之后。

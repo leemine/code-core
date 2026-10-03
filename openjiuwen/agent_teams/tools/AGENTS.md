@@ -6,13 +6,13 @@
 
 | 文件 | 负责 |
 |---|---|
-| `tool_base.py` | `TeamTool` ABC |
+| `tool_base.py` | `TeamTool` ABC、构造前日志装配 |
 | `tool_permissions.py` | 权限集合（`LEADER_*`、`MEMBER_*`、`MEMBER_TOOLS_BY_DISPATCH`、`SHARED_TOOLS`、`HUMAN_AGENT_TOOLS`）、`_MEMBER_NAME_PATTERN` |
 | `tool_team.py` | `BuildTeamTool`、`CleanTeamTool` |
 | `tool_member.py` | `_SpawnToolBase`（含 `omit_slots` 传递 capability 槽）、`SpawnTeammateTool`、`CheckpointTool`、`SpawnHumanAgentTool`、`SpawnBridgeAgentTool`、`SpawnExternalCliTool`、`ShutdownMemberTool`、`ApprovePlanTool`、`ApproveToolCallTool`、`ListMembersTool` |
 | `tool_task.py` | `TaskCreateTool` / `ScheduledTaskCreateTool`（各自独立，共享模块级纯函数 `_task_node_schema` / `_validate_task_batch`）、`ViewTaskToolV2`、`UpdateTaskTool`、`SubmitPlanTool`、`ClaimTaskTool`、`MemberCompleteTaskTool` |
 | `tool_message.py` | `_SendMessageBase` → `SendMessageTool`（点对点、多播、广播）/ `ReportToLeaderTool`（scheduled 成员：仅 leader + user） |
-| `tool_factory.py` | `create_team_tools` 工厂、`_wrap_invoke_with_logging` |
+| `tool_factory.py` | `create_team_tools` 工厂、`_wrap_invoke_with_logging` 实例日志配置（独立 Swarmflow 保持旧包装） |
 | `team_tools.py` | 向后兼容的 re-export shim —— 从上述领域文件重导出所有公共符号；现有 `from ... team_tools import ...` 调用点无需改动即可继续工作 |
 
 ### 基础设施
