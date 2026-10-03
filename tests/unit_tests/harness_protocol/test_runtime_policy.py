@@ -65,3 +65,17 @@ def test_plan_policy_requires_read_only_access():
     )
     assert policy.execution_state is RuntimeExecutionState.PLAN
     assert policy.workspace_access is WorkspaceAccess.READ_ONLY
+
+
+def test_mandatory_tool_authorizer_is_keyword_only_and_validated():
+    import inspect
+
+    async def authorize(_):
+        return True
+
+    context = HarnessContext("a", "a", "s", "", tool_authorizer=authorize)
+    assert context.tool_authorizer is authorize
+    assert HarnessContext("a", "a", "s", "").tool_authorizer is None
+    assert inspect.signature(HarnessContext).parameters["tool_authorizer"].kind is inspect.Parameter.KEYWORD_ONLY
+    with pytest.raises(TypeError, match="callable"):
+        replace(context, tool_authorizer=True)

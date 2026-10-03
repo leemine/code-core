@@ -26,6 +26,7 @@ from typing import Any, Mapping
 from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness_protocol import (
     AbortMode,
+    BeforeToolContext,
     CheckpointConflictError,
     CheckpointReason,
     DeliveryMode,
@@ -172,8 +173,27 @@ class SerializedTurnHarness(ABC):
     # Provider hooks
     # ------------------------------------------------------------------
 
+    supports_tool_authorizer = False
+
+    async def _authorize_tool(self, request: BeforeToolContext) -> bool:
+        """Fail closed without converting authority errors into provider approval."""
+        context = self.context
+        if context is None:
+            return False
+        if context.tool_authorizer is None:
+            return True
+        try:
+            return await context.tool_authorizer(request) is True
+        except Exception:
+            logger.warning("mandatory tool authorization failed")
+            return False
+
     def _validate_context(self, context: HarnessContext) -> None:
         """Fail fast on host incompatibility; subclasses extend with SDK limits."""
+        if context.tool_authorizer is not None and not self.supports_tool_authorizer:
+            raise UnsupportedHarnessCapabilityError(
+                f"{self.card.name} does not support mandatory tool authorization"
+            )
         self.card.validate_host(
             protocol_version=context.protocol_version,
             capabilities=context.host_capabilities,

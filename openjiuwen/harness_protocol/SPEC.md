@@ -179,6 +179,34 @@ PROVIDER_POLICY 交给已配置的 provider 原生权限策略。Hook 与 SDK in
 原生 approval request 先映射到 interaction handler；
 adapter 若还需要执行 OpenJiuwen 的统一工具策略，可在实际执行前调用 before-tool hook。两者不互相替代。
 
+### Mandatory current tool authority
+
+`HarnessContext.tool_authorizer` 是可选、keyword-only 的
+`Callable[[BeforeToolContext], Awaitable[bool]]`。不传时保留既有调用行为；传入后它是独立于普通
+approval、可选 hook 和静态 runtime policy 的必需执行条件。只接受字面值 `True`；`False`、
+`None`、其他 truthy 值及普通异常都拒绝执行，取消必须继续传播且不能转为允许。
+`BeforeToolContext` 沿用既有不可变调用值对象。宿主将可信主体、Session 和当前资源权限绑定到
+回调，不能把模型参数或历史 approval 作为身份来源，也不能缓存一次允许作为永久授权。
+
+支持方必须在实际工具派发前检查当前权限，普通审批等待后再次检查。普通审批、自动确认、
+记住允许或规则持久化都不能覆盖撤权；此回调不负责显示 UI，也不替代原有拒绝规则。
+不支持完整必需边界的 Provider 必须在分配进程/Session 前拒绝非空回调，不能忽略或静默降级。
+
+- Native `DeepAgentHarness` 在普通审批 rail 之后装配最终权限 rail。直接装配 rail 的宿主可通过
+  `ToolPermissionHost.authorize_tool` 接收 `PermissionSceneHookInput` 使用相同严格语义；既有
+  可选 `permission_scene_hook` 的异常 fallback 保持兼容。子 Agent 必须独立绑定或拒绝委派，
+  父 Agent 的回调不自动保护未装配的子运行时。
+- OpenCode 将受治理配置中的工具 `allow` 改为 `ask`，保留静态 `deny`，仍要求现有
+  `TOOL_APPROVAL` handler；普通审批前后均检查当前权限，`ALLOW_FOR_SESSION` 也只发送原生
+  `once`。配置参与存储身份，不能复用旧配置下的记忆允许；`question` 保留用户输入通道。
+- Codex 固定 CLI 0.144.4 的 `view_image` 不经过宿主审批，原生 hook 错误/超时也不满足必需
+  失败关闭，因此拒绝非空回调启动。无回调的旧调用者保持原行为。其他未声明支持的 Provider
+  同样拒绝非空回调。
+
+该契约控制下一次派发，不承诺中止已经运行的 syscall；撤权后的活动停止、确认退出与资源释放
+由宿主另外协调。OpenCode 的 cwd、`external_directory=deny` 不构成本机 shell 的路径沙箱。
+工具边界验证也不能代替真实产品 UI、Team 或远端部署验收。
+
 ## Tools 与 MCP
 
 支持两条 provider-neutral 路径：
@@ -253,3 +281,7 @@ component, so changing it invalidates Binding identity, including transitions
 between `None` and explicit `False`. Hosts must not rewrite old identities or
 skip scope/fingerprint checks during cold restoration. This additive optional
 contract does not change event, interaction or checkpoint wire formats.
+
+`NativeHarnessProtocolAdapter` (`native_v2`) uses its own startup assembly and does not install
+DeepAgentHarness's final authority rail. It explicitly rejects a non-null `tool_authorizer`
+before allocation until that independent path is wired and verified; callers omitting it remain compatible.

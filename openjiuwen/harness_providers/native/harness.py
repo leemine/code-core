@@ -23,6 +23,7 @@ from openjiuwen.harness.schema.interaction import InputDispatchMode, SendInputRe
 from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
     AbortMode,
+    BeforeToolContext,
     ContentBlock,
     HarnessCapability,
     HarnessCard,
@@ -236,6 +237,8 @@ class DeepAgentHarness(SerializedTurnHarness):
     # Provider hooks
     # ------------------------------------------------------------------
 
+    supports_tool_authorizer = True
+
     def _validate_context(self, context: HarnessContext) -> None:
         super()._validate_context(context)
         if context.resume_policy is ResumePolicy.REQUIRE_RESUME or context.checkpoint is not None:
@@ -260,6 +263,33 @@ class DeepAgentHarness(SerializedTurnHarness):
             # stop partially initialized resources without touching a live agent.
             claim_agent(agent, self._ownership_token)
             self._agent = agent
+            if context.tool_authorizer is not None:
+                from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+                from openjiuwen.harness.security.permission_engine.host import ToolPermissionHost
+
+                async def authorize_tool(scene):
+                    active = self.active_turn
+                    return await self._authorize_tool(
+                        BeforeToolContext(
+                            agent_name=context.agent_name,
+                            provider_session_id=(
+                                self._session_id_override or f"{context.host_session_id}:{context.agent_id}"
+                            ),
+                            turn_id=active.turn_id if active else None,
+                            call_id=str(scene.tool_call.id or "") if scene.tool_call else "",
+                            tool_name=scene.tool_call.name if scene.tool_call else "",
+                            arguments=scene.tool_args,
+                        )
+                    )
+
+                authority_rail = PermissionInterruptRail(
+                    config={"enabled": True, "defaults": {"*": "allow"}},
+                    host=ToolPermissionHost(authorize_tool=authorize_tool),
+                )
+                # Ordinary approval rails (priority 90) finish first, including
+                # hosted waits and interrupt replay. This rail never opens UI.
+                authority_rail.priority = -10000
+                agent.add_rail(authority_rail)
             if self._observe_tools:
                 agent.add_rail(_ObservationRail())
             if context.system_prompt:

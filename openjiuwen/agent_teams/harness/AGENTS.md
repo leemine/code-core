@@ -132,3 +132,6 @@ pause/resume。`checkpoint.py` 使用 JSON 信封和现有 VCS context codec 保
 统一工厂 `provider="native_v2"` 惰性加载本目录的 `NativeV2HarnessProvider`，复用同一 manifest
 装配逻辑，card/checkpoint provider 均为 native_v2。`provider="native"` 仍对应 DeepAgent。
 见 [F_97](../docs/features/F_97_native-harness-protocol-adapter.md)。
+
+`native_v2` 当前不支持必需 `HarnessContext.tool_authorizer`：其独立启动路径未装配最终权限
+rail，非空回调在分配前明确拒绝；无回调旧路径保持兼容。不得仅继承 DeepAgentHarness 的支持标记。

@@ -10,8 +10,9 @@ from __future__ import annotations
 import inspect
 import json
 from copy import deepcopy
-
 from typing import Any, Iterable, Optional, cast
+
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
@@ -20,9 +21,12 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
     ConfirmInterruptRail,
     ConfirmPayload,
 )
-
-from openjiuwen.core.common.logging import logger
+from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult, InterruptDecision
 from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.patterns import (
+    merge_permission_allow_rule_into_permissions,
+    write_permissions_section_to_agent_config_yaml,
+)
 from openjiuwen.harness.security.permission_engine.host import (
     PermissionConfirmationRequest,
     PermissionSceneHookInput,
@@ -32,18 +36,13 @@ from openjiuwen.harness.security.permission_engine.models import (
     PermissionConfirmResponse,
     PermissionLevel,
     PermissionResult,
+    PermissionsSection,
 )
-from openjiuwen.harness.security.permission_engine.models import PermissionsSection
-from openjiuwen.harness.security.patterns import (
-    merge_permission_allow_rule_into_permissions,
-    write_permissions_section_to_agent_config_yaml,
-)
-from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
     is_shell_tool,
     shell_tools_from_config,
 )
-
+from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
 TOOL_NAME_ALIASES = {
     "free_search": "mcp_free_search",
@@ -401,7 +400,48 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return False
         return True
 
+    async def _authority_allows(
+        self,
+        ctx: AgentCallbackContext,
+        tool_call: Optional[ToolCall],
+        user_input: Optional[Any],
+    ) -> bool:
+        callback = self._host.authorize_tool
+        if callback is None:
+            return True
+        try:
+            return (
+                await callback(
+                    PermissionSceneHookInput(
+                        ctx=ctx,
+                        tool_call=tool_call,
+                        user_input=user_input,
+                        normalized_tool_name=self._normalize_tool_name(tool_call.name if tool_call else ""),
+                        tool_args=self.parse_tool_args(tool_call),
+                        engine=self._engine,
+                    )
+                )
+                is True
+            )
+        except Exception:
+            logger.warning("[PermissionEngine] mandatory tool authorization failed")
+            return False
+
     async def resolve_interrupt(
+        self,
+        ctx: AgentCallbackContext,
+        tool_call: Optional[ToolCall],
+        user_input: Optional[Any],
+        auto_confirm_config: Optional[dict] = None,
+    ) -> InterruptDecision:
+        if not await self._authority_allows(ctx, tool_call, user_input):
+            return self.reject(tool_result="[PERMISSION_DENIED] Current authority rejected the operation")
+        decision = await self._resolve_permission(ctx, tool_call, user_input, auto_confirm_config)
+        if isinstance(decision, ApproveResult) and not await self._authority_allows(ctx, tool_call, user_input):
+            return self.reject(tool_result="[PERMISSION_DENIED] Current authority rejected the operation")
+        return decision
+
+    async def _resolve_permission(
         self,
         ctx: AgentCallbackContext,
         tool_call: Optional[ToolCall],
@@ -535,6 +575,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                                 "(Invalid hosted permission response)"
                             ),
                         )
+                    if not await self._authority_allows(ctx, tool_call, user_input):
+                        return self.reject(tool_result="[PERMISSION_DENIED] Authority changed during approval")
                     confirm_payload = ext_out
                     persisted = False
                     if confirm_payload.wants_permanent_persist():

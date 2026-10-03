@@ -201,6 +201,7 @@ async def test_cancelled_start_releases_owned_session():
 @pytest.mark.asyncio
 async def test_cancel_while_acquiring_output_never_sends_input():
     import asyncio
+
     from openjiuwen.harness_protocol import AbortMode
 
     agent, session = _parts()
@@ -228,4 +229,41 @@ async def test_cancel_while_acquiring_output_never_sends_input():
         assert events[-1].event.kind is TurnEventKind.ABORTED
     finally:
         release.set()
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_context_authorizer_binds_final_native_rail_before_initialization():
+    from dataclasses import replace
+
+    from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+    from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
+    from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+
+    agent, session = _parts()
+    seen = []
+
+    async def authorize(request):
+        seen.append(request)
+        return False
+
+    harness = DeepAgentHarness(
+        lambda context: agent,
+        session_id="session",
+        observe_tools=False,
+        host_hooks=NativeHostHooks(AsyncMock(return_value=session)),
+    )
+    await harness.start(replace(_context(), tool_authorizer=authorize))
+    try:
+        rail = agent.add_rail.call_args.args[0]
+        assert isinstance(rail, PermissionInterruptRail)
+        assert rail.priority < PermissionInterruptRail.priority
+        call = ToolCall(id="call", type="function", name="read_file", arguments='{"file_path":"owned"}')
+        decision = await rail.resolve_interrupt(SimpleNamespace(session=None), call, None)
+        assert isinstance(decision, RejectResult)
+        assert seen[0].agent_name == "native"
+        assert seen[0].provider_session_id == "session"
+        assert seen[0].call_id == "call"
+        assert seen[0].arguments == {"file_path": "owned"}
+    finally:
         await harness.stop()

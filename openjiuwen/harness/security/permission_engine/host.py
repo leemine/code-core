@@ -109,6 +109,13 @@ class ToolPermissionHost:
     permission_scene_hook: PermissionSceneHook | None = None
     """宿主场景钩子（如数字分身）；见 :data:`PermissionSceneHook`。"""
 
+    authorize_tool: Callable[[PermissionSceneHookInput], Awaitable[bool]] | None = None
+    """Mandatory authority, independent of optional scene or remembered approval.
+
+    Only literal True permits the ordinary permission chain to continue; errors
+    deny. Called again after awaited confirmation and before returning approval.
+    """
+
 
 __all__ = [
     "PermissionConfirmationRequest",

@@ -78,6 +78,9 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
     the same protocol Turn. IDLE ends a turn only after its output has drained.
     """
 
+    # This adapter owns startup and does not install DeepAgentHarness's authority rail.
+    supports_tool_authorizer = False
+
     card = HarnessCard(
         name="native_v2",
         implementation_version="0.2.0",

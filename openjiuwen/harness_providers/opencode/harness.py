@@ -10,6 +10,7 @@ from typing import Any
 
 from openjiuwen.harness_protocol import (
     AbortMode,
+    BeforeToolContext,
     CheckpointReason,
     HarnessCapability,
     HarnessCard,
@@ -67,8 +68,12 @@ class OpenCodeHarness(SerializedTurnHarness):
         self._poisoned = False
         self._native_plugin_fingerprint = None
 
+    supports_tool_authorizer = True
+
     def _validate_context(self, context: HarnessContext) -> None:
         super()._validate_context(context)
+        if context.tool_authorizer is not None and HostCapability.TOOL_APPROVAL not in context.host_capabilities:
+            raise HarnessProtocolError("OpenCode mandatory authorization requires host tool approvals")
         if context.resume_policy is ResumePolicy.REQUIRE_RESUME and context.checkpoint is None:
             raise HarnessProtocolError("OpenCode cannot require resume without a checkpoint")
         if context.checkpoint is not None and context.resume_policy is ResumePolicy.NEW:
@@ -82,7 +87,7 @@ class OpenCodeHarness(SerializedTurnHarness):
             raise HarnessProtocolError("OpenCode MCP configuration requires the MCP_SERVERS host capability")
         if context.env or context.tools is not None or context.hooks is not None:
             raise UnsupportedHarnessCapabilityError("OpenCode does not support environment, native host tools or hooks")
-        if context.runtime_policy is not None:
+        if context.runtime_policy is not None or context.tool_authorizer is not None:
             # Compile before allocating a service so an over-broad or
             # unsupported host policy cannot degrade to Provider defaults.
             # Existing protocol validation stays first so this additive check
@@ -92,6 +97,7 @@ class OpenCodeHarness(SerializedTurnHarness):
                 context.host_capabilities,
                 context.mcp_servers,
                 runtime_policy=context.runtime_policy,
+                governed=context.tool_authorizer is not None,
             )
 
     async def _open_session(self, context: HarnessContext) -> str:
@@ -390,7 +396,16 @@ class OpenCodeHarness(SerializedTurnHarness):
     async def _route_permission(self, turn, acc, native_request_id, call_id, props):
         context = self.context
         response = None
-        if context is not None and HostCapability.TOOL_APPROVAL in context.host_capabilities:
+        authorization = BeforeToolContext(
+            agent_name=context.agent_name if context else "",
+            provider_session_id=self._session_id,
+            turn_id=turn.turn_id,
+            call_id=call_id,
+            tool_name=str(props.get("permission") or "opencode-tool"),
+            arguments={"metadata": props.get("metadata", {}), "patterns": props.get("patterns", [])},
+        )
+        authorized = await self._authorize_tool(authorization)
+        if authorized and context is not None and HostCapability.TOOL_APPROVAL in context.host_capabilities:
             request = ToolApprovalRequest(
                 request_id=f"opencode-approval:{native_request_id}",
                 call_id=call_id,
@@ -415,9 +430,11 @@ class OpenCodeHarness(SerializedTurnHarness):
             elif response.decision is ToolApprovalDecision.ALLOW:
                 reply = "once"
             elif response.decision is ToolApprovalDecision.ALLOW_FOR_SESSION:
-                reply = "always"
+                reply = "once" if context.tool_authorizer is not None else "always"
             elif response.decision is ToolApprovalDecision.ABORT:
                 abort = True
+        if reply != "reject" and not await self._authorize_tool(authorization):
+            reply = "reject"
         if reply == "reject":
             acc.mark_denied(call_id)
         if turn.abort_requested:

@@ -235,3 +235,58 @@ the shared value into their private startup configuration and verify effective
 configuration where their native runtime exposes readback. Vendor JSON/TOML,
 native tool names, product UI state, and mutable policy storage do not belong
 in this public value object.
+
+
+## Mandatory current tool authority
+
+`HarnessContext.tool_authorizer` is an optional, keyword-only awaited callback
+from the existing immutable `BeforeToolContext` to `bool`. When supplied it is
+mandatory: only literal `True` permits the ordinary permission path to proceed;
+exceptions, `None` and truthy non-boolean values deny. It is not a UI callback,
+remembered approval, event observer, or a replacement for native sandbox limits.
+The host binds the callback to its trusted actor, Session and current resource
+authorization, and must not make a one-time callback result a permanent grant.
+
+Native installs a final permission rail after ordinary approval rails. Hosts
+that construct Native rails directly can bind the same semantics using
+`ToolPermissionHost.authorize_tool` (its input is `PermissionSceneHookInput`).
+This callback runs before the optional scene/permission chain, after hosted
+confirmation before persistence, and again before returning approval. The old
+optional `permission_scene_hook` exception fallback is unchanged. A parent
+agent's callback is not an implicit grant to child agents: hosts must bind the
+corresponding child runtime or deny delegation into an unprotected runtime.
+
+OpenCode translates static tool `allow` to `ask` in governed startup config,
+retains read-only `deny` entries, checks current authority before and after
+ordinary host approval, and sends only `once`, even for `ALLOW_FOR_SESSION`.
+`question` remains the existing user-input channel. The changed permission
+config participates in the owned storage identity, preventing reuse of a
+legacy native remembered grant. A host still supplies the existing
+`TOOL_APPROVAL` handler for the ordinary decision, which can respond without
+showing UI when its policy already permits the operation.
+
+Codex 0.144.4 rejects non-null `tool_authorizer` before allocating a process.
+Its untrusted/user approvals cover tested shell and patch operations, but a
+real `view_image` call reads an allowed local PNG and delivers `input_image`
+without either approval or authority callback. `tools.view_image=false` did
+not disable that path in the fixed CLI. The stricter constructor must remain
+closed until a verified native enforcement boundary covers those calls.
+The fixed CLI also exposes trusted synchronous `PreToolUse` command hooks.
+Explicit JSON denial and exit code 2 block `view_image`; however, exit code 1
+and native hook timeout continue into the tool. A verified trusted hook is
+therefore insufficient to satisfy mandatory fail-closed authorization. A host
+wrapper handling RPC errors does not repair native hook launch/timeout failure.
+Existing Codex callers without the new callback retain their old behavior.
+Other providers reject the unsupported callback rather than ignore it.
+
+These checks authorize dispatch, not cancellation of a syscall already running.
+Hosts must separately stop owned activity, confirm exit and release resources.
+OpenCode `external_directory=deny` and `cwd` are not an OS filesystem sandbox
+for arbitrary shell commands; a grant to its shell covers the trusted local
+process resource scope. Do not describe this as confinement to a workspace or
+remote OS isolation. Full product, Team and remote-provider acceptance is
+separate from these Provider boundary probes.
+
+`NativeHarnessProtocolAdapter` (`native_v2`) uses its own startup assembly and does not install
+DeepAgentHarness's final authority rail. It explicitly rejects a non-null `tool_authorizer`
+before allocation until that independent path is wired and verified; callers omitting it remain compatible.

@@ -1365,3 +1365,59 @@ async def test_queued_followup_is_not_replayed_or_lost_after_model_failure():
         assert len([r for r in harness.transport.requests if r[1].endswith("/prompt_async")]) == 2
     finally:
         await harness.stop()
+
+
+def test_governed_permissions_ask_for_read_and_preserve_readonly_denials():
+    plan = HarnessRuntimePolicy("p", RuntimeSurface.CODE, RuntimeExecutionState.PLAN, WorkspaceAccess.READ_ONLY)
+    permission = native_config(config(), runtime_policy=plan, governed=True)["permission"]
+    assert permission["read"] == permission["glob"] == permission["grep"] == "ask"
+    assert permission["edit"] == permission["bash"] == permission["external_directory"] == "deny"
+    assert native_config(config(full_access=True), governed=True)["permission"]["*"] == "ask"
+    assert native_config(config(), runtime_policy=plan)["permission"]["read"] == "allow"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked", [False, True, "error"])
+async def test_governed_permission_rechecks_after_approval_without_native_remember(revoked):
+    allowed = True
+    calls = []
+
+    async def authorize(request):
+        calls.append(request)
+        if allowed == "error":
+            raise RuntimeError("authority offline")
+        return allowed
+
+    def answer(request):
+        nonlocal allowed
+        allowed = "error" if revoked == "error" else not revoked
+        return ToolApprovalResponse(request.request_id, ToolApprovalDecision.ALLOW_FOR_SESSION)
+
+    harness = InteractiveHarness("approval")
+    await harness.start(
+        context(
+            host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
+            interactions=AnsweringHandler(answer),
+            tool_authorizer=authorize,
+        )
+    )
+    try:
+        receipt = await harness.send(HarnessInput("governed"))
+        events = await collect_turn(harness, receipt.turn_id)
+        assert len(calls) == 2
+        assert calls[0].tool_name == "bash"
+        assert calls[0].call_id == "call_1"
+        assert harness._transport.native_replies[-1][1] == {"response": "reject" if revoked else "once"}
+        assert terminal_of(events).kind is (TurnEventKind.FAILED if revoked else TurnEventKind.FINISHED)
+    finally:
+        await harness.stop()
+
+
+def test_governed_opencode_requires_ordinary_approval_channel():
+    async def authorize(_):
+        return True
+
+    harness = OpenCodeHarness(config())
+    with pytest.raises(HarnessProtocolError, match="requires host tool approvals"):
+        harness._validate_context(context(tool_authorizer=authorize))
+    assert harness._server is None
