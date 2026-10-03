@@ -21,6 +21,7 @@ from pathlib import Path
 from .errors import OpenCodeError
 from .native_plugins import stage_native_plugins, validate_native_plugin_packages
 from .options import environment, native_config
+from .preflight import OpenCodePreflightEndpoint, preflight_fingerprint, stage_preflight
 from .source import Sources, private_directory
 
 
@@ -67,9 +68,10 @@ def _config_identity(config):
 
 
 class ManagedServer:
-    def __init__(self, config, context, *, skill_path=None):
+    def __init__(self, config, context, *, skill_path=None, preflight_endpoint=None):
         self.config, self.context = config, context
         self.skill_path = skill_path
+        self.preflight_endpoint = preflight_endpoint
         self.lock = self.process = self.log = self.owner = self.scope = None
         self._stop_lock = asyncio.Lock()
         self.native_config = self.plugin_stage = self.plugin_fingerprint = None
@@ -160,6 +162,16 @@ class ManagedServer:
         return owner
 
     async def start(self):
+        if self.context.tool_authorizer is not None and self.preflight_endpoint is None:
+            raise OpenCodeError("mandatory_preflight_endpoint_required", category="process_start_failed")
+        if self.preflight_endpoint is not None and (
+            not isinstance(self.preflight_endpoint, OpenCodePreflightEndpoint)
+            or self.context.tool_authorizer is None
+            or self.config.native_plugins
+            or self.config.skills
+            or not self.preflight_endpoint.admits_servers(self.context.mcp_servers)
+        ):
+            raise OpenCodeError("unadmitted_preflight_sources", category="process_start_failed")
         # These local admission checks precede service submission; keep lease
         # mutations synchronous so cancellation cannot race a worker thread.
         if sys.platform != "linux" or os.geteuid() == 0 or not Path("/sys/fs/cgroup/cgroup.controllers").is_file():  # noqa: ASYNC240
@@ -204,6 +216,8 @@ class ManagedServer:
             governed=self.context.tool_authorizer is not None,
         )
         config_identity = _config_identity(self.config)
+        if self.preflight_endpoint is not None:
+            config_identity["mandatory_preflight"] = preflight_fingerprint(self.preflight_endpoint)
         fingerprint = hashlib.sha256(
             json.dumps(
                 {"config": config_identity, "native": stable_native_config},
@@ -233,12 +247,20 @@ class ManagedServer:
             self.persistent_root = self.scope / "persistent"
             self.sources = Sources(self.root, self.cli, persistent_root=self.persistent_root)
             await asyncio.to_thread(self.sources.verify)
-            self.plugin_stage = await asyncio.to_thread(
-                stage_native_plugins,
-                self.root,
-                self.config.native_plugins,
-                fingerprint=self.plugin_fingerprint,
-            )
+            if self.preflight_endpoint is not None:
+                self.plugin_stage = await asyncio.to_thread(
+                    stage_preflight,
+                    self.root,
+                    self.preflight_endpoint,
+                    self.config.request_timeout_s,
+                )
+            else:
+                self.plugin_stage = await asyncio.to_thread(
+                    stage_native_plugins,
+                    self.root,
+                    self.config.native_plugins,
+                    fingerprint=self.plugin_fingerprint,
+                )
             self.native_config = native_config(
                 self.config,
                 self.context.host_capabilities,

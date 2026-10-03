@@ -37,6 +37,7 @@ from .errors import OpenCodeError
 from .mapping import Accumulator, native_id
 from .native_plugins import validate_native_plugin_packages
 from .options import native_config, validate_readback
+from .preflight import OpenCodePreflightEndpoint, PreflightGate, preflight_fingerprint
 
 
 class OpenCodeHarness(SerializedTurnHarness):
@@ -67,13 +68,43 @@ class OpenCodeHarness(SerializedTurnHarness):
         self._server = self._transport = None
         self._poisoned = False
         self._native_plugin_fingerprint = None
+        self._preflight = None
+        self._preflight_bind_closed = False
+        self._preflight_used = False
+
+    def bind_preflight_endpoint(self, endpoint: OpenCodePreflightEndpoint) -> None:
+        """Bind one host-authenticated private endpoint before the first start."""
+        if self._preflight_bind_closed or self._preflight is not None or self.context is not None:
+            raise HarnessProtocolError("OpenCode preflight endpoint binding is closed")
+        if not isinstance(endpoint, OpenCodePreflightEndpoint):
+            raise TypeError("OpenCode preflight endpoint value required")
+        self._preflight = PreflightGate(endpoint)
+
+    async def authorize_preflight(self, payload: dict) -> dict:
+        """Called only by the bound host transport after authenticating its request."""
+        if self._preflight is None:
+            return {"allowed": False, "nonce": ""}
+        return await self._preflight.authorize(self, payload)
 
     supports_tool_authorizer = True
 
     def _validate_context(self, context: HarnessContext) -> None:
+        self._preflight_bind_closed = True
         super()._validate_context(context)
         if context.tool_authorizer is not None and HostCapability.TOOL_APPROVAL not in context.host_capabilities:
             raise HarnessProtocolError("OpenCode mandatory authorization requires host tool approvals")
+        if context.tool_authorizer is not None and self._preflight is None:
+            raise HarnessProtocolError("OpenCode mandatory authorization requires a preflight endpoint")
+        if self._preflight is not None:
+            if context.tool_authorizer is None or self._preflight_used:
+                raise HarnessProtocolError("OpenCode preflight requires a fresh governed lifecycle")
+            if (
+                self._config.native_plugins
+                or self._config.skills
+                or not self._preflight.endpoint.admits_servers(context.mcp_servers)
+            ):
+                raise HarnessProtocolError("OpenCode preflight does not admit additional tool or plugin sources")
+            self._preflight_used = True
         if context.resume_policy is ResumePolicy.REQUIRE_RESUME and context.checkpoint is None:
             raise HarnessProtocolError("OpenCode cannot require resume without a checkpoint")
         if context.checkpoint is not None and context.resume_policy is ResumePolicy.NEW:
@@ -111,7 +142,9 @@ class OpenCodeHarness(SerializedTurnHarness):
 
             async with asyncio.timeout(self._config.startup_timeout_s):
                 self._native_plugin_fingerprint = (
-                    await asyncio.to_thread(validate_native_plugin_packages, self._config.native_plugins)
+                    preflight_fingerprint(self._preflight.endpoint)
+                    if self._preflight is not None
+                    else await asyncio.to_thread(validate_native_plugin_packages, self._config.native_plugins)
                     if self._config.native_plugins is not None
                     else None
                 )
@@ -131,7 +164,12 @@ class OpenCodeHarness(SerializedTurnHarness):
                         conflict=self._config.skill_conflict,
                         scan_dir=skill_path,
                     )
-                self._server = ManagedServer(self._config, context, skill_path=skill_path)
+                self._server = ManagedServer(
+                    self._config,
+                    context,
+                    skill_path=skill_path,
+                    preflight_endpoint=self._preflight.endpoint if self._preflight else None,
+                )
                 await self._server.start()
                 self._transport = Transport(self._server, self._config)
                 while True:
@@ -245,6 +283,8 @@ class OpenCodeHarness(SerializedTurnHarness):
 
     async def _close_session(self) -> None:
         self._poisoned = True
+        if self._preflight is not None:
+            self._preflight.close()
         if self._transport:
             await self._transport.close()
         if self._server:
@@ -257,11 +297,13 @@ class OpenCodeHarness(SerializedTurnHarness):
         user_id = f"msg_{(int(time.time() * 1000) * 4096) & ((1 << 48) - 1):012x}{uuid.uuid4().hex[:14]}"
         acc = Accumulator(self._session_id, user_id, self._config.max_turn_bytes)
         transport = self._transport
+        if self._preflight is not None:
+            self._preflight.begin(turn)
         try:
             async with asyncio.timeout(self._config.turn_timeout_s):
                 if self._poisoned or transport is None:
                     raise OpenCodeError("session_requires_restart", category="server_unavailable")
-                if self._config.native_plugins is not None:
+                if self._preflight is None and self._config.native_plugins is not None:
                     current_plugins = await asyncio.to_thread(
                         validate_native_plugin_packages,
                         self._config.native_plugins,
@@ -369,8 +411,14 @@ class OpenCodeHarness(SerializedTurnHarness):
                 ),
             )
 
+        finally:
+            if self._preflight is not None:
+                self._preflight.clear()
+
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
         _ = turn, mode
+        if self._preflight is not None:
+            self._preflight.clear()
         transport = self._transport
         if transport is None or self._session_id is None:
             return
@@ -404,13 +452,24 @@ class OpenCodeHarness(SerializedTurnHarness):
             tool_name=str(props.get("permission") or "opencode-tool"),
             arguments={"metadata": props.get("metadata", {}), "patterns": props.get("patterns", [])},
         )
-        authorized = await self._authorize_tool(authorization)
+        record = self._preflight.claim(self, call_id, props) if self._preflight is not None else None
+        if self._preflight is not None:
+            authorization = record.request if record is not None else authorization
+
+        async def authorize():
+            if self._preflight is not None:
+                return record is not None and await self._preflight.check(self, record)
+            return await self._authorize_tool(authorization)
+
+        authorized = await authorize()
         if authorized and context is not None and HostCapability.TOOL_APPROVAL in context.host_capabilities:
             request = ToolApprovalRequest(
                 request_id=f"opencode-approval:{native_request_id}",
                 call_id=call_id,
-                tool_name=str(props.get("permission") or "opencode-tool"),
-                arguments=props.get("metadata") if isinstance(props.get("metadata"), Mapping) else {},
+                tool_name=authorization.tool_name,
+                arguments=authorization.arguments
+                if record is not None
+                else (props.get("metadata") if isinstance(props.get("metadata"), Mapping) else {}),
                 provider_session_id=self._session_id,
                 turn_id=turn.turn_id,
                 provider_data={
@@ -433,7 +492,7 @@ class OpenCodeHarness(SerializedTurnHarness):
                 reply = "once" if context.tool_authorizer is not None else "always"
             elif response.decision is ToolApprovalDecision.ABORT:
                 abort = True
-        if reply != "reject" and not await self._authorize_tool(authorization):
+        if reply != "reject" and not await authorize():
             reply = "reject"
         if reply == "reject":
             acc.mark_denied(call_id)
