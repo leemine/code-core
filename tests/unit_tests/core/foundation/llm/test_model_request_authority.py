@@ -78,6 +78,23 @@ def model(authority, **changes):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("factory", [False, True])
+async def test_authority_cancellation_does_not_retain_host_secret(network, factory):
+    async def cancelled(_target):
+        raise asyncio.CancelledError("synthetic-host-secret")
+
+    class Factory:
+        def bind_for_call(self):
+            raise asyncio.CancelledError("synthetic-host-secret")
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await model(Factory() if factory else cancelled).invoke("hello")
+    assert not caught.value.args
+    assert caught.value.__context__ is None
+    assert not network[0]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_actual_sdk_invoke_stream_use_current_authority_and_final_model(network, stream, monkeypatch):
     sent, _ = network

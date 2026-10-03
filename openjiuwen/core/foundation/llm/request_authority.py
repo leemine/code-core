@@ -8,6 +8,7 @@ request kwargs, a global registry, or a tool/harness permission hook.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
@@ -66,6 +67,7 @@ def _bind_call(owner, *, new_call: bool):
         if not current.active:
             raise request_denied("model request authority call is closed")
         return current, False
+    cancelled = False
     try:
         callback = source.bind_for_call() if isinstance(source, ModelRequestAuthorityFactory) else source
         if inspect.isawaitable(callback):
@@ -74,9 +76,14 @@ def _bind_call(owner, *, new_call: bool):
             raise request_denied("model authority factory must bind synchronously")
         if not callable(callback):
             raise request_denied("model authority factory did not bind a callback")
+    except asyncio.CancelledError:
+        cancelled = True
+        callback = None
     except Exception:
         # Do not retain a host exception in the public error's context chain.
         callback = None
+    if cancelled:
+        raise asyncio.CancelledError() from None
     if callback is None:
         raise request_denied("model authority could not bind this call")
     return _CallAuthority(owner, callback), True
@@ -221,6 +228,7 @@ def guarded_request_hook(authority: ModelRequestAuthority, endpoint: str) -> Cal
         # pylint: disable=unidiomatic-typecheck,too-many-boolean-expressions
         # Never expose SDK placeholders or caller-supplied auth to the host.
         request.headers.pop("Authorization", None)
+        cancelled = False
         try:
             body = request.content
             target_url = str(request.url)
@@ -273,12 +281,16 @@ def guarded_request_hook(authority: ModelRequestAuthority, endpoint: str) -> Cal
             ):
                 raise request_denied("model HTTP target changed during authorization")
             request.headers["Authorization"] = authorization
+        except asyncio.CancelledError:
+            cancelled = True
         except Exception:
             # Leave the handler before raising: even __context__ must not retain
             # a host exception that could contain a credential.
             pass
         else:
             return
+        if cancelled:
+            raise asyncio.CancelledError() from None
         raise _sdk_denial_type()(request_denied("model request authority denied the request")) from None
 
     return authorize
