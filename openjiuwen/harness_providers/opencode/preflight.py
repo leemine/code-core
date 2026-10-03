@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from openjiuwen.harness_protocol import BeforeToolContext, McpTransport
 
+from ..jsonsafe import to_json_safe
 from .native_plugins import (
     OpenCodeNativePluginConfig,
     opencode_plugin_content_digest,
@@ -176,6 +177,9 @@ class _Record:
     request: BeforeToolContext
     session: str
     generation: str
+    root_message: str
+    transport: object
+    native_message: str | None = None
     product: bool = False
     authorized: bool = False
     consumed: bool = False
@@ -185,17 +189,20 @@ class PreflightGate:
     def __init__(self, endpoint):
         self.endpoint = endpoint
         self.turn = None
+        self.root_message = None
         self.records = {}
         self.nonces = set()
         self.calls = set()
         self.closed = False
 
-    def begin(self, turn):
+    def begin(self, turn, root_message):
         self.clear()
         self.turn = turn
+        self.root_message = root_message
 
     def clear(self):
         self.turn = None
+        self.root_message = None
         self.records.clear()
 
     def close(self):
@@ -209,6 +216,11 @@ class PreflightGate:
             not self.closed
             and self.turn is record.turn
             and harness.active_turn is record.turn
+            and self.root_message == record.root_message
+            and isinstance(record.root_message, str)
+            and _ID.fullmatch(record.root_message) is not None
+            and harness._transport is record.transport
+            and record.transport is not None
             and harness.context is record.context
             and harness.provider_session_id == record.session
             and self.endpoint.generation == record.generation
@@ -218,6 +230,70 @@ class PreflightGate:
             and not harness._stopping
             and not harness._poisoned
         )
+
+    async def prove_native_call(self, harness, record):
+        """Query native persistence independently of the single SSE consumer.
+
+        A first-delivery request may belong to an already cancelled Turn. Never
+        infer its root from arrival time or assign it the new Turn's authority.
+        """
+        if not self.current(harness, record):
+            return False
+        try:
+            async with asyncio.timeout(harness._config.request_timeout_s):
+                messages = await record.transport.request("GET", f"/session/{record.session}/message")
+            if not self.current(harness, record) or not isinstance(messages, list):
+                return False
+            roots, matches = [], []
+            for message in messages:
+                if not isinstance(message, dict):
+                    return False
+                info, parts = message.get("info"), message.get("parts")
+                if not isinstance(info, dict) or not isinstance(parts, list):
+                    return False
+                if info.get("id") == record.root_message:
+                    roots.append(info)
+                for part in parts:
+                    if not isinstance(part, dict):
+                        return False
+                    if part.get("callID") == record.request.call_id:
+                        matches.append((info, part))
+            if len(roots) != 1 or len(matches) != 1:
+                return False
+            root = roots[0]
+            info, part = matches[0]
+            state = part.get("state")
+            message_id = info.get("id")
+            if (
+                root.get("role") != "user"
+                or root.get("sessionID") != record.session
+                or info.get("role") != "assistant"
+                or info.get("sessionID") != record.session
+                or info.get("parentID") != record.root_message
+                or not isinstance(message_id, str)
+                or not _ID.fullmatch(message_id)
+                or part.get("messageID") != message_id
+                or part.get("sessionID") != record.session
+                or part.get("type") != "tool"
+                or part.get("tool") != record.request.tool_name
+                or not isinstance(state, dict)
+                or state.get("status") != "running"
+            ):
+                return False
+            native_args = (
+                _product_arguments(state.get("input"))
+                if record.product
+                else _arguments(record.request.tool_name, state.get("input"))
+            )
+            # Canonical JSON distinguishes bool from int; dict equality does not.
+            if json.dumps(native_args, sort_keys=True, allow_nan=False) != json.dumps(
+                to_json_safe(record.request.arguments), sort_keys=True, allow_nan=False
+            ):
+                return False
+            record.native_message = message_id
+            return self.current(harness, record)
+        except Exception:
+            return False
 
     async def check(self, harness, record):
         if not self.current(harness, record):
@@ -283,13 +359,23 @@ class PreflightGate:
                 return result
             request = BeforeToolContext(context.agent_name, session, turn.turn_id, call_id, tool, args)
             record = _Record(
-                turn, context, context.tool_authorizer, request, session, self.endpoint.generation, product
+                turn,
+                context,
+                context.tool_authorizer,
+                request,
+                session,
+                self.endpoint.generation,
+                self.root_message,
+                harness._transport,
+                product=product,
             )
             # Reserve before any await, including denials: duplicates never re-enter authority.
             self.records[call_id] = record
             self.nonces.add(nonce)
             self.calls.add(call_id)
             if not self.current(harness, record):
+                return result
+            if not await self.prove_native_call(harness, record):
                 return result
             record.authorized = await self.check(harness, record)
             result["allowed"] = record.authorized
@@ -305,6 +391,9 @@ class PreflightGate:
         tool, args = record.request.tool_name, record.request.arguments
         expected = "edit" if tool in {"write", "edit"} else tool
         if props.get("sessionID") != record.session or props.get("permission") != expected:
+            return None
+        native_tool = props.get("tool")
+        if not isinstance(native_tool, dict) or native_tool.get("messageID") != record.native_message:
             return None
         metadata = props.get("metadata")
         if not isinstance(metadata, dict):

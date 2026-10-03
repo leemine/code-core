@@ -298,7 +298,7 @@ class OpenCodeHarness(SerializedTurnHarness):
         acc = Accumulator(self._session_id, user_id, self._config.max_turn_bytes)
         transport = self._transport
         if self._preflight is not None:
-            self._preflight.begin(turn)
+            self._preflight.begin(turn, user_id)
         try:
             async with asyncio.timeout(self._config.turn_timeout_s):
                 if self._poisoned or transport is None:
