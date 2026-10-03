@@ -7,10 +7,10 @@ import json
 from copy import deepcopy
 from typing import (
     TYPE_CHECKING,
-    Optional,
     Any,
     Dict,
     Mapping,
+    Optional,
 )
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -141,6 +141,10 @@ class FrameworkError(BaseError):
     """
     recoverable = False
     fatal = True
+
+
+class ModelRequestDenied(FrameworkError):
+    """Mandatory model request authority rejected this request; never retry."""
 
 
 class ConfigurationError(FrameworkError):

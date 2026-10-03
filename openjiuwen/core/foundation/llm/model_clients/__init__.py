@@ -4,11 +4,12 @@ from openjiuwen.core.common.clients import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.request_authority import ModelRequestAuthority, ModelRequestAuthorityFactory
 from openjiuwen.core.foundation.llm.schema.config import (
     LLMApiMode,
     LLMAuthMode,
-    ModelRequestConfig,
     ModelClientConfig,
+    ModelRequestConfig,
     ProviderType,
 )
 from openjiuwen.core.foundation.llm.utils.endpoint_profiles import normalize_model_client_config
@@ -49,13 +50,17 @@ def _builtin_model_client(provider, client_config: ModelClientConfig, model_conf
         return AnthropicModelClient(model_config=model_config, model_client_config=client_config)
 
     if provider == ProviderType.IntelliRouter.value:
-        from openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client import \
-            IntelliRouterModelClient
+        from openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client import IntelliRouterModelClient
         return IntelliRouterModelClient(model_config=model_config, model_client_config=client_config)
     return None
 
 
-def create_model_client(client_config: ModelClientConfig, model_config: ModelRequestConfig) -> BaseModelClient:
+def create_model_client(
+    client_config: ModelClientConfig,
+    model_config: ModelRequestConfig,
+    *,
+    request_authority: ModelRequestAuthority | ModelRequestAuthorityFactory | None = None,
+) -> BaseModelClient:
     """Create corresponding ModelClient instance based on client_type
 
     Args:
@@ -76,6 +81,13 @@ def create_model_client(client_config: ModelClientConfig, model_config: ModelReq
     provider = client_config.client_provider.value if isinstance(client_config.client_provider, ProviderType)\
         else client_config.client_provider
     normalized_config = normalize_model_client_config(client_config)
+    if request_authority is not None:
+        from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+        from openjiuwen.core.foundation.llm.request_authority import require_supported_request_authority
+        require_supported_request_authority(normalized_config)
+        return OpenAIModelClient(
+            model_config=model_config, model_client_config=normalized_config, request_authority=request_authority
+        )
     dispatch_provider = _implementation_provider(normalized_config)
     dispatch_config = normalized_config
     client = _builtin_model_client(dispatch_provider, dispatch_config, model_config)

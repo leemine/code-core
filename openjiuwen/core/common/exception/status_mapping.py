@@ -23,6 +23,7 @@ def _get_exception_class_registry() -> Dict[str, Type]:
     return {
         "BaseError": _errors.BaseError,
         "FrameworkError": _errors.FrameworkError,
+        "ModelRequestDenied": _errors.ModelRequestDenied,
         "ExecutionError": _errors.ExecutionError,
         "ValidationError": _errors.ValidationError,
         "Termination": _errors.Termination,
@@ -80,6 +81,7 @@ RANGE_RULES = [
 
 # Manual overrides expressed as names to avoid failing import when some legacy names are absent.
 _MANUAL_OVERRIDES_RAW = {
+    "MODEL_REQUEST_AUTHORIZATION_INVALID": "ModelRequestDenied",
     "CONTROLLER_INVOKE_LLM_FAILED": "FrameworkError",
     "TOOL_EXECUTION_ERROR": "ToolError",
     "TOOL_NOT_FOUND_ERROR": "ValidationError",
