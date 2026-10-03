@@ -864,6 +864,7 @@ class StatusCode(Enum):
     MODEL_CONFIG_ERROR = (181003, "model config error, reason: {error_msg}")
     MODEL_INVOKE_PARAM_ERROR = (181004, "model invoke parameter error, reason: {error_msg}")
     MODEL_CLIENT_CONFIG_INVALID = (181005, "model client_config is invalid, reason: {error_msg}")
+    MODEL_REQUEST_AUTHORIZATION_INVALID = (181006, "model request authorization denied, reason: {reason}")
 
     # 2. Foundation - Tool Definition and Execution 182000 - 182999
     # 0. basic tool

@@ -2,26 +2,31 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 import time
-from typing import Union, List, Optional, AsyncIterator
+from typing import AsyncIterator, List, Optional, Union
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType, llm_logger
 from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
 from openjiuwen.core.foundation.llm.model_clients import create_model_client
-from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.request_authority import (
+    ModelRequestAuthority,
+    ModelRequestAuthorityFactory,
+    authorize_model_call,
+)
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.schema.generation_response import (
+    AudioGenerationResponse,
+    ImageGenerationResponse,
+    VideoGenerationResponse,
+)
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
-from openjiuwen.core.foundation.llm.schema.generation_response import (
-    ImageGenerationResponse,
-    AudioGenerationResponse,
-    VideoGenerationResponse
-)
-from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.kv_cache.kv_cache_model_hook import KVCacheModelHook
+from openjiuwen.core.runner.callback import trigger
 
 
 class Model:
@@ -43,6 +48,8 @@ class Model:
             self,
             model_client_config: Optional[ModelClientConfig],
             model_config: ModelRequestConfig = None,
+            *,
+            request_authority: ModelRequestAuthority | ModelRequestAuthorityFactory | None = None,
     ):
         """Initialize Model instance
 
@@ -50,12 +57,17 @@ class Model:
             model_config: Model parameter configuration
             model_client_config: Client configuration
         """
+        if request_authority is not None and model_client_config is not None:
+            model_client_config = model_client_config.model_copy(update={"api_key": "MODEL_REQUEST_AUTHORITY"})
         self.model_config = model_config
         self.model_client_config = model_client_config
         self._client: Optional[BaseModelClient] = None
 
         if model_client_config is not None:
-            self._client = create_model_client(client_config=model_client_config, model_config=self.model_config)
+            authority_kwargs = {"request_authority": request_authority} if request_authority is not None else {}
+            self._client = create_model_client(
+                client_config=model_client_config, model_config=self.model_config, **authority_kwargs
+            )
         else:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config is none")
@@ -91,6 +103,7 @@ class Model:
         """Resolve a stream timeout option from the client config."""
         return getattr(self.model_client_config, name, None) if self.model_client_config is not None else None
 
+    @authorize_model_call(model_wrapper=True)
     async def invoke(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
@@ -102,7 +115,7 @@ class Model:
             stop: Union[Optional[str], None] = None,
             model: str = None,
             output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
+            timeout: float = None,  # noqa: ASYNC109 - Existing timeout keyword API.
             **kwargs
     ) -> AssistantMessage:
         """Asynchronous LLM invocation
@@ -158,6 +171,7 @@ class Model:
             finally:
                 await KVCacheModelHook.end(runtime_lease, succeeded=succeeded)
 
+    @authorize_model_call(model_wrapper=True)
     async def stream(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
@@ -169,7 +183,7 @@ class Model:
             stop: Union[Optional[str], None] = None,
             model: str = None,
             output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
+            timeout: float = None,  # noqa: ASYNC109 - Existing timeout keyword API.
             **kwargs
     ) -> AsyncIterator[AssistantMessageChunk]:
         """Asynchronous streaming LLM invocation
@@ -353,7 +367,7 @@ class Model:
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
-            timeout: Optional[float] = None,
+            timeout: Optional[float] = None,  # noqa: ASYNC109 - Existing timeout keyword API.
     ) -> bool:
         """Evict KV cache through the underlying affinity-capable client."""
         evict_fn = getattr(self._client, "evict_kvc", None)
@@ -388,7 +402,7 @@ class Model:
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
-            timeout: Optional[float] = None,
+            timeout: Optional[float] = None,  # noqa: ASYNC109 - Existing timeout keyword API.
     ) -> bool:
         """Offload KV cache through the underlying affinity-capable client."""
         offload_fn = getattr(self._client, "offload_kvc", None)
@@ -423,7 +437,7 @@ class Model:
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
-            timeout: Optional[float] = None,
+            timeout: Optional[float] = None,  # noqa: ASYNC109 - Existing timeout keyword API.
     ) -> bool:
         """Prefetch KV cache through the underlying affinity-capable client."""
         prefetch_fn = getattr(self._client, "prefetch_kvc", None)
@@ -590,6 +604,7 @@ def init_model(
         custom_headers: Optional[dict[str, str]] = None,
         extra_body: Optional[dict] = None,
         reasoning_effort: Optional[str] = None,
+        request_authority: ModelRequestAuthority | ModelRequestAuthorityFactory | None = None,
         **request_extras,
 ) -> Model:
     """Convenience factory to create a Model instance.
@@ -652,4 +667,5 @@ def init_model(
     return Model(
         model_client_config=client_config,
         model_config=request_config,
+        **({"request_authority": request_authority} if request_authority is not None else {}),
     )
