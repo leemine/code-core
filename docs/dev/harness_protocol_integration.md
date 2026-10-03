@@ -363,6 +363,33 @@ Runtime policy 必须由可信宿主在 `start()` 前编译完成，不能来自
 inventory 声明不能替代原生 loader 的实际装载、来源/摘要检查或宿主审批，也不能把未配置能力
 当作可用。相同可执行命名空间与宿主权威产品工具冲突时，应在 Provider 分配前失败关闭。
 
+### 必需的动态工具权限
+
+可信宿主可在构造 `HarnessContext` 时通过 keyword-only 的 `tool_authorizer` 绑定
+`Callable[[BeforeToolContext], Awaitable[bool]]`。回调接收既有不可变工具调用上下文，应使用
+宿主绑定的当前主体、Session 和资源权限进行判断。只有字面值 `True` 允许继续普通权限流程；
+`False`、非 bool、`None` 和普通异常都拒绝，取消不能变成允许。它不是 UI 确认回调，也不是
+可选 hook 或 `runtime_policy` 的替代品；未传时保持旧调用兼容。
+
+Provider 必须在派发前执行该检查；审批等待结束后重新检查，不能让自动确认、记忆允许或
+持久规则覆盖撤权。宿主不能将先前回调结果缓存为永久授权，也不能用模型传入身份构造回调。
+
+| Provider | 非空回调的实际边界 |
+| --- | --- |
+| Native | 普通审批 rail 之后运行最终权限 rail；直接装配时可使用 `ToolPermissionHost.authorize_tool`，输入为 `PermissionSceneHookInput` |
+| OpenCode | 静态工具 allow 转为 ask、deny 保留，审批前后均检查；仍需 `TOOL_APPROVAL` handler，记忆允许也仅回复 once |
+| Codex 0.144.4 | 启动前拒绝；view_image 绕过宿主审批且原生 hook 错误/超时不能失败关闭 |
+| 其他未支持的 Provider | 分配进程/Session 前拒绝，不能忽略或自动降级 |
+
+Native 的旧 `permission_scene_hook` 异常 fallback 保持兼容，与必需回调严格分开。对子 Agent
+必须独立绑定相应权限或拒绝委派，不能假定父运行时的检查自动保护子运行时。OpenCode 的受
+治理配置参与存储身份，避免继承旧的原生记忆允许；`question` 继续使用用户输入通道。
+
+回调只控制下一次派发。宿主仍需停止已运行活动、确认资源退出后释放；OpenCode cwd 和
+`external_directory=deny` 不能把任意本机 shell 限定在 Workspace。边界 probe 的通过不表示
+产品 UI、Team 或远端部署通过。必需回调的完整语义见
+[`SPEC.md`](../../openjiuwen/harness_protocol/SPEC.md#mandatory-current-tool-authority)。
+
 如果三方 SDK 接受 Python tool callback，使用 `context.tools`：
 
 ```python
