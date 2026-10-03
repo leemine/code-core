@@ -12,6 +12,7 @@ from openjiuwen.agent_teams.tools.tool_async import (
     AsyncTaskOutputTool,
     AsyncTasksListTool,
 )
+from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.agent_teams.tools.tool_member import (
     ApprovePlanTool,
     ApproveToolCallTool,
@@ -317,11 +318,17 @@ def create_team_tools(
 
 
 def _wrap_invoke_with_logging(tool: Tool) -> None:
-    """Wrap a tool's invoke method with debug logging.
+    """Enable team logging without replacing the registered Tool invocation.
 
     The structured result passes through unchanged; the model-facing text is
     produced later by the tool's own ``render_for_llm``.
     """
+    if isinstance(tool, TeamTool):
+        tool._team_invoke_logging = True
+        return
+
+    # Independent Swarmflow/AsyncTool compatibility path. It remains outside
+    # mandatory final Tool authority support and cannot bypass that guard.
     from openjiuwen.core.common.logging import team_logger
 
     original_invoke = tool.invoke

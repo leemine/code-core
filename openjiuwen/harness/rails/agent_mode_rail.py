@@ -175,78 +175,13 @@ class AgentModeRail(DeepAgentRail):
 
         self._tools = [
             SwitchModeTool(agent_ref=agent, language=language),
-            EnterPlanModeTool(agent_ref=agent, language=language),
-            ExitPlanModeTool(agent_ref=agent, language=language),
+            EnterPlanModeTool(agent_ref=agent, language=language, instructions=self._enter_plan_instructions),
+            ExitPlanModeTool(agent_ref=agent, language=language, notification=self._exit_plan_notification),
         ]
         for tool in self._tools:
             agent.ability_manager.add_ability(tool.card, tool)
 
         logger.info("[AgentModeRail] Registered enter/exit plan mode tools")
-
-        # Patch EnterPlanModeTool / ExitPlanModeTool to append extra content
-        # when configured (aligns with Claude Code: plan instructions live in
-        # conversation via tool_result, not in system prompt).
-        self._patch_enter_plan_mode_tool()
-        self._patch_exit_plan_mode_tool()
-
-    def _patch_enter_plan_mode_tool(self) -> None:
-        """Patch EnterPlanModeTool.invoke() to append plan instructions.
-
-        When ``_enter_plan_instructions`` is configured, the full plan mode
-        workflow instructions are returned in the tool_result, matching
-        Claude Code behavior where plan instructions live in conversation
-        rather than in the system prompt.
-        """
-        instructions = self._enter_plan_instructions
-        if not instructions:
-            return
-
-        for tool in self._tools:
-            if getattr(tool.card, "name", "") != "enter_plan_mode":
-                continue
-
-            original_invoke = tool.invoke
-
-            async def patched_invoke(inputs, _orig=original_invoke, **kwargs):
-                result = await _orig(inputs, **kwargs)
-                return result + "\n\n" + instructions
-
-            tool.invoke = patched_invoke
-            logger.info(
-                "[AgentModeRail] Patched enter_plan_mode.invoke() "
-                "to return full plan instructions in tool_result"
-            )
-            break
-
-    def _patch_exit_plan_mode_tool(self) -> None:
-        """Patch ExitPlanModeTool.invoke() to append exit notification.
-
-        When ``_exit_plan_notification`` is configured, an explicit
-        notification is appended to the tool_result so the model knows
-        write operations are now permitted. Without this, the model only
-        sees MODE_INSTRUCTIONS removed from the system prompt but receives
-        no explicit signal.
-        """
-        notification = self._exit_plan_notification
-        if not notification:
-            return
-
-        for tool in self._tools:
-            if getattr(tool.card, "name", "") != "exit_plan_mode":
-                continue
-
-            original_invoke = tool.invoke
-
-            async def patched_invoke(inputs, _orig=original_invoke, **kwargs):
-                result = await _orig(inputs, **kwargs)
-                return result + "\n\n" + notification
-
-            tool.invoke = patched_invoke
-            logger.info(
-                "[AgentModeRail] Patched exit_plan_mode.invoke() "
-                "to append plan mode exit notification in tool_result"
-            )
-            break
 
     def _language_is_cn(self) -> bool:
         """True when UI/messages should use Simplified Chinese."""
