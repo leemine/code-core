@@ -141,6 +141,7 @@ def native_config(
     plugin_specs: tuple[str, ...] = (),
     include_product_mcp=True,
     runtime_policy: HarnessRuntimePolicy | None = None,
+    governed: bool = False,
 ):
     model = config.model
     if model is None:
@@ -166,7 +167,7 @@ def native_config(
                 },
             }
         },
-        "permission": _permission_config(config, host_capabilities, runtime_policy),
+        "permission": _permission_config(config, host_capabilities, runtime_policy, governed=governed),
         "lsp": False,
         "formatter": False,
         "agent": {"title": {"disable": True}},
@@ -180,7 +181,17 @@ def native_config(
     }
 
 
-def _permission_config(config, host_capabilities, policy: HarnessRuntimePolicy | None):
+def _permission_config(config, host_capabilities, policy: HarnessRuntimePolicy | None, *, governed=False):
+    permissions = _base_permission_config(config, host_capabilities, policy)
+    if governed:
+        # Native remembered/static allow must not bypass the current host authority.
+        permissions = {
+            key: "ask" if value == "allow" and key != "question" else value for key, value in permissions.items()
+        }
+    return permissions
+
+
+def _base_permission_config(config, host_capabilities, policy: HarnessRuntimePolicy | None):
     question = "allow" if HostCapability.USER_INPUT in host_capabilities else "deny"
     if policy is None:
         return {"*": "allow" if config.full_access else "ask", "task": "deny", "question": question}

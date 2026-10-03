@@ -14,6 +14,7 @@ from uuid import uuid4
 from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
     AbortMode,
+    BeforeToolContext,
     CheckpointReason,
     DeliveryMode,
     HarnessCapability,
@@ -32,6 +33,7 @@ from openjiuwen.harness_protocol import (
     TurnError,
     TurnEventKind,
     TurnResult,
+    UnsupportedHarnessCapabilityError,
     UserInputRequest,
     json_value_to_builtin,
 )
@@ -212,6 +214,11 @@ class CodexHarness(SerializedTurnHarness):
     # ------------------------------------------------------------------
 
     def _validate_context(self, context: HarnessContext) -> None:
+        if context.tool_authorizer is not None:
+            raise UnsupportedHarnessCapabilityError(
+                "Codex 0.144.4 native view_image bypasses host tool approvals; "
+                "mandatory per-tool authorization is not supported"
+            )
         super()._validate_context(context)
         compiled = compile_runtime_policy(self._config, context.runtime_policy)
         if HostCapability.TOOL_APPROVAL in context.host_capabilities:
@@ -1029,11 +1036,29 @@ class CodexHarness(SerializedTurnHarness):
             turn_id=active.turn_id if active is not None else None,
             provider_data={"method": method},
         )
-        response = await self._request_interaction(request)
-        allowed = response is not None and response.decision in (
-            ToolApprovalDecision.ALLOW,
-            ToolApprovalDecision.ALLOW_FOR_SESSION,
+        context = self.context
+        authorization = BeforeToolContext(
+            agent_name=context.agent_name if context else "",
+            provider_session_id=self._thread_id,
+            turn_id=request.turn_id,
+            call_id=item_id,
+            tool_name=request.tool_name,
+            arguments=arguments,
         )
+        response = await self._request_interaction(request) if await self._authorize_tool(authorization) else None
+        allowed = (
+            response is not None
+            and response.updated_arguments is None
+            and response.decision
+            in (
+                ToolApprovalDecision.ALLOW,
+                ToolApprovalDecision.ALLOW_FOR_SESSION,
+            )
+        )
+        if allowed:
+            allowed = await self._authorize_tool(authorization)
+        if active is not None and (active.abort_requested or active.stop_requested):
+            allowed = False
         if mcp_approval:
             return {"action": "accept", "content": {}} if allowed else {"action": "decline"}
         if allowed:

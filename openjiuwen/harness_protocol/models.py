@@ -9,13 +9,13 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Mapping, Protocol, TypeAlias, runtime_checkable
+from typing import TYPE_CHECKING, Awaitable, Callable, Mapping, Protocol, TypeAlias, runtime_checkable
 
 from openjiuwen.harness_protocol.errors import HarnessProtocolError
 
 if TYPE_CHECKING:
     from openjiuwen.harness_protocol.checkpoints import HarnessCheckpoint, HarnessCheckpointSink
-    from openjiuwen.harness_protocol.hooks import HarnessHookDispatcher
+    from openjiuwen.harness_protocol.hooks import BeforeToolContext, HarnessHookDispatcher
     from openjiuwen.harness_protocol.interactions import HarnessInteractionHandler
     from openjiuwen.harness_protocol.runtime_policy import HarnessRuntimePolicy
     from openjiuwen.harness_protocol.tools import McpServerConfig, ToolGateway
@@ -231,7 +231,16 @@ class HarnessContext:
     metadata: JsonObject = field(default_factory=dict)
     runtime_policy: "HarnessRuntimePolicy | None" = None
 
+    tool_authorizer: "Callable[[BeforeToolContext], Awaitable[bool]] | None" = field(default=None, kw_only=True)
+    """Mandatory current authority when supplied; only literal True permits execution.
+
+    Called on the awaited control plane, including after approval waits. It must
+    not display UI or cache approvals. Unsupported providers reject startup.
+    """
+
     def __post_init__(self) -> None:
+        if self.tool_authorizer is not None and not callable(self.tool_authorizer):
+            raise TypeError("tool_authorizer must be callable or None")
         required = {
             "agent_name": self.agent_name,
             "agent_id": self.agent_id,
