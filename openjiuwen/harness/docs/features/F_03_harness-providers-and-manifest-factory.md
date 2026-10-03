@@ -228,3 +228,16 @@ await `tool.execute.before`。因此仅拒绝晚期 permission 不能代表未�
 先前 sandbox 扩大回归在线程池退出超时，宿主隔离 HOME 重跑完成；不将超时记作通过。
 未运行新的真实 CLI、真实模型、对抗读取探针或 Team 验收；宿主 transport 接线、路径资源映射和
 最终配对 stable/来源核验仍由集成完成。本次实现及拒绝反例不能宣称完整动态文件权限验收。
+
+
+### 前置调用归属修正
+
+独立审阅发现首次迟到、尚未见过的旧 Turn call/nonce 会绕过 generation 去重，在下一 Turn
+借用新 callback；permission 阶段的 root 检查晚于原生文件读取。现改为前置 callback 前独立查询
+原生消息持久记录，以真实提交 user message、assistant parent/session、唯一 callID、工具名与
+原始参数共同证明归属，查询前后固定同一 scope 和 transport，不依赖 SSE 消费进度。
+缺记录或时序尚未落库即拒绝，不重试或给旧请求补发当前 Turn 证明。
+
+修正后 Provider 确定性回归为 521 passed、1 个既有 DSH timing skip；新增 25 项首次迟到、
+原生记录缺失/重复/错配、查询中途范围变化及 permission assistant 关联用例。实际 CLI 的
+消息落库先于 hook 查询的可用性、真实读取阻断和最终配对仍待独立验收；本次没有新增真实探针。

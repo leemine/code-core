@@ -357,8 +357,12 @@ failures or authorize replay.
 skills、普通 MCP、其他原生工具与未证明组合；这些限制不代表相关能力已验收。
 
 请求为 `{version:1,generation,nonce,session_id,call_id,tool,args}`，响应严格为 `{allowed,nonce}`。
-每次授权捕获当前 Turn/context/callback/native Session/generation，await 前后核对相同记录；后续
-原生 permission 必须匹配同 call 的原工具/参数。审批及审批后复核沿用原交互通道，拒绝参数重写、
+每 Turn 固定实际提交的 native user message ID。每次授权捕获 Turn/context/callback/native
+Session/generation/transport，先独立 GET 原生消息，不等待唯一 SSE 消费者：要求唯一 user root、
+唯一 callID tool-part、assistant parent/session、part message/session、running 状态及原工具/参数
+全部匹配，才允许进入宿主 callback。查询缺失、重复、异常或 await 后范围变化均拒绝。不能把首次
+迟到的旧 Turn 调用按到达时间归入新 Turn；generation tombstone 仅去重，不能证明 root 归属。后续
+原生 permission 必须匹配已证 assistant message 与同 call 的原工具/参数。审批及审批后复核沿用原交互通道，拒绝参数重写、
 未知/重复/迟到 permission。完整记录每 Turn 退出或取消清理；generation 内仅保留有界 call/nonce
 去重标记，256 calls/Turn、4096 calls/generation，满后拒绝且不驱逐复活，结束 lifecycle 后销毁。
 
