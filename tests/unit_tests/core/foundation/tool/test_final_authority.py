@@ -329,3 +329,30 @@ async def test_transform_cannot_add_unrepresented_runtime_kwargs(execution):
         assert not execution.effects
     finally:
         await framework.unregister(ToolCallEvents.TOOL_INVOKE_INPUT, transform)
+
+
+async def test_cancelled_authorizer_expires_proof_and_inherited_child(execution):
+    entered = asyncio.Event()
+    saved = []
+
+    async def authority(_):
+        saved.append((copy_context(), current_tool_invocation()))
+        entered.set()
+        await asyncio.Event().wait()
+        return True
+
+    execution.callback = authority
+    task = asyncio.create_task(execution.invoke())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    copied, proof = saved[0]
+    assert not proof.is_current() and copied.run(current_tool_invocation) is None
+    assert not execution.effects
+    execution.callback = None
+    result = await copied.run(asyncio.create_task, execution.invoke())
+    assert "PERMISSION_DENIED" in str(result)
+    assert not execution.effects
+    await execution.invoke()
+    assert execution.effects == [{"path": "original"}]
