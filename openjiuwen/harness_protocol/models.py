@@ -231,7 +231,7 @@ class HarnessContext:
     metadata: JsonObject = field(default_factory=dict)
     runtime_policy: "HarnessRuntimePolicy | None" = None
 
-    tool_authorizer: "Callable[[BeforeToolContext], Awaitable[bool]] | None" = field(default=None, kw_only=True)
+    tool_authorizer: Callable[[BeforeToolContext], Awaitable[bool]] | None = field(default=None, kw_only=True)
     """Mandatory current authority when supplied; only literal True permits execution.
 
     Called on the awaited control plane, including after approval waits. It must

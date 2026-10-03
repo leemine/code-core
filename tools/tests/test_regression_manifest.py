@@ -8,6 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_PATHS = (
+    "tests/unit_tests/harness/security/test_mandatory_authorization.py",
+    "tests/unit_tests/harness_providers/test_tool_authorizer.py",
+    "tests/unit_tests/harness_providers/test_native_host.py",
+    "tests/unit_tests/harness_providers/test_opencode.py",
+    "tests/unit_tests/harness_protocol",
     "tests/unit_tests/harness/goal",
     "tests/unit_tests/harness/test_task_completion_extensions.py",
     "tests/unit_tests/harness/test_deep_agent_interaction.py",

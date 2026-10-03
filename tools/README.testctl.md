@@ -59,3 +59,7 @@ python3 tools/archivectl.py recover artifacts/test-runs/<interrupted-run>
 `pr-stable` 还覆盖 Goal 控制/执行驱动与 Native 待答、交互收尾，以及 Codex 的 fake-SDK 终态/重连/退出和 Linux 子进程 scope 回归。这些必需 suite 沿用 strict 网络隔离，不需要 Codex SDK 或真实模型。`tools.tests.test_regression_manifest` 检查关键文件同时出现在 profile 的发现与执行入口，并阻止 system/local-service 测试进入 stable。
 
 真实 Codex 工具树退出由独立的 `Codex local process exit regression` workflow 手动触发。它按锁安装 `codex` extra，只运行现有两项 loopback 模型测试；缺少 SDK/CLI、跳过任一测试或任一失败都会阻断该运行。任务将 HOME/CODEX_HOME/配置放在 RUNNER_TEMP 下，测试结束归档源码/锁/SDK/CLI 指纹、JUnit 和进程退出证据，再清理隔离配置。该入口不读取原 CLI 登录配置、不调用远端模型，与每日 full-python 巡检分别记录证据。
+
+## 必需工具授权回归
+
+`pr-stable` 的 `native-output` 与 `codex-lifecycle` 套件还包含必需授权失败关闭、审批等待后撤权和 Provider 不支持时拒绝启动的确定性用例；现有 OpenCode 与协议套件覆盖逐次授权编译和 keyword-only 兼容。`test_regression_manifest` 同时检查这些入口的发现与执行，避免新增测试仅在本地手动运行。真实 CLI/回环服务探针仍独立于 stable，不将真实外部服务引入 strict 套件。
