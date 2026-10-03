@@ -50,6 +50,12 @@ request ID 后发送。未提供审批宿主时原生请求被拒绝。只有宿
 审批。原生 `task` 保持 deny，不能代替产品子 Agent；宿主声明 `USER_INPUT` 时只将原生 `question`
 工具开放为 awaited `UserInputRequest`，宿主未回答则调用原生 reject。
 
+模型预算由 `OpenCodeModelConfig.context_window`（默认 32000）与
+`max_output_tokens`（默认 4096）显式配置，均须为正整数，输出预算不得超过上下文。
+例如研究宿主可在 `model` 中设置 `"max_output_tokens": 8192`；这仍受实际模型服务限制，
+不保证模型一定产出正文，也不自动重试。默认值保持原持久存储身份；修改预算改变配置指纹，
+需要新的宿主 scope，不能携带旧 checkpoint 在原 scope 原地改配。
+
 ## 能力与失败边界
 
 Card 声明 `GRACEFUL_ABORT`、`PERSISTENT_SESSION`、`CHECKPOINT`、`MCP_TOOLS`。文本、reasoning、
@@ -57,6 +63,16 @@ Card 声明 `GRACEFUL_ABORT`、`PERSISTENT_SESSION`、`CHECKPOINT`、`MCP_TOOLS`
 保留原生 message/part/call ID。非文本 JSON 输入按公共 `harness_input_text` 渲染为文本；
 这不表示图片/附件或结构化输出能力已实现。一个 Turn 必须有匹配当前 user messageID 的
 最后 assistant completed/stop、后续 idle 及消息回读；204、step-finish、裸 idle、EOF 均不能判成功。
+
+原生完成消息的 `length`、`content-filter`、`error`、`unknown` 等非 stop/非 tool-calls 结束，
+在 completed、idle 及同根消息 REST 回读一致后明确返回 FAILED；长度耗尽错误码为
+`model_output_limit_exceeded`，过滤为 `model_content_filtered`，其他为
+`model_finish_unsuccessful`，均不自动重试。部分内容及用量仍在 messages/事件中，
+`final_output` 不冒充最终成果。已确认 idle 后允许同会话的下一 Turn；取消竞争保持
+INTERRUPTED/ABORTED。没有 idle、回读不一致或断流仍按未知执行故障关闭服务，
+不发布可恢复 checkpoint；缺失或畸形 finish 不按已确认模型失败处理。
+CLI 若将模型拒绝转换为原生 error/session.error，仍走既有错误清理路径，
+不因远端 HTTP finish_reason 看似相同就假定可恢复。
 
 不支持的环境覆盖、原生宿主 ToolGateway、Hooks、steer/pause 明确拒绝。manifest
 portable Skills 在 CLI 启动前完整复制到项目内按配置指纹隔离的
@@ -74,7 +90,7 @@ session abort，并以关联 `MessageAbortedError` + idle 收口 ABORTED；回�
 当前生命周期不重新发送输入；这并不保证已开始的原生工具没有产生副作用。
 
 启动和每个已确认终态发布 opaque checkpoint。提交输入前先发布
-`resumable=false/state=turn_active`；只有原生 stop、已确认拒绝或 abort 与 idle 关联后才发布
+`resumable=false/state=turn_active`；只有原生 stop、已核验的模型失败、已确认拒绝或 abort 与 idle 关联后才发布
 `resumable=true/state=idle`。`REQUIRE_RESUME` 只恢复同 scope 的原生 session ID，并核对 session、
 status、pending permission/question 与最后完成消息。活动/待答/结果未知 checkpoint 明确失败，
 供宿主降级为只读历史；不会用新 session 伪装恢复。

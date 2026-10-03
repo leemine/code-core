@@ -294,6 +294,26 @@ class OpenCodeHarness(SerializedTurnHarness):
                             state="idle",
                         )
                         return TurnEventKind.FINISHED, acc.result(timing)
+                    if acc.is_idle(event) and acc.failed_id:
+                        message = await transport.request("GET", f"/session/{self._session_id}/message/{acc.failed_id}")
+                        await self._emit_mapped(turn, acc.reconcile(message, failed=True))
+                        # Native execution is confirmed idle: fail this Turn,
+                        # retain history/usage and let the existing queue own
+                        # subsequent inputs. Do not replay or poison the scope.
+                        await self._publish_session_checkpoint(
+                            reason=CheckpointReason.TURN_COMPLETED,
+                            resumable=True,
+                            state="idle",
+                        )
+                        return (
+                            TurnEventKind.ABORTED if turn.abort_requested else TurnEventKind.FAILED,
+                            acc.result(
+                                timing,
+                                error=acc.finish_error(),
+                                stopped=turn.stop_requested,
+                                aborted=turn.abort_requested and not turn.stop_requested,
+                            ),
+                        )
                     if acc.is_idle(event) and acc.rejected_id:
                         message = await transport.request(
                             "GET", f"/session/{self._session_id}/message/{acc.rejected_id}"

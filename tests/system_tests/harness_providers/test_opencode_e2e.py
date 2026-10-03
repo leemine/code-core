@@ -21,6 +21,7 @@ from aiohttp import web
 from openjiuwen.harness_protocol import (
     AbortMode,
     HarnessInput,
+    HarnessState,
     HostCapability,
     InteractionResponseStatus,
     McpServerConfig,
@@ -30,6 +31,7 @@ from openjiuwen.harness_protocol import (
     ToolApprovalRequest,
     ToolApprovalResponse,
     TurnEventKind,
+    TurnStatus,
     UserInputResponse,
 )
 from openjiuwen.harness_providers.base import ProviderStartupError
@@ -75,7 +77,8 @@ class ModelFixture:
             }
             finish = "tool_calls"
         else:
-            delta, finish = {"content": action.get("text", "OC1-PONG")}, "stop"
+            delta = {"content": action.get("text", "OC1-PONG")}
+            finish = action.get("finish_reason", "stop")
         base = {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 1, "model": "fixture"}
         chunks = [
             dict(base, choices=[{"index": 0, "delta": {"role": "assistant", **delta}, "finish_reason": None}]),
@@ -199,6 +202,79 @@ async def test_text_followup_tool_usage_and_cleanup(runtime):
         for message in terminal.result.messages
         for block in message.content
     )
+    await h.stop()
+    assert (await server.properties(owner)).get("ActiveState") != "active"
+    assert not (server.scope / "owner.json").exists()
+
+
+@pytest.mark.parametrize("output_budget", [None, 8192], ids=["default-4096", "explicit-8192"])
+@pytest.mark.asyncio
+async def test_model_output_budget_reaches_real_request(runtime, output_budget):
+    config, model, work, create = runtime
+    if output_budget is not None:
+        config = replace(config, model=replace(config.model, max_output_tokens=output_budget))
+    h = create(config)
+    await h.start(make_context(cwd=str(work)))
+    server, owner = h._server, dict(h._server.owner)
+    _, terminal = await turn(h, "Reply OC1-PONG using the configured output budget")
+    assert terminal.kind is TurnEventKind.FINISHED, terminal.result
+    foreground = [request for request in model.requests if request.get("tools")]
+    assert foreground
+    expected = output_budget if output_budget is not None else 4096
+    for request in foreground:
+        # Inspect the real compatible HTTP request, not the generated CLI config.
+        budgets = [request[key] for key in ("max_tokens", "max_completion_tokens") if key in request]
+        assert budgets == [expected], request
+    await h.stop()
+    assert (await server.properties(owner)).get("ActiveState") != "active"
+    assert not (server.scope / "owner.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "text", "error_code"),
+    [
+        ("length", "", "model_output_limit_exceeded"),
+        ("length", "OC1-INCOMPLETE", "model_output_limit_exceeded"),
+        ("content_filter", "", "native_error"),
+    ],
+    ids=["length-empty", "length-partial", "content-filter"],
+)
+@pytest.mark.asyncio
+async def test_nonstop_model_finish_fails_and_next_turn_recovers(runtime, finish_reason, text, error_code):
+    _, model, work, create = runtime
+    h = create()
+    await h.start(make_context(cwd=str(work)))
+    server, owner = h._server, dict(h._server.owner)
+    model.actions = [{"text": text, "finish_reason": finish_reason}]
+    _, terminal = await turn(h, "Exercise a terminal model limit without retrying this input")
+    assert terminal.kind is TurnEventKind.FAILED, terminal.result
+    assert terminal.result.status is TurnStatus.FAILED
+    assert terminal.result.error.retryable is False
+    assert terminal.result.error.code == error_code
+    assert h.state is HarnessState.IDLE
+    if finish_reason == "content_filter":
+        # Pinned CLI adds ContentFilterError as well as finish=content-filter.
+        # Native errors retain the existing fail/close path, not resumable idle.
+        assert h._poisoned
+        assert (await server.properties(owner)).get("ActiveState") != "active"
+        _, next_terminal = await turn(h, "Must not silently retry a native error")
+        assert next_terminal.result.error.code == "session_requires_restart"
+        assert len([request for request in model.requests if request.get("tools")]) == 1
+        await h.stop()
+        assert not (server.scope / "owner.json").exists()
+        return
+    assert not model.actions
+    assert len([request for request in model.requests if request.get("tools")]) == 1
+
+    # An authoritative idle failure ends just this turn; it must not poison the session.
+    model.actions = [{"text": "OC1-AFTER-MODEL-LIMIT"}]
+    _, terminal = await turn(h, "Reply normally after the previous model limit")
+    assert terminal.kind is TurnEventKind.FINISHED, terminal.result
+    assert terminal.result.status is TurnStatus.COMPLETED
+    assert terminal.result.final_output == "OC1-AFTER-MODEL-LIMIT"
+    assert len([request for request in model.requests if request.get("tools")]) == 2
+    assert h._server is server
+    assert dict(server.owner) == owner
     await h.stop()
     assert (await server.properties(owner)).get("ActiveState") != "active"
     assert not (server.scope / "owner.json").exists()
@@ -396,8 +472,7 @@ async def test_sql2java_plugin_workflow_list_through_managed_native_loader(runti
     _, terminal = await turn(h, "List sql2java workflow runs")
     assert terminal.kind is TurnEventKind.FINISHED, terminal.result
     assert any(
-        isinstance(request, ToolApprovalRequest) and request.tool_name == "workflow"
-        for request in handler.requests
+        isinstance(request, ToolApprovalRequest) and request.tool_name == "workflow" for request in handler.requests
     )
     assert any(
         block.kind == "tool_result" and "No runs" in str(block.content)
