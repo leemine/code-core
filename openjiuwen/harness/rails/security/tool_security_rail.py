@@ -210,6 +210,32 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         )
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
+        if isinstance(decision, ApproveResult) and self._host.authorize_tool is not None:
+            from openjiuwen.core.foundation.tool.authority import _has_tool_call_scope, bind_tool_authorizer
+            # Direct rail callers retain their historical decision-only API.
+            # AbilityManager alone owns the exact per-tool execution lifetime.
+            if _has_tool_call_scope(ctx):
+                bind_tool_authorizer(ctx, self._authorize_final_tool)
+
+    async def _authorize_final_tool(self, operation):
+        from openjiuwen.core.foundation.tool.authority import current_tool_invocation
+        from openjiuwen.harness_protocol import json_value_to_builtin
+
+        proof = current_tool_invocation()
+        callback = self._host.authorize_tool
+        if proof is None or callback is None:
+            return False
+        args = json_value_to_builtin(operation.arguments)
+        scene = PermissionSceneHookInput(
+            ctx=proof.agent_context,
+            tool_call=ToolCall(id=operation.call_id, type="function",
+                               name=operation.tool_name, arguments=json.dumps(args)),
+            user_input=None,
+            normalized_tool_name=self._normalize_tool_name(operation.tool_name),
+            tool_args=args,
+            engine=self._engine,
+        )
+        return await callback(scene) is True and self._host.authorize_tool is callback
 
     def set_trusted_dirs(self, trusted_dirs: Optional[Iterable[Any]]) -> None:
         """Per-request hot update of trusted directories.

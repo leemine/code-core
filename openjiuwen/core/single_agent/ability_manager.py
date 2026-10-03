@@ -9,7 +9,7 @@ import json
 import os
 import traceback
 from dataclasses import dataclass
-from typing import List, Any, Union, Optional, Tuple, Dict, Iterable, Callable
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import anyio
 from pydantic import BaseModel
@@ -17,13 +17,13 @@ from pydantic import BaseModel
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import AgentError
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
-from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.tool import Tool
-from openjiuwen.core.foundation.tool import ToolCard, ToolExposure
-from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.foundation.llm import ToolCall, ToolMessage
+from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard, ToolExposure, ToolInfo
 from openjiuwen.core.foundation.tool.mcp.base import mcp_model_tool_name, mcp_model_tool_prefix
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.agent import Session, create_agent_session
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.kv_cache import kv_cache_child_session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -31,15 +31,11 @@ from openjiuwen.core.single_agent.rail.base import (
     bind_usage_delegation,
     build_usage_delegation_attribution,
     current_usage_invocation_id,
-    reset_usage_delegation,
     rail,
+    reset_usage_delegation,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.workflow import WorkflowCard
-from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
-from openjiuwen.core.session.agent import create_agent_session
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
-from openjiuwen.core.single_agent.kv_cache import kv_cache_child_session
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
@@ -1134,7 +1130,7 @@ class AbilityManager:
                 )
             tool_contexts.append(tool_ctx)
             call_coros.append(
-                self._railed_execute_single_tool_call(
+                self._authorized_tool_call(
                     ctx=tool_ctx,
                     tool_call=single_tool_call,
                     session=session,
@@ -1307,6 +1303,13 @@ class AbilityManager:
 
         return final_results
 
+    async def _authorized_tool_call(self, *, ctx, tool_call, session, tag):
+        from openjiuwen.core.foundation.tool.authority import _tool_call_scope
+        with _tool_call_scope(ctx):
+            return await self._railed_execute_single_tool_call(
+                ctx=ctx, tool_call=tool_call, session=session, tag=tag,
+            )
+
     @rail(
         before=AgentCallbackEvent.BEFORE_TOOL_CALL,
         after=AgentCallbackEvent.AFTER_TOOL_CALL,
@@ -1341,6 +1344,9 @@ class AbilityManager:
             if ctx.inputs.tool_args is not None:
                 tool_call.arguments = ctx.inputs.tool_args
 
+        from openjiuwen.core.foundation.tool.authority import _mandatory
+        if _mandatory() and tool_call.name not in self._tools:
+            raise PermissionError("[PERMISSION_DENIED] Mandatory authority requires a registered Tool")
         result, tool_msg = await self._execute_single_tool_call(
             tool_call=tool_call,
             session=session,
@@ -1372,7 +1378,7 @@ class AbilityManager:
         Raises AbilityExecutionError on failure (caller wraps in try/except).
         """
         from openjiuwen.core.runner import Runner
-        from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
+        from openjiuwen.core.workflow import WorkflowExecutionState, WorkflowOutput
 
         workflow_session = session.create_workflow_session() if session is not None else None
         workflow_context = (
@@ -1452,7 +1458,12 @@ class AbilityManager:
                     and getattr(tool, "accepts_tool_callback_context", False)
                 ):
                     invoke_kwargs["_tool_callback_context"] = callback_context
-                with anyio.fail_after(call_timeout):
+                from openjiuwen.core.foundation.tool.authority import _mandatory, _tool_execution_scope
+                def resolve_executor():
+                    return Runner.resource_mgr.get_tool(tool_id=tool_id, tag=tag, session=None)
+                actual_tool = resolve_executor() if _mandatory() else tool
+                with (_tool_execution_scope(callback_context, actual_tool, resolve_executor, invoke_kwargs),
+                      anyio.fail_after(call_timeout)):
                     result = await tool.invoke(tool_args, **invoke_kwargs)
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
