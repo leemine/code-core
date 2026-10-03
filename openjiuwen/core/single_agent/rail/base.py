@@ -22,18 +22,18 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from typing import (
+    TYPE_CHECKING,
     Any,
-    Union,
+    Awaitable,
+    Callable,
     Dict,
     List,
     Optional,
-    Callable,
-    Awaitable,
-    TYPE_CHECKING,
+    Union,
 )
 
+from openjiuwen.core.common.exception.errors import ModelRequestDenied
 from openjiuwen.core.common.logging import logger
-
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.agent import Session
@@ -1046,6 +1046,10 @@ def rail(
                             timestamp=time.monotonic(),
                         )
                     )
+                    # A mandatory authority denial cannot be recovered by a
+                    # backup model, retry directive, or force-finish callback.
+                    if isinstance(e, ModelRequestDenied):
+                        raise
                     if on_exception:
                         try:
                             await ctx.fire(on_exception)

@@ -10,26 +10,16 @@ import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ModelError, build_error
-from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
-    AudioGenerationResponse
-from openjiuwen.core.foundation.llm.schema.message import (
-    BaseMessage,
-    AssistantMessage,
-    UsageMetadata,
-    UserMessage
-)
-from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
-from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.headers_helper import (
     PROTECTED_HEADERS,
     build_base_headers,
     merge_request_headers,
 )
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.reasoning import (
     UNSET_REASONING,
     apply_reasoning_plan,
@@ -37,7 +27,22 @@ from openjiuwen.core.foundation.llm.reasoning import (
     reasoning_request_controls,
     resolve_reasoning_plan,
 )
-from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.request_authority import (
+    ModelRequestAuthority,
+    ModelRequestAuthorityFactory,
+    _ModelRequestDeniedSignal,
+    authority_for_http,
+    authorize_model_call,
+    guarded_request_hook,
+    request_denied,
+    require_supported_request_authority,
+    unwrap_request_denial,
+)
+from openjiuwen.core.foundation.llm.schema import (
+    AudioGenerationResponse,
+    ImageGenerationResponse,
+    VideoGenerationResponse,
+)
 from openjiuwen.core.foundation.llm.schema.config import (
     LLMApiMode,
     LLMAuthMode,
@@ -45,6 +50,9 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
     ProviderType,
 )
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, UsageMetadata, UserMessage
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
     _deepseek_reasoning_content,
     apply_message_transforms,
@@ -52,6 +60,7 @@ from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
 )
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
@@ -388,8 +397,27 @@ class OpenAIModelClient(BaseModelClient):
     # purpose: one cache per process.
     _client_cache: Dict[Tuple, "openai.AsyncOpenAI"] = {}
 
-    def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
+    def __init__(
+        self,
+        model_config: ModelRequestConfig,
+        model_client_config: ModelClientConfig,
+        *,
+        request_authority: ModelRequestAuthority | ModelRequestAuthorityFactory | None = None,
+    ):
+        self._request_authority = request_authority
+        if request_authority is not None:
+            # Unknown subclasses have no proven final HTTP authorization boundary.
+            if type(self) is not OpenAIModelClient or not (  # pylint: disable=unidiomatic-typecheck
+                callable(request_authority) or isinstance(request_authority, ModelRequestAuthorityFactory)
+            ):
+                raise request_denied("unsupported model request authority implementation")
+            require_supported_request_authority(model_client_config)
+            model_client_config = model_client_config.model_copy(update={"api_key": "MODEL_REQUEST_AUTHORITY"})
         super().__init__(model_config, model_client_config)
+        self._authority_endpoint = (
+            str(httpx.URL(_chat_completions_url(model_client_config.api_base)))
+            if request_authority is not None else None
+        )
         self._base_headers = build_base_headers(
             custom_headers=model_client_config.custom_headers,
         )
@@ -422,7 +450,9 @@ class OpenAIModelClient(BaseModelClient):
         Emergency kill-switch: set ``use_shared_llm_http_client=False`` to fall
         back to per-request clients.
         """
-        return bool(getattr(self.model_client_config, "use_shared_llm_http_client", True))
+        return self._request_authority is None and bool(
+            getattr(self.model_client_config, "use_shared_llm_http_client", True)
+        )
 
     @classmethod
     def connection_key(cls, model_client_config: ModelClientConfig) -> Tuple:
@@ -465,7 +495,15 @@ class OpenAIModelClient(BaseModelClient):
         return self.connection_key(self.model_client_config)
 
     def _resolved_api_key(self) -> str:
+        if self._request_authority is not None:
+            return "MODEL_REQUEST_AUTHORITY"
         return _resolved_api_key_for_config(self.model_client_config)
+
+    def _check_request_authority_mode(self) -> None:
+        if self._request_authority is not None:
+            require_supported_request_authority(self.model_client_config)
+            if str(httpx.URL(_chat_completions_url(self.model_client_config.api_base))) != self._authority_endpoint:
+                raise request_denied("model request endpoint changed after construction")
 
     def _get_client_name(self) -> str:
         """Get client name."""
@@ -527,8 +565,10 @@ class OpenAIModelClient(BaseModelClient):
             self,
             params: dict,
             *,
-            timeout: Optional[float] = None,
+            timeout: Optional[float] = None,  # noqa: ASYNC109 - Existing timeout keyword API.
     ) -> AsyncIterator[AssistantMessageChunk]:
+        if self._request_authority is not None:
+            raise request_denied("affinity transport does not support model request authority")
         url = _chat_completions_url(self.model_client_config.api_base)
         headers = self._affinity_http_headers(stream=True)
         body = self._affinity_request_body(params)
@@ -805,10 +845,12 @@ class OpenAIModelClient(BaseModelClient):
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
-            timeout: Optional[float] = None,
+            timeout: Optional[float] = None,  # noqa: ASYNC109 - Existing timeout keyword API.
             max_attempts: Optional[int] = None,
             **kwargs,
     ) -> bool:
+        if self._request_authority is not None:
+            raise request_denied("cache management does not support model request authority")
         if not self.supports_kv_cache_affinity():
             return False
 
@@ -1097,6 +1139,7 @@ class OpenAIModelClient(BaseModelClient):
         """Build a fresh ``AsyncOpenAI`` client with its own httpx connection pool."""
         from openai import AsyncOpenAI
 
+        self._check_request_authority_mode()
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
@@ -1106,14 +1149,17 @@ class OpenAIModelClient(BaseModelClient):
         # staying at/under common upstream/LB idle timeouts (avoids reusing a
         # server-closed "dead" connection).
         event_hooks = None
-        if _should_omit_authorization(self.model_client_config):
+        if self._request_authority is not None:
+            event_hooks = {"request": [guarded_request_hook(authority_for_http(self), self._authority_endpoint)]}
+        elif _should_omit_authorization(self.model_client_config):
             async def _strip_authorization(request: httpx.Request) -> None:
                 request.headers.pop("Authorization", None)
 
             event_hooks = {"request": [_strip_authorization]}
 
         http_client = httpx.AsyncClient(
-            proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
+            proxy=(None if self._request_authority is not None
+                   else UrlUtils.get_global_proxy_url(self.model_client_config.api_base)),
             verify=verify,
             limits=httpx.Limits(
                 max_connections=100,
@@ -1121,6 +1167,7 @@ class OpenAIModelClient(BaseModelClient):
                 keepalive_expiry=60.0,
             ),
             event_hooks=event_hooks,
+            **({"follow_redirects": False, "trust_env": False} if self._request_authority is not None else {}),
         )
 
         # Use method-level timeout if provided, otherwise use config timeout
@@ -1129,7 +1176,7 @@ class OpenAIModelClient(BaseModelClient):
             "Before create openai client, model client config params ready.",
             event_type=LogEventType.LLM_CALL_START,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries
+            max_retries=self.model_client_config.max_retries,
         )
 
         return AsyncOpenAI(
@@ -1137,7 +1184,9 @@ class OpenAIModelClient(BaseModelClient):
             base_url=_normalize_openai_base_url(self.model_client_config.api_base),
             http_client=http_client,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries
+            max_retries=self.model_client_config.max_retries,
+            **({"organization": "", "project": "", "webhook_secret": ""}
+               if self._request_authority is not None else {}),
         )
 
     @classmethod
@@ -1253,6 +1302,8 @@ class OpenAIModelClient(BaseModelClient):
         )
 
     def _make_responses_transport(self, *, timeout: Optional[float]) -> OpenAIAccountResponsesTransport:
+        if self._request_authority is not None:
+            raise request_denied("Responses transport does not support model request authority")
         verify = (
             SslUtils.create_strict_ssl_context(self.model_client_config.ssl_cert)
             if self.model_client_config.verify_ssl
@@ -1297,7 +1348,7 @@ class OpenAIModelClient(BaseModelClient):
             max_tokens: Optional[int],
             stop: Union[Optional[str], None],
             output_parser: Optional[BaseOutputParser],
-            timeout: Optional[float],
+            timeout: Optional[float],  # noqa: ASYNC109 - Existing timeout keyword API.
             tracer_record_data,
             request_custom_headers,
             **kwargs,
@@ -1376,7 +1427,7 @@ class OpenAIModelClient(BaseModelClient):
             max_tokens: Optional[int],
             stop: Union[Optional[str], None],
             output_parser: Optional[BaseOutputParser],
-            timeout: Optional[float],
+            timeout: Optional[float],  # noqa: ASYNC109 - Existing timeout keyword API.
             tracer_record_data,
             request_custom_headers,
             **kwargs,
@@ -1488,6 +1539,7 @@ class OpenAIModelClient(BaseModelClient):
             exception=f"{type(error).__name__}: {error}",
         )
 
+    @authorize_model_call()
     async def invoke(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
@@ -1499,7 +1551,7 @@ class OpenAIModelClient(BaseModelClient):
             max_tokens: Optional[int] = None,
             stop: Union[Optional[str], None] = None,
             output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
+            timeout: float = None,  # noqa: ASYNC109 - Existing timeout keyword API.
             **kwargs
     ) -> AssistantMessage:
         """Async invoke OpenAI API
@@ -1519,6 +1571,7 @@ class OpenAIModelClient(BaseModelClient):
         Returns:
             AssistantMessage: Model response
         """
+        self._check_request_authority_mode()
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
 
@@ -1628,7 +1681,11 @@ class OpenAIModelClient(BaseModelClient):
 
             return assistant_message
 
+        except _ModelRequestDeniedSignal as denial:
+            unwrap_request_denial(denial)
         except Exception as e:
+            if self._request_authority is not None:
+                unwrap_request_denial(e)
             await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
@@ -1662,6 +1719,7 @@ class OpenAIModelClient(BaseModelClient):
             if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
+    @authorize_model_call()
     async def stream(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
@@ -1673,7 +1731,7 @@ class OpenAIModelClient(BaseModelClient):
             max_tokens: Optional[int] = None,
             stop: Union[Optional[str], None] = None,
             output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
+            timeout: float = None,  # noqa: ASYNC109 - Existing timeout keyword API.
             **kwargs
     ) -> AsyncIterator[AssistantMessageChunk]:
         """Async streaming invoke OpenAI API
@@ -1693,6 +1751,7 @@ class OpenAIModelClient(BaseModelClient):
         Yields:
             AssistantMessageChunk: Streaming response chunk
         """
+        self._check_request_authority_mode()
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
 
@@ -1827,7 +1886,11 @@ class OpenAIModelClient(BaseModelClient):
                 usage=final_message.usage_metadata if final_message else None,
                 tool_calls=final_message.tool_calls if final_message else None)
 
+        except _ModelRequestDeniedSignal as denial:
+            unwrap_request_denial(denial)
         except Exception as e:
+            if self._request_authority is not None:
+                unwrap_request_denial(e)
             # Many stream-layer exceptions (httpx.RemoteProtocolError,
             # APIConnectionError wrappers, asyncio.CancelledError) return an
             # empty str(), which leaves the error log unactionable. Always
@@ -2053,6 +2116,8 @@ class OpenAIModelClient(BaseModelClient):
             self._raise_dashscope_model_error("speech generation", exc)
 
     def _require_dashscope_media_profile(self, operation: str) -> None:
+        if self._request_authority is not None:
+            raise request_denied("media generation does not support model request authority")
         if self._endpoint_profile_name() == "dashscope":
             return
         raise build_error(
