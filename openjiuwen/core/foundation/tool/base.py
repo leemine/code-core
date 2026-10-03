@@ -5,14 +5,18 @@ import inspect
 import json
 from abc import ABCMeta, abstractmethod
 from functools import wraps
-from typing import Any, AsyncIterator, Dict, Type
-from typing import TypeVar
-from pydantic import BaseModel, Field
-from pydantic import PrivateAttr
+from typing import Any, AsyncIterator, Dict, Type, TypeVar
+
+from pydantic import BaseModel, Field, PrivateAttr
 
 from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.tool.authority import (
+    _authorize_final_invocation,
+    _deny_protected_stream,
+    _register_tool_invocation,
+)
 from openjiuwen.core.foundation.tool.exposure import ToolExposure
 from openjiuwen.core.foundation.tool.schema import ToolInfo, ToolOutput
 
@@ -145,6 +149,7 @@ class _ToolMeta(ABCMeta):
                               tool_id=instance.card.id,
                               inputs=(a, kw))
             try:
+                await _authorize_final_invocation(instance, _original_invoke, a, kw)
                 result = await _original_invoke(*a, **kw)
                 await _fw.trigger(ToolCallEvents.TOOL_CALL_FINISHED,
                                   tool_name=instance.card.name,
@@ -166,6 +171,7 @@ class _ToolMeta(ABCMeta):
         if inspect.isasyncgenfunction(_original_stream):
             @wraps(_original_stream)
             async def _lifecycle_stream(*a, **kw):
+                _deny_protected_stream()
                 await _fw.trigger(ToolCallEvents.TOOL_CALL_STARTED,
                                   tool_name=instance.card.name,
                                   tool_id=instance.card.id,
@@ -189,6 +195,18 @@ class _ToolMeta(ABCMeta):
                     raise
 
             instance.stream = _lifecycle_stream
+        elif inspect.iscoroutinefunction(_original_stream):
+            @wraps(_original_stream)
+            async def _guarded_stream(*a, **kw):
+                _deny_protected_stream()
+                return await _original_stream(*a, **kw)
+            instance.stream = _guarded_stream
+        else:
+            @wraps(_original_stream)
+            def _guarded_sync_stream(*a, **kw):
+                _deny_protected_stream()
+                return _original_stream(*a, **kw)
+            instance.stream = _guarded_sync_stream
         _extra = {
             "tool_name": instance.card.name,
             "tool_info": instance.card.tool_info(),
@@ -201,6 +219,7 @@ class _ToolMeta(ABCMeta):
         )(fn)
         fn = _fw.emit_after(ToolCallEvents.TOOL_INVOKE_OUTPUT, extra_kwargs=_extra)(fn)
         instance.invoke = fn
+        _register_tool_invocation(instance, fn, _original_invoke)
 
         fn = instance.stream
         fn = _fw.emit_before(ToolCallEvents.TOOL_STREAM_INPUT, extra_kwargs=_extra)(fn)

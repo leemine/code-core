@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_PATHS = (
     "tests/unit_tests/agent_teams/harness/test_mandatory_authority.py",
     "tests/unit_tests/harness/security/test_mandatory_authorization.py",
+    "tests/unit_tests/core/foundation/tool/test_final_authority.py",
+    "tests/unit_tests/harness/tools/test_builtin_final_authority.py",
     "tests/unit_tests/harness_providers/test_tool_authorizer.py",
     "tests/unit_tests/harness_providers/test_native_host.py",
     "tests/unit_tests/harness_providers/test_opencode.py",

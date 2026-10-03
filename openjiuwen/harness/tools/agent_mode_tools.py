@@ -273,13 +273,14 @@ class EnterPlanModeTool(Tool):
     without creating a new file.
     """
 
-    def __init__(self, agent_ref: "DeepAgent", language: str = "cn") -> None:
+    def __init__(self, agent_ref: "DeepAgent", language: str = "cn", *, instructions: str | None = None) -> None:
         """Initialize EnterPlanModeTool.
 
         Args:
             agent_ref: Reference to the parent DeepAgent used to access
                 session state and workspace config.
             language: UI language for the tool card (``"cn"`` or ``"en"``).
+            instructions: Optional plan instructions appended to the result.
         """
         super().__init__(
             build_tool_card(
@@ -290,6 +291,7 @@ class EnterPlanModeTool(Tool):
         )
         self._agent_ref = agent_ref
         self._language = language
+        self._instructions = instructions
 
     async def invoke(self, inputs: Input, **kwargs) -> str:
         """Create the plan file and return its path.
@@ -314,8 +316,8 @@ class EnterPlanModeTool(Tool):
             )
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             if plan_path.exists():
-                return _ENTER_PLAN_EXISTS_MSG[lang].format(plan_path=plan_path)
-            return _ENTER_PLAN_CREATED_MSG[lang].format(plan_path=plan_path)
+                return self._with_instructions(_ENTER_PLAN_EXISTS_MSG[lang].format(plan_path=plan_path))
+            return self._with_instructions(_ENTER_PLAN_CREATED_MSG[lang].format(plan_path=plan_path))
 
         slug = get_or_create_plan_slug(workspace_root)
         plan_path = resolve_plan_file_path(workspace_root, slug)
@@ -324,7 +326,10 @@ class EnterPlanModeTool(Tool):
         state.plan_mode.plan_slug = slug
         agent.save_state(session, state)
 
-        return _ENTER_PLAN_CREATED_MSG[lang].format(plan_path=plan_path)
+        return self._with_instructions(_ENTER_PLAN_CREATED_MSG[lang].format(plan_path=plan_path))
+
+    def _with_instructions(self, result: str) -> str:
+        return result + "\n\n" + self._instructions if self._instructions else result
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass
@@ -337,12 +342,13 @@ class ExitPlanModeTool(Tool):
     tool result so the LLM can reference it when starting execution.
     """
 
-    def __init__(self, agent_ref: "DeepAgent", language: str = "cn") -> None:
+    def __init__(self, agent_ref: "DeepAgent", language: str = "cn", *, notification: str | None = None) -> None:
         """Initialize ExitPlanModeTool.
 
         Args:
             agent_ref: Reference to the parent DeepAgent.
             language: UI language for the tool card (``"cn"`` or ``"en"``).
+            notification: Optional completion notification appended to the result.
         """
         super().__init__(
             build_tool_card(
@@ -353,6 +359,7 @@ class ExitPlanModeTool(Tool):
         )
         self._agent_ref = agent_ref
         self._language = language
+        self._notification = notification
 
     async def invoke(self, inputs: Input, **kwargs) -> str:
         """Read plan file and restore auto mode.
@@ -375,11 +382,14 @@ class ExitPlanModeTool(Tool):
         plan_path_str = str(plan_path) if plan_path else ""
         lang = _plan_mode_tool_language(self._language)
         if not plan_text.strip():
-            return _EXIT_PLAN_EMPTY_MSG[lang].format(plan_path=plan_path_str)
+            return self._with_notification(_EXIT_PLAN_EMPTY_MSG[lang].format(plan_path=plan_path_str))
 
         agent.restore_mode_after_plan_exit(session)
         prefix = _EXIT_PLAN_WITH_CONTENT_PREFIX[lang].format(plan_path=plan_path_str)
-        return prefix + plan_text
+        return self._with_notification(prefix + plan_text)
+
+    def _with_notification(self, result: str) -> str:
+        return result + "\n\n" + self._notification if self._notification else result
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

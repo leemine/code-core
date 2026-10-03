@@ -19,7 +19,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-09-16 |
+| 最近一次修订日期 | 2026-10-04 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md |
 
 ## 范围 / 边界
@@ -52,7 +52,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 1. **唯一工厂**：从 `agent_teams.tools` 拿团队工具的合法路径只有
    `create_team_tools(...)`。其他模块不得直接 `import` 具体工具类
    （`BuildTeamTool` 等）来自行装配——绕开工厂就绕开了角色筛选、`teammate_mode`
-   门禁、`exclude_tools` 屏蔽和 `_wrap_invoke_with_logging` 包装。
+   门禁、`exclude_tools` 屏蔽和实例日志配置。
 2. **ToolCard ID 全局前缀**：每个团队工具的 `ToolCard.id` 形如
    `team.{name}`。`name` 在团队工具集合内全局唯一，不允许跨角色重名。
    下游（rails、日志、UI 标签、Runner.resource_mgr）按 `team.` 前缀解析。
@@ -357,7 +357,7 @@ def create_team_tools(
     exclude_tools: set[str] | None = None,
     lang: str = "cn",
 ) -> list[Tool]:
-    """Build the role-appropriate team tool list and return them wrapped."""
+    """Build the role-appropriate team tool list with invocation logging enabled."""
 ```
 
 参数语义：
@@ -375,8 +375,11 @@ def create_team_tools(
 返回值：
 
 - 顺序按工厂内 `all_tools` 字典声明序遍历后过滤；调用方不应该依赖具体顺序。
-- 每个返回 `Tool` 的 `invoke` 已被 `_wrap_invoke_with_logging` 包过，只加 debug
-  日志，返回值是原 `invoke` 的 `ToolOutput`，不做文本映射。
+- `TeamTool` 在子类定义时装配 debug 日志，工厂仅开启实例日志开关，不替换构造时
+  已登记的 invoke。最终强制授权成功后才进入日志与工具主体；拒绝不访问后端。
+  起止日志保留原文本和结构化 `ToolOutput`，不做文本映射；重复开启不会叠加日志。
+- 独立 Swarmflow/AsyncTool 保持旧日志包装，尚不支持本轮最终 Tool authority；
+  受保护调用明确拒绝。不能据此宣称 Swarmflow 已通过本批验收。
 
 错误语义：
 
