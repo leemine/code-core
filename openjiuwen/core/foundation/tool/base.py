@@ -12,6 +12,11 @@ from pydantic import BaseModel, Field, PrivateAttr
 from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.tool.authority import (
+    _authorize_final_invocation,
+    _deny_protected_stream,
+    _register_tool_invocation,
+)
 from openjiuwen.core.foundation.tool.exposure import ToolExposure
 from openjiuwen.core.foundation.tool.schema import ToolInfo, ToolOutput
 
@@ -135,11 +140,6 @@ class _ToolMeta(ABCMeta):
         from openjiuwen.core.runner.callback.events import ToolCallEvents
         _fw = Runner.callback_framework
 
-        from openjiuwen.core.foundation.tool.authority import (
-            _authorize_final_invocation,
-            _deny_protected_stream,
-            _register_tool_invocation,
-        )
         _original_invoke = instance.invoke
 
         @wraps(_original_invoke)
