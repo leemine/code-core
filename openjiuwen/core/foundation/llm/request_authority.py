@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import lru_cache, wraps
+from functools import wraps
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -199,25 +199,21 @@ def require_supported_request_authority(config: ModelClientConfig) -> None:
         raise request_denied("request authority supports only OpenAI API-key chat completions")
 
 
-@lru_cache(maxsize=1)
-def _sdk_denial_type():
-    # Keep the optional SDK lazy. OpenAIError bypasses SDK connection retries.
-    from openai import OpenAIError
+class _ModelRequestDeniedSignal(BaseException):
+    """Private HTTP-to-client signal bypassing SDK connection-error retries.
 
-    class _OpenAIRequestDenied(OpenAIError):
-        def __init__(self, denial):
-            super().__init__("model request authorization denied")
-            self.denial = denial
-
-    return _OpenAIRequestDenied
+    Older supported OpenAI SDKs catch every Exception, including OpenAIError.
+    The client must consume this signal and expose only ModelRequestDenied.
+    It carries no host exception, request, headers or credential.
+    """
 
 
-def unwrap_request_denial(error: Exception) -> None:
+def unwrap_request_denial(error: BaseException) -> None:
     """Preserve the safe mandatory denial instead of a retryable SDK wrapper."""
     if isinstance(error, ModelRequestDenied):
         raise error
-    if isinstance(error, _sdk_denial_type()):
-        raise error.denial from None
+    if isinstance(error, _ModelRequestDeniedSignal):
+        raise request_denied("model request authority denied the request") from None
 
 
 def guarded_request_hook(authority: ModelRequestAuthority, endpoint: str) -> Callable[[httpx.Request], Awaitable[None]]:
@@ -291,7 +287,7 @@ def guarded_request_hook(authority: ModelRequestAuthority, endpoint: str) -> Cal
             return
         if cancelled:
             raise asyncio.CancelledError() from None
-        raise _sdk_denial_type()(request_denied("model request authority denied the request")) from None
+        raise _ModelRequestDeniedSignal() from None
 
     return authorize
 

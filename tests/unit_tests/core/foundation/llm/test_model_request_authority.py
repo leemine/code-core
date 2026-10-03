@@ -18,7 +18,11 @@ from openjiuwen.core.foundation.llm import (
 )
 from openjiuwen.core.foundation.llm.model_clients import create_model_client
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
-from openjiuwen.core.foundation.llm.request_authority import guarded_request_hook, unwrap_request_denial
+from openjiuwen.core.foundation.llm.request_authority import (
+    _ModelRequestDeniedSignal,
+    guarded_request_hook,
+    unwrap_request_denial,
+)
 
 
 @pytest.fixture
@@ -255,9 +259,34 @@ async def test_request_changed_during_authority_await_is_denied(change):
     with pytest.raises(ModelRequestDenied):
         try:
             await hook(request)
-        except Exception as error:
+        except _ModelRequestDeniedSignal as error:
             unwrap_request_denial(error)
     assert "Authorization" not in request.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("direct_client", [False, True])
+async def test_private_http_stop_signal_never_escapes_public_api_or_retries(network, stream, direct_client):
+    calls = []
+
+    async def deny(target):
+        calls.append(target)
+        return None
+
+    guarded = model(deny)
+    client = guarded._client if direct_client else guarded
+    # OpenAI 2.24 catches Exception broadly; the private stop must bypass that
+    # retry block and be converted back at the core client boundary.
+    assert not issubclass(_ModelRequestDeniedSignal, Exception)
+    with pytest.raises(ModelRequestDenied) as error:
+        if stream:
+            _ = [chunk async for chunk in client.stream("hello")]
+        else:
+            await client.invoke("hello")
+    assert type(error.value) is ModelRequestDenied
+    assert len(calls) == 1
+    assert network[0] == []
 
 
 @pytest.mark.asyncio

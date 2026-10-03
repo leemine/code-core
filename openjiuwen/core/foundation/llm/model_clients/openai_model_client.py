@@ -30,6 +30,7 @@ from openjiuwen.core.foundation.llm.reasoning import (
 from openjiuwen.core.foundation.llm.request_authority import (
     ModelRequestAuthority,
     ModelRequestAuthorityFactory,
+    _ModelRequestDeniedSignal,
     authority_for_http,
     authorize_model_call,
     guarded_request_hook,
@@ -1680,6 +1681,8 @@ class OpenAIModelClient(BaseModelClient):
 
             return assistant_message
 
+        except _ModelRequestDeniedSignal as denial:
+            unwrap_request_denial(denial)
         except Exception as e:
             if self._request_authority is not None:
                 unwrap_request_denial(e)
@@ -1883,6 +1886,8 @@ class OpenAIModelClient(BaseModelClient):
                 usage=final_message.usage_metadata if final_message else None,
                 tool_calls=final_message.tool_calls if final_message else None)
 
+        except _ModelRequestDeniedSignal as denial:
+            unwrap_request_denial(denial)
         except Exception as e:
             if self._request_authority is not None:
                 unwrap_request_denial(e)
