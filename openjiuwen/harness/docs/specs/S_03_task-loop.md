@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md`、`F_28_round-execution-origin.md`、`F_29_scheduler-submitted-admission.md` |
+| 关联 feature | `F_36_owned-steer-admission.md`、`F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md`、`F_28_round-execution-origin.md`、`F_29_scheduler-submitted-admission.md` |
 
 ## 范围 / 边界
 
@@ -231,3 +231,14 @@ EventManager 的私有 `_capture_origin_work` / `_discard_captured_work` 只按�
 
 Round 的原 wrapper 尾部及 forwarded marker 属于完成条件。托管 Native 超时不会
 清除这些对象或推动后继 Turn；普通 legacy cancel_round 的既有合同保持。
+
+
+## 原 Round 的补充输入
+
+私有 `DeepAgent._send_owned_steer(expected, request, *, check_current)` 仅将文本放入
+原 Round 的原 controller steering 队列。它沿现有 send lock → control lock 顺序，
+在最终入队前检查原 Round/Session/controller/facade/source、非waiting状态及宿主本次
+临时输入的同步权限 checker；原 source 身份不变。输入ID/文本/STEER模式在等待期间
+变化必须拒绝。没有原活动 Round、已经完成或发生替换时不退回新 Round/follow-up。
+此端口不创建输出消费者、Turn或资源授权，不从上下文重建宿主身份；普通send_input兼容
+行为保持。宿主仍须选择并保留原Turn、原entry与本次输入凭据，不以该端口替代宿主授权。
