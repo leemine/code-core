@@ -163,3 +163,7 @@ legacy None 及单消费者不变。来源不入 GoalRecord，不据持久记录
 空闲重新准入与普通受管输出 attach 固定原 `SessionGoalStore._session` 对象，不能仅凭
 同 session_id 或相同 GoalRecord 接受另一存储 Session。原 checker 后、跨 commit/attach
 await 后均复核该归属，失败不排队、不触发自动 ensure。
+
+活动 Goal 控制 selector 在来源回调前固定实际 Store backing Session，并要求其与
+原 attempt Session 为同一对象。capture/apply/commit await 后/clear ACK 的静态复核
+均检查该对象归属；同 ID 和相同记录不是可替换存储的证明。
