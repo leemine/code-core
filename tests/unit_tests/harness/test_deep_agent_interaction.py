@@ -206,7 +206,7 @@ async def test_continuation_inputs_bypass_fresh_context(
 
     assert agent._event_manager.next_work().request_id == "resume-1"
     assert agent._event_manager.next_work().request_id == "follow-1"
-    loop.enqueue_steer.assert_called_once_with("adjust")
+    loop.enqueue_steer.assert_called_once_with("adjust", origin=None)
 
 
 @pytest.mark.asyncio
