@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagent_runtime/` |
-| 最近一次修订日期 | 2026-09-22 |
-| 关联 feature | `F_05_provider-neutral-subagent-execution.md` |
+| 最近一次修订日期 | 2026-10-04 |
+| 关联 feature | `F_33_subagent-origin-exit.md`、`F_05_provider-neutral-subagent-execution.md` |
 
 ## 范围 / 边界
 
@@ -204,3 +204,21 @@ class SubagentExecutionFactory(Protocol):
 - KVC 子代理生命周期适配 —— `S_16`。
 - 与 `agent_teams` 的 `F_44`（worker-not-teammate-no-db）同属子代理运行时思想，但实现
   独立（harness 侧不自带 DB，状态走 record 文件）。
+
+## Live 操作来源与退出尾部
+
+1. UserInputOp 私有 InitVar origin/lifetime 仅用于原操作生命周期；默认/公开字段恢复为
+   None，不进 asdict/JSON/persist，不赋予子执行父工具/模型权限。复制保留原来源身份，
+   显式清源为 None。继承但已失活的 scope 拒绝新工作，不降为 legacy。
+2. 原 instance 的 claimed op、acquire Task、current run 与 worker tail 归同 lifetime。
+   私有 capture/finish 端口按对象身份处理原 queue item；先 fence 所有原 op 再 await，
+   只取消一次并 join 原任务，不取消共享 worker。RUNNING 回调 await 后禁止迟到派发。
+3. 同 child 后继输入保留前一 managed op 的活动 gate。活动项携带原 operation 至原
+   emitter queued/current write 真正退出；显式取消仅删除原 queued item，正在写入的
+   item 等原 write 返回。公共 drain 存活不等同该来源仍有工作；历史投影不保存 carrier。
+4. NativeSubagentExecution 保留父 execution_origin 遮蔽；私有 nested 生命周期载体
+   不授父资源权限。原 finalizer Task 真正退出后 run_turn 才可退出；重复 caller cancel
+   不丢原 Task，真实 finalizer 错误继续传播。
+5. 后台 child 可以跨父逻辑 Turn 生存；来源由原已准入 op 保留。父正常 EOF 不调用
+   全 child join/cancel。新的私有端口是显式资源退出的基础，不代表已接入完整子树权限
+   与 Runtime credential 清理。旧 session_spawn 独立路径不由 UserInputOp 证明。
