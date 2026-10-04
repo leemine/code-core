@@ -737,3 +737,128 @@ async def test_committed_row_snapshot_updates_only_from_actual_transaction(case)
         assert await c.db.team.delete_team('same-team') is True
     assert updated.committed_facts() is after
     assert await c.db.member.get_member('member', 'same-team') is None
+
+
+@pytest.mark.asyncio
+async def test_receipt_fact_query_after_source_exit_uses_original_writer(case):
+    c = case
+    receipt = await c.create()
+    c.enabled = False
+    with pytest.raises(MemberRecordDenied):
+        receipt.check_current()
+    facts = await c.db.member.read_committed_member(receipt)
+    assert facts is receipt.committed_facts()
+    assert dict(facts.record)['display_name'] == 'Alice'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mutation', ['overwrite', 'recreate', 'advance'])
+async def test_receipt_fact_query_rejects_changed_or_recreated_row(case, mutation):
+    c = case
+    receipt = await c.create()
+    if mutation == 'advance':
+        with execution_origin_scope(c.origin):
+            updated = await mutate(c, 'status')
+        assert await c.db.member.read_committed_member(updated) is updated.committed_facts()
+    else:
+        async with c.db._sessions.write() as tx:
+            if mutation == 'overwrite':
+                await tx.execute(update(TeamMember).values(display_name='other private body'))
+            else:
+                await tx.execute(delete(TeamMember))
+            await tx.commit()
+        if mutation == 'recreate':
+            c.receipts.clear()
+            replacement = await c.create()
+            assert replacement.stamp.nonce != receipt.stamp.nonce
+    with pytest.raises(MemberRecordDenied):
+        await c.db.member.read_committed_member(receipt)
+
+
+@pytest.mark.asyncio
+async def test_receipt_fact_query_ignores_retargeted_read_replica(case, tmp_path):
+    c = case
+    receipt = await c.create()
+    other = TeamDatabase(DatabaseConfig(connection_string=str(tmp_path / 'other.sqlite')))
+    await other.initialize()
+    try:
+        # Clone exactly the old stamped row into B, then change actual A.
+        await other.team.create_team("same-team", "Team", "member")
+        original = await c.db.member.get_member('member', 'same-team')
+        async with other._sessions.write() as tx:
+            tx.add(TeamMember(**{col.name: getattr(original, col.name) for col in TeamMember.__table__.columns}))
+            await tx.commit()
+        async with c.db._sessions.write() as tx:
+            await tx.execute(update(TeamMember).values(display_name='changed A'))
+            await tx.commit()
+        c.db._sessions._read_session_local = other.session_local
+        assert (await c.db.member.get_member('member', 'same-team')).display_name == 'Alice'
+        with pytest.raises(MemberRecordDenied):
+            await c.db.member.read_committed_member(receipt)
+    finally:
+        await other.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['writer', 'mapper', 'dao', 'receipt'])
+async def test_receipt_fact_query_rejects_original_sink_or_receipt_replacement(case, tmp_path, change):
+    c = case
+    receipt = await c.create()
+    other = TeamDatabase(DatabaseConfig(connection_string=str(tmp_path / 'other.sqlite')))
+    await other.initialize()
+    try:
+        if change == 'writer':
+            c.db._sessions._write_session_local = other.session_local
+        elif change == 'mapper':
+            c.db.session_local.configure(binds={TeamMember: other.engine})
+        elif change == 'dao':
+            c.db.member._sessions = other._sessions
+        else:
+            receipt = object.__new__(MemberWriteReceipt)
+        with pytest.raises(MemberRecordDenied):
+            await c.db.member.read_committed_member(receipt)
+    finally:
+        await other.close()
+
+
+@pytest.mark.asyncio
+async def test_receipt_fact_query_cannot_rebind_entire_database_to_cloned_row(case, tmp_path):
+    c = case
+    receipt = await c.create()
+    other = TeamDatabase(DatabaseConfig(connection_string=str(tmp_path / 'clone.sqlite')))
+    await other.initialize()
+    await other.team.create_team('same-team', 'Team', 'member')
+    original_engine, original_factory = c.db.engine, c.db.session_local
+    try:
+        original = await c.db.member.get_member('member', 'same-team')
+        async with other._sessions.write() as tx:
+            tx.add(TeamMember(**{col.name: getattr(original, col.name) for col in TeamMember.__table__.columns}))
+            await tx.commit()
+        c.db.engine = other.engine
+        c.db.session_local = other.session_local
+        c.db._sessions._write_session_local = other.session_local
+        # Every mutable current reference agrees, but differs from issuance.
+        c.db._member_record_writes.references(c.db.member)
+        with pytest.raises(MemberRecordDenied):
+            await c.db.member.read_committed_member(receipt)
+    finally:
+        c.db.engine, c.db.session_local = original_engine, original_factory
+        c.db._sessions._write_session_local = original_factory
+        await other.close()
+
+
+@pytest.mark.asyncio
+async def test_receipt_fact_query_rechecks_after_original_write_lock_wait(case):
+    c = case
+    receipt = await c.create()
+    lock = c.db._sessions._write_lock
+    await lock.acquire()
+    task = asyncio.create_task(c.db.member.read_committed_member(receipt))
+    try:
+        await asyncio.sleep(0)
+        assert not task.done()
+        c.db._member_record_writes.database = object()
+    finally:
+        lock.release()
+    with pytest.raises(MemberRecordDenied):
+        await task
