@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable
 
+from openjiuwen.core.controller.schema.execution_origin import _capture_live_execution_origin
 from openjiuwen.harness.goal.schema import GoalRecord
 from openjiuwen.harness.schema.interaction import InteractionEvent, RoundWorkItem
 from openjiuwen.harness.task_loop.event_manager import EventManager
@@ -39,13 +40,14 @@ class NativeGoalExecutionAdapter:
         """Queue through the existing supervisor's deduplicating EventManager."""
         from openjiuwen.harness.prompts.sections.goal import build_goal_task_query
 
+        origin = _capture_live_execution_origin()
         queued = self._event_manager.push_goal(
             RoundWorkItem.goal(
                 inputs={"query": build_goal_task_query(record, self._language)},
                 goal_id=record.goal_id,
                 revision=record.revision,
                 session_id=record.session_id,
-            )
+            ).with_execution_origin(origin)
         )
         if queued:
             self._notify_work()
