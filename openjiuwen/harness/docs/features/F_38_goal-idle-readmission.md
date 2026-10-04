@@ -54,3 +54,11 @@ Pending 的同一对象；冷 None、旧源和同 host_value 的不同源必须�
 三个夹具错误日志；修正为原构造/启动合同，没有放宽生产断言。新增独立文件 Ruff 通过；
 实际 make check 保留仓库已有格式/动态私有对象 Pylint 报告，不能宣称全量 lint 清洁。
 同 SHA strict stable 的精确统计另存交付证据；源码 overlay 不冒充安装包/CI。
+
+## 同 ID Store backing 替换复核
+
+selector 不仅固定 Store 对象和 session_id，还要求 `store._session is 原 Session`。
+同 ID、同 GoalRecord 的另一 Session 不可在同步 checker 或 commit await 后取代原存储。
+普通受管 attach 对无 Goal、暂停 Goal 及 active Goal 同样复核 backing 对象。
+实际 Native 替换反例和 commit/普通 attach 回归补入原测试文件；旧候选结果保留为历史证据，
+修复候选须重新执行受影响回归与 strict stable。

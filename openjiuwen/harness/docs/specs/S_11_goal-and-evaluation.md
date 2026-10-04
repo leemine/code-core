@@ -159,3 +159,7 @@ clear 取消的 facade 仍 live。退出完成/ACK 的静态复核不新增 acti
 回调之后纯事实复核，跨 commit 再验，失败仅清本次 lease/原队列项。原 F37 live 控制、
 legacy None 及单消费者不变。来源不入 GoalRecord，不据持久记录恢复权限。宿主新 producer
 和 EOF 触发的权限构造不属于此 core 接口。详见 F_38_goal-idle-readmission.md。
+
+空闲重新准入与普通受管输出 attach 固定原 `SessionGoalStore._session` 对象，不能仅凭
+同 session_id 或相同 GoalRecord 接受另一存储 Session。原 checker 后、跨 commit/attach
+await 后均复核该归属，失败不排队、不触发自动 ensure。
