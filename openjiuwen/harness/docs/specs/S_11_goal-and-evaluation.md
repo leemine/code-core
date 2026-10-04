@@ -132,3 +132,9 @@ clear/overwrite 后的旧工作拒绝，pause 不撤原 root、不改变原 revi
 待答原 attempt 的退出只在 active 仍是原对象时清理原 Session interruption state，
 并唤醒既有 supervisor；不能清理后继 Round 状态。
 legacy None 的队列顺序、公开控制签名、状态格式和行为保持。
+
+
+私有 live admission 要求原 DeepAgent Session 尚未 TERMINATED。所有实际 commit
+前后、ensure 与 Goal emit 前的 mutation 检查亦核原 Session phase，但不要求刚被
+clear 取消的 facade 仍 live。退出完成/ACK 的静态复核不新增 active-Round 要求；
+正常完成不能被当作新控制准入，shutdown 后则不能继续持久控制/排队/输出。

@@ -44,3 +44,12 @@ Swarm 原入口接线、实际模型/工具消费投影、idle 新准入、EOF �
 验收仍由宿主集成；本片不能代替其完成证明。没有执行真实 Provider 负向探针。
 Session commit 本身抛异常后不猜测落盘结果、不自动重放原 mutation；已写状态不回滚。
 只有原 mutation 完整返回后的退出/ACK 失败，允许同 selector 仅重试原尾部确认。
+
+
+## 终止阶段补充检查
+
+原 Session 进入 TERMINATED 后，即使旧 facade 正在退出也不能捕获或准入新控制。
+私有 live 检查核原 phase；mutation 检查只要求原 Session 仍运行，不要求被 clear 取消的
+原 facade 仍 live。实际 commit 前后、排队与 Goal emit 前均检查 mutation；最终退出与
+ACK 复核不把正常原 Round 完成当成新入站。commit 等待期间终止的 set/pause/clear
+不会继续排队或 emit；已经发生的存储写入仍不回滚。原终止入口与队列没有新增状态。
