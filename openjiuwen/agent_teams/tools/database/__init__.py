@@ -78,6 +78,7 @@ from openjiuwen.core.common.logging import team_logger
 
 from .effect_authority import MemberEffectOperation as MemberEffectOperation
 from .effect_authority import MemberEffectPermit as MemberEffectPermit
+from .record_authority import MemberCommittedFacts as MemberCommittedFacts
 from .record_authority import MemberRecordAuthorizer as MemberRecordAuthorizer
 from .record_authority import MemberRecordDenied as MemberRecordDenied
 from .record_authority import MemberRecordStamp as MemberRecordStamp
