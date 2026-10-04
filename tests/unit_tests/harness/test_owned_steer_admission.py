@@ -4,6 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 
 from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin, execution_origin_scope
 from openjiuwen.harness.schema.interaction import (
@@ -18,7 +19,7 @@ from tests.unit_tests.harness import test_deep_agent_round_origin as fixtures
 agent = fixtures.agent
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def owned(agent):
     queues = LoopQueues()
     agent._loop_controller = fixtures.controller(queues)
