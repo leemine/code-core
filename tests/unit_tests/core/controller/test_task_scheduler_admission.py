@@ -35,7 +35,7 @@ async def pending_scan(monkeypatch):
             super().clear()
             scanned.set()
 
-    async def execute(task_id, session):
+    async def execute(task_id, session, *, _capture):
         calls.append((task_id, session))
         started.set()
         await release.wait()
@@ -137,7 +137,7 @@ async def test_stop_during_real_capture_never_creates_wrapper(monkeypatch):
             await release.wait()
         return tasks
 
-    async def execute(*args):
+    async def execute(*args, **kwargs):
         calls.append(args)
 
     monkeypatch.setattr(manager, "_capture_submitted_tasks", delayed_capture)

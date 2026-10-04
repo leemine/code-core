@@ -23,6 +23,7 @@ def scheduler():
         manager.tasks = {task.task_id: task for task in tasks}
         return tasks
 
+    manager._capture_task_execution = lambda _: None  # Legacy fake manager has no dispatch receipt.
     manager._capture_submitted_tasks = capture
     manager._is_submitted_task = lambda task: (
         manager.tasks.get(task.task_id) is task and task.status is TaskStatus.SUBMITTED
