@@ -52,6 +52,11 @@ from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.controller.schema.execution_origin import (
+    ORIGIN_UNSET,
+    execution_origin_scope,
+    resolve_execution_origin,
+)
 from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
 from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
 from openjiuwen.core.single_agent.base import BaseAgent
@@ -443,14 +448,17 @@ class TeamAgent(BaseAgent):
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
 
-    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
+    async def deliver_input(self, content: Any, *, use_steer: bool = True, origin=ORIGIN_UNSET) -> None:
         # The runtime's single supervisor serialises inputs: send() starts a
         # round when idle, steers (use_steer) or queues a follow-up when running.
         # No transition-window race, so no manual branch / pending queue here.
         harness = self.harness
         if harness is None:
             return
-        await harness.send(content, immediate=use_steer)
+        if origin is ORIGIN_UNSET:
+            await harness.send(content, immediate=use_steer)
+        else:
+            await harness.send(content, immediate=use_steer, origin=origin)
 
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller to this member's brain.
@@ -466,13 +474,17 @@ class TeamAgent(BaseAgent):
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
 
-    async def start_agent(self, content: str) -> None:
-        await self._start_agent(content)
+    async def start_agent(self, content: str, *, origin=ORIGIN_UNSET) -> None:
+        with execution_origin_scope(resolve_execution_origin(origin)):
+            await self._start_agent(content)
 
-    async def follow_up(self, content: str) -> None:
+    async def follow_up(self, content: str, *, origin=ORIGIN_UNSET) -> None:
         harness = self.harness
         if harness is not None:
-            await harness.send(content, immediate=False)
+            if origin is ORIGIN_UNSET:
+                await harness.send(content, immediate=False)
+            else:
+                await harness.send(content, immediate=False, origin=origin)
 
     async def cancel_agent(self) -> None:
         team_logger.debug("[{}] cancel_agent requested", self._member_name() or "?")

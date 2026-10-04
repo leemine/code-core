@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import uuid
 from enum import Enum
-from typing import List, Optional, Union, Dict, Any, TYPE_CHECKING
-from pydantic import BaseModel, Field
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-from openjiuwen.core.controller.schema.dataframe import DataFrame, TextDataFrame, JsonDataFrame
+from pydantic import Field
+
+from openjiuwen.core.controller.schema.dataframe import DataFrame, JsonDataFrame, TextDataFrame
+from openjiuwen.core.controller.schema.execution_origin import OriginCarrier
 from openjiuwen.core.session import InteractiveInput
 
 if TYPE_CHECKING:
@@ -32,7 +34,7 @@ class EventType(str, Enum):
     FOLLOW_UP = "follow_up"
 
 
-class Event(BaseModel):
+class Event(OriginCarrier):
     """Event Base Class
 
     Base class for all events, containing event type, event ID, and metadata.

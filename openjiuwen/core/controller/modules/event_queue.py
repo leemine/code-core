@@ -18,15 +18,16 @@ Supported Event Types:
 - TASK_FAILED: Task failure event
 """
 
-from typing import Callable, Awaitable, Optional
+from typing import Awaitable, Callable, Optional
 
-from openjiuwen.core.controller.config import ControllerConfig
-from openjiuwen.core.controller.schema.event import Event, EventType
-from openjiuwen.core.controller.modules.event_handler import EventHandler, EventHandlerInput
-from openjiuwen.core.session.agent import Session
-from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.modules.event_handler import EventHandler, EventHandlerInput
+from openjiuwen.core.controller.schema.event import Event, EventType
+from openjiuwen.core.controller.schema.execution_origin import execution_origin_scope
+from openjiuwen.core.session.agent import Session
 
 
 class EventQueue:
@@ -122,7 +123,8 @@ class EventQueue:
             event = payload["event"]
             session = payload["session"]
             handler_input = EventHandlerInput(event=event, session=session)
-            return await event_handle_func(handler_input)
+            with execution_origin_scope(getattr(event, "execution_origin", None)):
+                return await event_handle_func(handler_input)
 
         subscription.set_message_handler(event_handle_wrapper)
         subscription.activate()

@@ -31,14 +31,15 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.agent_teams.harness.native_harness import NativeHarness
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.controller.schema.execution_origin import ORIGIN_UNSET
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
-from openjiuwen.agent_teams.harness.native_harness import NativeHarness
-from openjiuwen.agent_teams.harness.state import HarnessState
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.build_context import BuildContext
@@ -283,14 +284,26 @@ class TeamHarness:
             )
         return self._native.outputs()
 
-    async def send(self, content: Any, *, immediate: bool = False) -> Any:
+    @property
+    def execution_origin(self):
+        """Original source of the exact active native execution, if present."""
+        return self._native.execution_origin if self._native is not None else None
+
+    def owns_execution(self, agent, session, *, origin) -> bool:
+        """Check the exact current child Session and native ownership."""
+        return (self._native is not None and self._active_agent_session is session
+                and self._native.owns_execution(agent, session, origin=origin))
+
+    async def send(self, content: Any, *, immediate: bool = False, origin=ORIGIN_UNSET) -> Any:
         """Submit input to the native; ``immediate`` steers the active round."""
         if self._native is None:
             raise_error(
                 StatusCode.AGENT_TEAM_EXECUTION_ERROR,
                 error_msg="TeamHarness.send() before start().",
             )
-        return await self._native.send(content, immediate=immediate)
+        if origin is ORIGIN_UNSET:
+            return await self._native.send(content, immediate=immediate)
+        return await self._native.send(content, immediate=immediate, origin=origin)
 
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the active round: graceful (False) or hard+rollback (True).

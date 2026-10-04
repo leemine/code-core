@@ -1,7 +1,5 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from __future__ import annotations
-
 """Task Scheduler Module
 
 This module implements the core functionality for task scheduling and execution, including:
@@ -17,22 +15,32 @@ Workflow:
 - Update task status according to the output type (completion/interaction/failed)
 """
 
-import asyncio
-from abc import abstractmethod, ABC
-from dataclasses import dataclass
-from typing import AsyncIterator, Callable, Dict, Optional, Tuple, TYPE_CHECKING
+from __future__ import annotations
 
+import asyncio
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, AsyncIterator, Callable, Dict, Optional, Tuple
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.modules.event_queue import EventQueue
-from openjiuwen.core.controller.modules.task_manager import TaskManager, TaskFilter
+from openjiuwen.core.controller.modules.task_manager import TaskFilter, TaskManager
+from openjiuwen.core.controller.schema import (
+    ControllerOutputChunk,
+    ControllerOutputPayload,
+    EventType,
+    TaskCompletionEvent,
+    TaskFailedEvent,
+    TaskInteractionEvent,
+    TaskStatus,
+    TextDataFrame,
+)
+from openjiuwen.core.controller.schema.execution_origin import shared_execution_origin
 from openjiuwen.core.session.agent import Session
-from openjiuwen.core.controller.schema import (EventType, TaskCompletionEvent, TaskInteractionEvent, TaskFailedEvent,
-                                               TaskStatus, ControllerOutputChunk, ControllerOutputPayload,
-                                               TextDataFrame, Task)
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.exception.codes import StatusCode
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.base import AbilityManager
@@ -624,6 +632,8 @@ class TaskScheduler:
             logger.error(f"Unsupported payload type: {payload_type}")
             return
 
+        event = event.with_execution_origin(shared_execution_origin(task.inputs or []))
+
         # Merge task.metadata into event.metadata so
         # that _handler_round_id propagates correctly.
         if task.metadata:
@@ -917,11 +927,11 @@ class TaskScheduler:
         Starts the background scheduling task and begins periodic scanning and execution of pending tasks.
         """
         if self._running:
-            logger.warning(f"TaskScheduler is already running")
+            logger.warning("TaskScheduler is already running")
             return
         self._running = True
         self._scheduler_task = asyncio.create_task(self.schedule())
-        logger.info(f"TaskScheduler started")
+        logger.info("TaskScheduler started")
 
     async def stop(self):
         """Stop task scheduler
@@ -930,7 +940,7 @@ class TaskScheduler:
         Cancels all running tasks to ensure clean shutdown.
         """
         if not self._running:
-            logger.warning(f"TaskScheduler is not running")
+            logger.warning("TaskScheduler is not running")
             return
 
         self._running = False
@@ -951,4 +961,4 @@ class TaskScheduler:
             except asyncio.CancelledError:
                 pass
 
-        logger.info(f"TaskScheduler stopped")
+        logger.info("TaskScheduler stopped")

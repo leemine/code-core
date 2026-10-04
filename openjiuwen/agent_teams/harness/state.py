@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin
 from openjiuwen.harness_protocol.state import HarnessState
 
 if TYPE_CHECKING:
@@ -72,6 +73,7 @@ class InboxMessage:
     seq: int
     content: "str | InteractiveInput"
     immediate: bool
+    origin: ExecutionOrigin | None = None
 
 
 @dataclass(slots=True)
@@ -138,6 +140,7 @@ class ActiveRound:
     deep_agent: "DeepAgent"
     task: asyncio.Task
     steering_queue: asyncio.Queue
+    origin: ExecutionOrigin | None = None
     graceful_abort: bool = False
     failure_retry: bool = False
     pre_round_snapshot: SafeStateSnapshot | None = None
@@ -175,6 +178,7 @@ class HarnessInternalState:
     seq_counter: int = 0
     active: ActiveRound | None = None
     paused_query: str | None = None
+    paused_origin: ExecutionOrigin | None = None
     output_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     supervisor_task: asyncio.Task | None = None
     round_id_counter: int = 0

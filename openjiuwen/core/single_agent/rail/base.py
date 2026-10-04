@@ -693,7 +693,8 @@ class AgentCallbackContext:
             msg: Steering instruction text.
         """
         if self._steering_queue is not None:
-            self._steering_queue.put_nowait(msg)
+            from openjiuwen.core.controller.schema.execution_origin import capture_origin_input
+            self._steering_queue.put_nowait(capture_origin_input(msg))
 
     def drain_steering(
         self, limit: int | None = None,
@@ -722,9 +723,8 @@ class AgentCallbackContext:
             if take is not None and len(msgs) >= take:
                 break
             try:
-                msgs.append(
-                    self._steering_queue.get_nowait()
-                )
+                from openjiuwen.core.controller.schema.execution_origin import consume_origin_input
+                msgs.append(consume_origin_input(self._steering_queue.get_nowait()))
             except asyncio.QueueEmpty:
                 break
         return msgs

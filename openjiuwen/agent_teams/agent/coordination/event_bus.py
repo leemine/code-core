@@ -33,7 +33,7 @@ from pydantic import (
 from openjiuwen.agent_teams.schema.events import EventMessage
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-
+from openjiuwen.core.controller.schema.execution_origin import execution_origin_scope
 
 # ------------------------------------------------------
 # Inner event types (local to the coordination layer)
@@ -284,7 +284,8 @@ class EventBus:
 
             try:
                 if self._wake_callback:
-                    await self._wake_callback(event)
+                    with execution_origin_scope(getattr(event, "execution_origin", None)):
+                        await self._wake_callback(event)
             except Exception:
                 event_type = getattr(event, "event_type", "unknown")
                 team_logger.exception(

@@ -12,6 +12,8 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Collection, List, Optional
 
+from openjiuwen.core.controller.schema.execution_origin import execution_origin_scope
+
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
@@ -85,47 +87,48 @@ async def _run_subagent_with_observable_stream(
     to the parent agent.  Third-party test/adaptor agents that only implement
     ``invoke`` retain their existing behavior.
     """
-    invoke_kwargs = {"session": session} if session is not None else {}
-    stream = getattr(subagent, "stream", None)
-    if not callable(stream):
-        return await subagent.invoke(inputs, **invoke_kwargs)
+    with execution_origin_scope(None):
+        invoke_kwargs = {"session": session} if session is not None else {}
+        stream = getattr(subagent, "stream", None)
+        if not callable(stream):
+            return await subagent.invoke(inputs, **invoke_kwargs)
 
-    output_parts: list[str] = []
-    terminal_result: dict[str, Any] | None = None
-    async for chunk in stream(inputs, **invoke_kwargs):
-        chunk_type = getattr(chunk, "type", None)
-        payload = getattr(chunk, "payload", None)
-        if isinstance(chunk, dict):
-            chunk_type = chunk.get("type", chunk_type)
-            payload = chunk.get("payload", payload)
-        if not isinstance(payload, dict):
-            continue
-        if chunk_type == "llm_output":
-            content = payload.get("content")
-            if isinstance(content, str):
-                output_parts.append(content)
-            continue
-        if chunk_type != "answer":
-            continue
-        terminal_result = dict(payload)
-        terminal_result.setdefault("result_type", "answer")
-        if "output" not in terminal_result:
-            content = terminal_result.get("content")
-            if isinstance(content, str):
-                terminal_result["output"] = content
+        output_parts: list[str] = []
+        terminal_result: dict[str, Any] | None = None
+        async for chunk in stream(inputs, **invoke_kwargs):
+            chunk_type = getattr(chunk, "type", None)
+            payload = getattr(chunk, "payload", None)
+            if isinstance(chunk, dict):
+                chunk_type = chunk.get("type", chunk_type)
+                payload = chunk.get("payload", payload)
+            if not isinstance(payload, dict):
+                continue
+            if chunk_type == "llm_output":
+                content = payload.get("content")
+                if isinstance(content, str):
+                    output_parts.append(content)
+                continue
+            if chunk_type != "answer":
+                continue
+            terminal_result = dict(payload)
+            terminal_result.setdefault("result_type", "answer")
+            if "output" not in terminal_result:
+                content = terminal_result.get("content")
+                if isinstance(content, str):
+                    terminal_result["output"] = content
 
-    if terminal_result is None:
-        terminal_result = {
-            "output": "".join(output_parts),
-            "result_type": "answer",
-        }
-    has_browser_result = isinstance(terminal_result.get("authoritative_browser_result"), dict)
-    if terminal_result.get("result_type") == "error" and not has_browser_result:
-        raise build_error(
-            StatusCode.TOOL_TASK_TOOL_INVOKED,
-            reason=str(terminal_result.get("output") or "subagent failed"),
-        )
-    return terminal_result
+        if terminal_result is None:
+            terminal_result = {
+                "output": "".join(output_parts),
+                "result_type": "answer",
+            }
+        has_browser_result = isinstance(terminal_result.get("authoritative_browser_result"), dict)
+        if terminal_result.get("result_type") == "error" and not has_browser_result:
+            raise build_error(
+                StatusCode.TOOL_TASK_TOOL_INVOKED,
+                reason=str(terminal_result.get("output") or "subagent failed"),
+            )
+        return terminal_result
 
 
 @dataclass

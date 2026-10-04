@@ -16,6 +16,7 @@ from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.messager.messager import Messager, MessagerHandler
 from openjiuwen.agent_teams.schema.events import EventMessage
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.controller.schema.execution_origin import execution_origin_scope
 
 
 class _Bus:
@@ -49,7 +50,8 @@ class _Bus:
             return
         for agent_id, handler in list(subs.items()):
             try:
-                await handler(message)
+                with execution_origin_scope(getattr(message, "execution_origin", None)):
+                    await handler(message)
             except Exception as exc:
                 team_logger.error("[_Bus] publish to {} on topic {} failed: {}", agent_id, topic, exc)
 
@@ -66,7 +68,8 @@ class _Bus:
         if handler is None:
             team_logger.warning("[_Bus] no P2P handler for agent_id={}", agent_id)
             return
-        await handler(message)
+        with execution_origin_scope(getattr(message, "execution_origin", None)):
+            await handler(message)
 
     # -- lifecycle ------------------------------------------------------
 

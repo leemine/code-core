@@ -16,6 +16,23 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import List
 
+from openjiuwen.core.controller.schema.execution_origin import (
+    ORIGIN_UNSET,
+    capture_origin_input,
+    consume_origin_input,
+)
+
+
+def _drain(queue, expected_origin):
+    messages = []
+    while not queue.empty():
+        try:
+            value = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        messages.append(consume_origin_input(value, expected_origin))
+    return messages
+
 
 @dataclass
 class LoopQueues:
@@ -35,53 +52,49 @@ class LoopQueues:
         default_factory=asyncio.Queue
     )
 
-    def push_steer(self, msg: str) -> None:
+    def push_steer(self, msg: str, *, origin=ORIGIN_UNSET) -> None:
         """Push a steering message.
 
         Args:
             msg: Steering instruction text.
         """
-        self.steering.put_nowait(msg)
+        self.steering.put_nowait(capture_origin_input(msg, origin))
 
-    def push_follow_up(self, msg: str) -> None:
+    def push_follow_up(self, msg: str, *, origin=ORIGIN_UNSET) -> None:
         """Push a follow-up message.
 
         Args:
             msg: Follow-up content text.
         """
-        self.follow_up.put_nowait(msg)
+        self.follow_up.put_nowait(capture_origin_input(msg, origin))
 
     def has_follow_up(self) -> bool:
         """Return whether follow-up messages are pending."""
         return not self.follow_up.empty()
 
-    def drain_steering(self) -> List[str]:
+    def drain_steering(self, *, expected_origin=ORIGIN_UNSET) -> List[str]:
         """Drain all pending steering messages.
 
         Returns:
             List of steering message strings.
         """
-        msgs: List[str] = []
-        while not self.steering.empty():
-            try:
-                msgs.append(self.steering.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-        return msgs
+        return _drain(self.steering, expected_origin)
 
-    def drain_follow_up(self) -> List[str]:
+    def drain_follow_up(self, *, expected_origin=ORIGIN_UNSET) -> List[str]:
         """Drain all pending follow-up messages.
 
         Returns:
             List of follow-up message strings.
         """
-        msgs: List[str] = []
+        return _drain(self.follow_up, expected_origin)
+
+    def clear_follow_up(self) -> None:
+        """Discard queued values without treating them as executable input."""
         while not self.follow_up.empty():
             try:
-                msgs.append(self.follow_up.get_nowait())
+                self.follow_up.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        return msgs
 
 
 __all__ = ["LoopQueues"]
