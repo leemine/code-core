@@ -1,0 +1,430 @@
+"""Original SQLite transactions with live host authority, no provider/network."""
+
+import asyncio
+import copy
+import json
+import pickle
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import delete, text, update
+
+from openjiuwen.agent_teams.monitor.models import MemberInfo
+from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.tools.database import (
+    DatabaseConfig,
+    MemberRecordAuthorizer,
+    MemberRecordDenied,
+    MemberWritePermit,
+    MemberWriteReceipt,
+    TeamDatabase,
+    member_record_stamp,
+)
+from openjiuwen.agent_teams.tools.models import TeamMember
+from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin, execution_origin_scope
+
+
+@pytest_asyncio.fixture
+async def case(tmp_path):
+    c = SimpleNamespace(actor=object(), entity=object(), receipts={}, hook=None, enabled=True)
+    c.origin = ExecutionOrigin(c.actor)
+
+    def bind(op, origin):
+        if origin is not c.origin or op.database is not c.db or not c.enabled:
+            raise MemberRecordDenied("wrong original owner")
+        actor, entity = c.actor, c.entity
+        old = c.receipts.get(op.member_name)
+
+        def check(before, proposed):
+            if c.actor is not actor or c.entity is not entity or not c.enabled:
+                raise MemberRecordDenied("owner changed")
+            if c.hook:
+                c.hook(op, before, proposed)
+
+        return MemberWritePermit(op, origin, entity, actor, "alice-source", old.stamp if old else None, check)
+
+    c.authorizer = MemberRecordAuthorizer(bind)
+    c.config = DatabaseConfig(connection_string=str(tmp_path / "team.sqlite"))
+    c.db = TeamDatabase(c.config, member_record_authorizer=c.authorizer)
+    await c.db.initialize()
+    await c.db.team.create_team("same-team", "Team", "member")
+
+    async def create():
+        with execution_origin_scope(c.origin):
+            receipt = await c.db.member.create_member(
+                "member",
+                "same-team",
+                "Alice",
+                "{}",
+                "ready",
+                execution_status="idle",
+                options=json.dumps({"model_ref": {"model_name": "a"}, "fallback_model_ref": {"model_name": "b"}}),
+                return_receipt=True,
+            )
+        c.receipts["member"] = receipt
+        return receipt
+
+    c.create = create
+    try:
+        yield c
+    finally:
+        await c.db.close()
+
+
+async def mutate(c, kind, *, receipt=True):
+    dao = c.db.member
+    kw = {"return_receipt": receipt}
+    if kind == "status":
+        return await dao.update_member_status("member", "same-team", "busy", **kw)
+    if kind == "transition":
+        return await dao.try_transition_member_status(
+            "member", "same-team", MemberStatus.READY, MemberStatus.BUSY, **kw
+        )
+    if kind == "execution":
+        return await dao.update_member_execution_status("member", "same-team", "starting", **kw)
+    if kind == "reset":
+        return await dao.reset_member_execution_status("member", "same-team", "idle", **kw)
+    if kind == "worktree":
+        return await dao.update_member_worktree(
+            "member", "same-team", isolation="worktree", worktree_path="/fixture", **kw
+        )
+    return await dao.promote_member_fallback_model("member", "same-team", **kw)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["status", "transition", "execution", "reset", "worktree", "fallback"])
+async def test_authorized_mutations_keep_record_identity_and_advance_revision(case, kind):
+    c = case
+    first = await c.create()
+    with execution_origin_scope(c.origin):
+        changed = await mutate(c, kind)
+    assert type(changed) is MemberWriteReceipt
+    assert changed.stamp.nonce == first.stamp.nonce
+    assert changed.stamp.revision == 2
+    assert changed._transaction is not first._transaction
+    assert changed.operation.database is c.db
+    row = await c.db.member.get_member("member", "same-team")
+    info = MemberInfo.from_internal(row)
+    assert info.record_stamp == changed.stamp
+    assert "record_stamp" not in info.model_dump()
+    assert MemberInfo.model_validate(info.model_dump()).record_stamp is None
+    assert "record_nonce" not in info.model_dump_json()
+    with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+        await mutate(c, kind)  # original receipt is now stale
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["status", "transition", "execution", "reset", "worktree", "fallback", "delete"])
+async def test_other_owner_cannot_write_even_knowing_original_stamp(case, kind):
+    c = case
+    old = await c.create()
+    with execution_origin_scope(ExecutionOrigin(object())), pytest.raises(MemberRecordDenied):
+        if kind == "delete":
+            await c.db.team.delete_team("same-team")
+        else:
+            await mutate(c, kind)
+    assert member_record_stamp(await c.db.member.get_member("member", "same-team")) == old.stamp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["status", "transition", "execution", "reset", "worktree", "fallback", "delete"])
+async def test_second_legacy_dao_cannot_downgrade_governed_row(case, kind):
+    c = case
+    old = await c.create()
+    legacy = TeamDatabase(c.config)
+    await legacy.initialize()
+    try:
+        if kind in ("worktree", "fallback", "delete"):
+            with pytest.raises(MemberRecordDenied):
+                if kind == "delete":
+                    await legacy.team.delete_team("same-team")
+                else:
+                    await mutate(SimpleNamespace(db=legacy), kind)
+        else:
+            assert await mutate(SimpleNamespace(db=legacy), kind) is False
+        assert member_record_stamp(await c.db.member.get_member("member", "same-team")) == old.stamp
+    finally:
+        await legacy.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["overwrite", "recreate"])
+async def test_same_id_row_replacement_never_validates_original_receipt(case, mutation):
+    c = case
+    old = await c.create()
+    # Direct SQL is a trusted-process escape, not a permitted host writer. This
+    # reproduces the observed global-row pollution and checks read-side evidence.
+    async with c.db._sessions.write() as tx:
+        if mutation == "overwrite":
+            await tx.execute(update(TeamMember).values(display_name="Bob", status="busy"))
+        else:
+            await tx.execute(delete(TeamMember))
+        await tx.commit()
+    if mutation == "recreate":
+        c.receipts.clear()
+        new = await c.create()
+        assert new.stamp.nonce != old.stamp.nonce
+        c.receipts["member"] = old
+    else:
+        with pytest.raises(MemberRecordDenied):
+            MemberInfo.from_internal(await c.db.member.get_member("member", "same-team"))
+    with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+        await mutate(c, "status")
+
+
+@pytest.mark.asyncio
+async def test_delete_cascade_checks_original_owner_and_recreate_gets_new_nonce(case):
+    c = case
+    old = await c.create()
+    with execution_origin_scope(c.origin):
+        assert await c.db.team.delete_team("same-team") is True
+    assert await c.db.member.get_member("member", "same-team") is None
+    await c.db.team.create_team("same-team", "Team", "member")
+    c.receipts.clear()
+    new = await c.create()
+    assert new.stamp.nonce != old.stamp.nonce
+    assert new.stamp.revision == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["nonce", "revision", "source_id"])
+async def test_wrong_original_stamp_rejected(case, field):
+    c = case
+    old = await c.create()
+    wrong = replace(old.stamp, **{field: {"nonce": "0" * 64, "revision": 123, "source_id": "bob"}[field]})
+    c.receipts["member"] = SimpleNamespace(stamp=wrong)
+    with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+        await mutate(c, "status")
+
+
+@pytest.mark.asyncio
+async def test_failure_after_update_before_commit_rolls_back_original_transaction(case, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.dml import Update
+
+    c = case
+    old = await c.create()
+    after_sql = False
+    execute = AsyncSession.execute
+
+    async def record_sql(session, statement, *args, **kwargs):
+        nonlocal after_sql
+        result = await execute(session, statement, *args, **kwargs)
+        if isinstance(statement, Update):
+            after_sql = True
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", record_sql)
+
+    def late_revoke(op, before, proposed):
+        if after_sql:
+            raise MemberRecordDenied("revoked after SQL, before commit")
+
+    c.hook = late_revoke
+    with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+        await mutate(c, "status")
+    assert after_sql
+    assert member_record_stamp(await c.db.member.get_member("member", "same-team")) == old.stamp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["operation", "authorizer", "expected_stamp", "entity"])
+async def test_callback_reference_drift_is_not_committed(case, mutation):
+    c = case
+    await c.create()
+
+    def drift(op, before, proposed):
+        if mutation == "operation":
+            object.__setattr__(op, "member_name", "other")
+        elif mutation == "authorizer":
+            object.__setattr__(c.authorizer, "bind_for_write", lambda *_: None)
+        elif mutation == "expected_stamp" and before:
+            object.__setattr__(before, "revision", 900)
+        elif mutation == "entity":
+            c.entity = object()
+
+    c.hook = drift
+    with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+        await mutate(c, "status")
+    row = await c.db.member.get_member("member", "same-team")
+    assert row.status == "ready" and row.record_revision == 1
+
+
+@pytest.mark.asyncio
+async def test_create_requires_source_receipt_live_only_and_flags_strict(case):
+    c = case
+    with pytest.raises(MemberRecordDenied):
+        await c.db.member.create_member("member", "same-team", "A", "{}", "ready")
+    receipt = await c.create()
+    for item in (c.authorizer, receipt, receipt._permit, receipt.operation):
+        assert copy.deepcopy(item) is item
+        with pytest.raises(TypeError):
+            pickle.dumps(item)
+    with pytest.raises(TypeError):
+        MemberWriteReceipt()
+    with execution_origin_scope(c.origin), pytest.raises(TypeError):
+        await mutate(c, "status", receipt=1)
+
+
+@pytest.mark.asyncio
+async def test_queued_source_expiry_prevents_write(case):
+    c = case
+    old = await c.create()
+    await c.db._sessions._write_lock.acquire()
+    try:
+        with execution_origin_scope(c.origin):
+            task = asyncio.create_task(mutate(c, "status"))
+            await asyncio.sleep(0)
+    finally:
+        c.db._sessions._write_lock.release()
+    with pytest.raises(MemberRecordDenied):
+        await task
+    assert member_record_stamp(await c.db.member.get_member("member", "same-team")) == old.stamp
+
+
+@pytest.mark.asyncio
+async def test_legacy_nullable_rows_not_adopted_and_legacy_still_works(case):
+    c = case
+    legacy = TeamDatabase(c.config)
+    await legacy.initialize()
+    try:
+        assert await legacy.member.create_member("member", "same-team", "Legacy", "{}", "ready") is True
+        assert await legacy.member.update_member_status("member", "same-team", "busy") is True
+        with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+            await mutate(c, "reset")
+        assert await legacy.team.delete_team("same-team") is True
+    finally:
+        await legacy.close()
+
+
+@pytest.mark.asyncio
+async def test_original_receipt_cas_allows_one_concurrent_writer(case):
+    c = case
+    await c.create()
+    with execution_origin_scope(c.origin):
+        results = await asyncio.gather(mutate(c, "status"), mutate(c, "status"), return_exceptions=True)
+    assert sum(type(value) is MemberWriteReceipt for value in results) == 1
+    assert sum(isinstance(value, MemberRecordDenied) for value in results) == 1
+    assert (await c.db.member.get_member("member", "same-team")).record_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_precommit_cancel_rolls_back_member_create(case, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    c = case
+    original_flush = AsyncSession.flush
+
+    async def cancelled(session, *args, **kwargs):
+        await original_flush(session, *args, **kwargs)
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(AsyncSession, "flush", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await c.create()
+    monkeypatch.setattr(AsyncSession, "flush", original_flush)
+    assert await c.db.member.get_member("member", "same-team") is None
+
+
+@pytest.mark.asyncio
+async def test_commit_failure_does_not_return_receipt_or_leave_row(case, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    c = case
+    original_commit = AsyncSession.commit
+
+    async def broken(session):
+        raise RuntimeError("synthetic commit failure")
+
+    monkeypatch.setattr(AsyncSession, "commit", broken)
+    with pytest.raises(RuntimeError, match="synthetic"):
+        await c.create()
+    monkeypatch.setattr(AsyncSession, "commit", original_commit)
+    assert not c.receipts
+    assert await c.db.member.get_member("member", "same-team") is None
+
+
+@pytest.mark.asyncio
+async def test_nullable_migration_is_idempotent_and_does_not_claim_existing_rows(tmp_path):
+    import sqlite3
+
+    from sqlalchemy import create_engine, inspect
+
+    from openjiuwen.agent_teams.tools.database.engine import _ensure_team_member_record_columns
+
+    path = tmp_path / "old.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE team_member (member_name TEXT, team_name TEXT)")
+        conn.execute("INSERT INTO team_member VALUES ('member', 'same-team')")
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.begin() as conn:
+            _ensure_team_member_record_columns(conn)
+            _ensure_team_member_record_columns(conn)
+            assert len(inspect(conn).get_columns("team_member")) == 6
+            row = conn.execute(
+                text("SELECT record_nonce,record_source_id,record_revision,record_digest FROM team_member")
+            ).one()
+            assert tuple(row) == (None, None, None, None)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_default_bool_still_enforces_authority(case):
+    c = case
+    await c.create()
+    with execution_origin_scope(c.origin):
+        assert await mutate(c, "status", receipt=False) is True
+    with execution_origin_scope(ExecutionOrigin(object())), pytest.raises(MemberRecordDenied):
+        await mutate(c, "reset", receipt=False)
+
+
+@pytest.mark.asyncio
+async def test_late_team_delete_authority_failure_rolls_back_members_and_parent(case):
+    c = case
+    old = await c.create()
+    calls = 0
+
+    def fail_before_commit(op, before, proposed):
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise MemberRecordDenied("original parent replaced")
+
+    c.hook = fail_before_commit
+    with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+        await c.db.team.delete_team("same-team")
+    assert await c.db.team.team_exists("same-team")
+    assert member_record_stamp(await c.db.member.get_member("member", "same-team")) == old.stamp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial", [False, True])
+async def test_bulk_cleanup_rejects_before_any_mixed_or_dynamic_deletion(case, partial):
+    from openjiuwen.agent_teams.tools.database.engine import cleanup_all_runtime_state
+
+    c = case
+    await c.create()
+    legacy = TeamDatabase(c.config)
+    await legacy.initialize()
+    try:
+        await legacy.member.create_member("legacy", "same-team", "Legacy", "{}", "ready")
+        async with c.db.engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE team_task_fixture (marker TEXT)"))
+            await conn.execute(text("INSERT INTO team_task_fixture VALUES ('preserved')"))
+            if partial:
+                await conn.execute(
+                    update(TeamMember).where(TeamMember.member_name == "member").values(record_digest=None)
+                )
+        with pytest.raises(MemberRecordDenied):
+            await cleanup_all_runtime_state(legacy.engine)
+        async with c.db.engine.begin() as conn:
+            assert (await conn.execute(text("SELECT marker FROM team_task_fixture"))).scalar() == "preserved"
+        assert await c.db.member.get_member("legacy", "same-team") is not None
+        assert await c.db.member.get_member("member", "same-team") is not None
+        assert await c.db.team.team_exists("same-team")
+    finally:
+        await legacy.close()
