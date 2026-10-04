@@ -3687,8 +3687,9 @@ class DeepAgent(BaseAgent):
         if controller is not None and self._interaction_session is not None:
             with suppress(Exception):
                 await controller.unbind_session(self._interaction_session)
-            with suppress(Exception):
-                await controller.stop()
+            # A stopped facade is not proof that its owned execution tasks
+            # exited. Preserve this instance/controller for a later stop retry.
+            await controller.stop()
 
         self._interaction_started = False
         self._event_manager.discard_all_work()
