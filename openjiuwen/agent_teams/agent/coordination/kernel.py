@@ -21,8 +21,9 @@ from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.harness.prompts import resolve_language as _resolve_language
+from openjiuwen.core.controller.schema.execution_origin import resolve_execution_origin
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
+from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
@@ -602,13 +603,16 @@ class CoordinationKernel:
                 # process performed itself (create_task, settle). Coordination
                 # must not re-process the echo, so the dropped event degrades
                 # to a bare "board changed" scan hint on the same bus loop.
+                # Keep the wake source only; this does not attribute DB rows.
                 if (
                     self._scheduler is not None
                     and self._scheduler.is_active
                     and str(event.event_type).startswith("task_")
                 ):
                     await self._event_bus.enqueue(
-                        InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN)
+                        InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN).with_execution_origin(
+                            event.execution_origin
+                        )
                     )
                 return
             await self._event_bus.enqueue(event)
@@ -650,7 +654,7 @@ class CoordinationKernel:
             InnerEventMessage(
                 event_type=InnerEventType.USER_INPUT,
                 payload={"content": query},
-            )
+            ).with_execution_origin(resolve_execution_origin())
         )
 
     async def enqueue_initial_mailbox_poll(self) -> None:
