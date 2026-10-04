@@ -76,6 +76,16 @@ from openjiuwen.agent_teams.tools.models import (
 )
 from openjiuwen.core.common.logging import team_logger
 
+from .record_authority import MemberRecordAuthorizer as MemberRecordAuthorizer
+from .record_authority import MemberRecordDenied as MemberRecordDenied
+from .record_authority import MemberRecordStamp as MemberRecordStamp
+from .record_authority import MemberRecordWrites
+from .record_authority import MemberWriteCommittedButUnconfirmed as MemberWriteCommittedButUnconfirmed
+from .record_authority import MemberWriteOperation as MemberWriteOperation
+from .record_authority import MemberWritePermit as MemberWritePermit
+from .record_authority import MemberWriteReceipt as MemberWriteReceipt
+from .record_authority import member_record_stamp as member_record_stamp
+
 
 class TeamDatabase:
     """Asynchronous team database manager.
@@ -85,9 +95,10 @@ class TeamDatabase:
     ``task`` / ``message``) — call them directly.
     """
 
-    def __init__(self, config: DatabaseConfig):
+    def __init__(self, config: DatabaseConfig, *, member_record_authorizer: MemberRecordAuthorizer | None = None):
         """Initialize database manager."""
         self.config = config
+        self._member_record_writes = MemberRecordWrites(self, member_record_authorizer)
         # ``engine`` / ``session_local`` are the WRITER engine + factory (also
         # used by the DDL helpers). ``read_engine`` / ``read_session_local``
         # are the separate reader pool for file-backed SQLite; they alias the
@@ -155,8 +166,8 @@ class TeamDatabase:
             from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
 
             file_store = SessionFileStore()
-            self.team = TeamDao(sessions)
-            self.member = MemberDao(sessions)
+            self.team = TeamDao(sessions, record_writes=self._member_record_writes)
+            self.member = MemberDao(sessions, record_writes=self._member_record_writes)
             self.task = TaskDao(sessions, file_store=file_store)
             self.message = MessageDao(sessions, file_store=file_store)
 
