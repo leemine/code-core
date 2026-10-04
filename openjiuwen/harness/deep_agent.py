@@ -42,6 +42,7 @@ from openjiuwen.core.controller.schema.event import (
 )
 from openjiuwen.core.controller.schema.execution_origin import (
     ExecutionOrigin,
+    _capture_live_execution_origin,
     current_execution_origin,
     execution_origin_scope,
 )
@@ -3868,6 +3869,57 @@ class DeepAgent(BaseAgent):
         async with self._interaction_send_lock:
             self._ensure_interaction_running()
             await self._send_user(request, origin=origin)
+
+    async def _send_owned_steer(
+        self, expected: ActiveInteractionRound, request: SendInputRequest,
+        *, check_current: Callable[[], None],
+    ) -> None:
+        """Admit supplemental text only to this original live Round."""
+        import inspect
+
+        if not isinstance(request, SendInputRequest) or request.mode is not InputDispatchMode.STEER:
+            raise ValueError("owned input requires explicit STEER")
+        query = request.inputs.get("query") if isinstance(request.inputs, dict) else None
+        if not isinstance(query, str) or not query.strip() or not callable(check_current):
+            raise ValueError("owned STEER requires text and a synchronous authority checker")
+        request_id = request.request_id
+        work, session, controller, facade = (
+            expected.work, expected._session, expected._controller, expected._facade_task
+        )
+        origin = _capture_live_execution_origin()
+        if origin is None:
+            raise PermissionError("owned STEER requires its original execution source")
+
+        def check():
+            self._check_owned_round(expected)
+            if _capture_live_execution_origin() is not origin:
+                raise PermissionError("owned STEER execution scope changed")
+            result = check_current()
+            if inspect.iscoroutine(result):
+                result.close()
+            if result is not None:
+                raise TypeError("owned STEER checker must synchronously return None")
+            # Check the captured references after all callbacks, with no await
+            # between these comparisons and the original queue insertion.
+            if (not self._is_interaction_running() or self._active_interaction_round is not expected
+                    or expected.work is not work or work.execution_origin is not origin
+                    or expected._session is not session or self._interaction_session is not session
+                    or expected._controller is not controller or self.loop_controller is not controller
+                    or expected._facade_task is not facade or facade is None
+                    or facade.done() or facade.cancelling()
+                    or expected.waiting_for_input or controller is None):
+                raise PermissionError("original Round no longer accepts owned STEER")
+            if (request.request_id != request_id or request.mode is not InputDispatchMode.STEER
+                    or not isinstance(request.inputs, dict) or request.inputs.get("query") != query):
+                raise PermissionError("owned STEER input changed during admission")
+
+        check()
+        async with self._interaction_send_lock:
+            check()
+            async with self._interaction_control_lock:
+                check()
+                self.loop_controller.enqueue_steer(query, origin=origin)
+                self._notify_work()
 
     def _ensure_interaction_running(self) -> None:
         if not self._is_interaction_running():
