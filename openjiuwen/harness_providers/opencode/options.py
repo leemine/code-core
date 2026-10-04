@@ -177,7 +177,7 @@ def native_config(
             if config.skills and skill_path is not None
             else {}
         ),
-        **({"plugin": list(plugin_specs)} if config.native_plugins is not None else {}),
+        **({"plugin": list(plugin_specs)} if config.native_plugins is not None or plugin_specs else {}),
     }
 
 
