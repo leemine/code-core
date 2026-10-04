@@ -76,6 +76,8 @@ class MemberDao:
             if valid_from is not None and getattr(row, valid_from[0]) not in valid_from[1]:
                 return False
             values = changes(row) if callable(changes) else changes
+            if values is None:
+                return False
             candidate = TeamMember(**dict(record_values(row)))
             for key, value in values.items():
                 setattr(candidate, key, value)
@@ -677,8 +679,10 @@ class MemberDao:
         self._record_writes.receipt_flag(return_receipt)
         bound = self._record_writes.bind("promote_fallback", team_name, member_name)
         if bound is not None:
-            return await self._write_guarded(bound,
-                lambda row: {"options": promote_member_fallback_model(row.options)}, return_receipt=return_receipt)
+            def changes(row):
+                promoted = promote_member_fallback_model(row.options)
+                return None if promoted == row.options else {"options": promoted}
+            return await self._write_guarded(bound, changes, return_receipt=return_receipt)
         async with self._sessions.write() as session:
             result = await session.execute(
                 select(TeamMember).where(
