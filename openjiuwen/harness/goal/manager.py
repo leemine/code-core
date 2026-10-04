@@ -474,6 +474,10 @@ class GoalManager:
             and attempt_index > record.last_assessed_attempt
         )
 
+    def _capture_idle_readmission(self, *, expected_record):
+        from openjiuwen.harness.goal.readmission import capture
+        return capture(self, expected_record)
+
     def _capture_owned_control(self, *, expected_origin):
         from openjiuwen.harness.goal.owned_control import capture
         return capture(self, expected_origin)
