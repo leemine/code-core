@@ -7,6 +7,11 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Protocol
 
+from openjiuwen.core.controller.schema.execution_origin import (
+    ExecutionOrigin,
+    _capture_live_execution_origin,
+    execution_origin_scope,
+)
 from openjiuwen.harness.goal.execution import GoalExecutionPort
 from openjiuwen.harness.goal.schema import (
     GoalAssessment,
@@ -87,6 +92,17 @@ class GoalManager:
                 language=language,
             )
         self._execution = execution
+        # Only the existing current Goal's live admission, never persisted.
+        self._execution_origin: tuple[str, str, int, ExecutionOrigin | None] | None = None
+
+    def _origin_for_record(self, record: GoalRecord) -> ExecutionOrigin | None:
+        binding = self._execution_origin
+        if binding is None or binding[3] is None:
+            return None
+        if binding[:3] != (record.session_id, record.goal_id, record.revision):
+            raise RuntimeError("original Goal execution identity changed")
+        binding[3]._check_current()
+        return binding[3]
 
     def get_store(self, session_id: str | None = None) -> GoalStore:
         """Expose the session store for read-only tools and rails only."""
@@ -117,6 +133,7 @@ class GoalManager:
         token_budget: Optional[int] = None,
         max_attempts: Optional[int] = None,
     ) -> GoalRecord:
+        origin = _capture_live_execution_origin()
         normalized = objective.strip()
         if not normalized:
             raise GoalOperationError(
@@ -138,6 +155,8 @@ class GoalManager:
             )
 
         async with self._control_lock:
+            if origin is not None:
+                origin._check_current()
             existing = self._store.load()
             if existing is not None and not overwrite_confirmed:
                 raise GoalOperationError(
@@ -159,8 +178,10 @@ class GoalManager:
                 token_budget=token_budget,
                 max_attempts=max_attempts,
             )
+            self._execution_origin = (record.session_id, record.goal_id, record.revision, origin)
             self._store.save(record)
             await self._commit_store_locked()
+            self._origin_for_record(record)
 
             # An existing stream remains the one and only consumer.  Queue the
             # replacement work before aborting the old goal round so the stream
@@ -175,6 +196,7 @@ class GoalManager:
                     reason="goal_overwrite",
                 )
 
+            self._origin_for_record(record)
             return record.copy_for_response()
 
     async def pause(self) -> Optional[GoalRecord]:
@@ -218,6 +240,8 @@ class GoalManager:
                 # fold it into time_used here so becoming ACTIVE jumps the
                 # displayed total. Idle pause (no open clock) is a no-op.
                 in_flight = self._has_in_flight_goal_attempt(record)
+                if self._origin_for_record(record) is not None and not in_flight:
+                    raise RuntimeError("managed Goal resume requires an explicit new host admission")
                 record.settle_active_time(keep_active=False)
                 record.status = GoalStatus.ACTIVE
                 record.start_timing()
@@ -251,7 +275,8 @@ class GoalManager:
                 reason="goal_clear",
             )
             if self._execution.is_available():
-                self._execution.goal_updated(None)
+                with execution_origin_scope(self._origin_for_record(record)):
+                    self._execution.goal_updated(None)
             return record.copy_for_response()
 
     def ensure_active_goal_work_locked(self) -> bool:
@@ -279,11 +304,13 @@ class GoalManager:
                 return None
             if attempt_index is not None and attempt_index != record.attempt_count + 1:
                 return None
+            self._origin_for_record(record)
             record.attempt_count += 1
             record.start_timing()
             record.touch()
             self._store.save(record)
             await self._commit_store_locked()
+            self._origin_for_record(record)
             return record.copy_for_response()
 
     async def accumulate_usage(
@@ -302,6 +329,7 @@ class GoalManager:
                 return
             if attempt_index is not None and not self._matches_attempt(record, attempt_index):
                 return
+            self._origin_for_record(record)
             # PAUSED finishing attempts still own active_started_at; flush them too.
             if record.active_started_at is not None and record.status in (
                 GoalStatus.ACTIVE,
@@ -334,6 +362,8 @@ class GoalManager:
             if attempt_index is not None:
                 if not self._matches_attempt(record, attempt_index):
                     return None
+            self._origin_for_record(record)
+            if attempt_index is not None:
                 record.last_assessed_attempt = attempt_index
             if usage is not None:
                 if attempt_index is None:
@@ -357,6 +387,7 @@ class GoalManager:
             record.touch()
             self._store.save(record)
             await self._commit_store_locked()
+            self._origin_for_record(record)
 
             if record.status is GoalStatus.ACTIVE and self._execution.is_available():
                 self._ensure_goal_work_locked(record)
@@ -367,10 +398,12 @@ class GoalManager:
     def _ensure_goal_work_locked(self, record: GoalRecord) -> bool:
         if record.status is not GoalStatus.ACTIVE or not self._execution.is_available():
             return False
-        return self._execution.ensure_work(record.copy_for_response())
+        with execution_origin_scope(self._origin_for_record(record)):
+            return self._execution.ensure_work(record.copy_for_response())
 
     def _emit_goal_updated_locked(self, record: GoalRecord) -> None:
-        self._execution.goal_updated(record.copy_for_response())
+        with execution_origin_scope(self._origin_for_record(record)):
+            self._execution.goal_updated(record.copy_for_response())
 
     @staticmethod
     def _matches_attempt(record: GoalRecord, attempt_index: int) -> bool:
