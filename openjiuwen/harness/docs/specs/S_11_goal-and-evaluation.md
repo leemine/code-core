@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/goal/` |
-| 最近一次修订日期 | 2026-09-27 |
-| 关联 feature | `F_10_provider-neutral-goal-driver.md` |
+| 最近一次修订日期 | 2026-10-04 |
+| 关联 feature | `F_10_provider-neutral-goal-driver.md`, `F_35_goal-live-execution-origin.md` |
 
 ## 范围 / 边界
 
@@ -86,3 +86,24 @@ ISO 时间戳保持原格式。`last_assessed_attempt` 是非负整数，旧记�
 - TaskCompletionRail 收集报告、transcript 和 usage，并调用公共驱动：S_04。
 - submit_goal_report/get_current_goal 工具：S_05。
 - Provider SPI 与有序单消费者事件不改变：S_19。
+
+## Native live 执行来源
+
+GoalManager 的私有单槽保存本进程 set 准入时的原 Goal identity 与 ExecutionOrigin；
+不写入 GoalRecord、Session state 或 wire，不增加持久授权。set 首次 await 前捕获，
+锁内修改前及 commit 后重新检查；同一 Goal 的后继 attempt 和更新输出只复用该来源。
+ensure_active 的长驻调用显式遮蔽 ambient，Native adapter 将来源附到原 RoundWorkItem，
+EventManager 仍为唯一工作队列。旧无来源记录保持 legacy；重建不恢复 live 权限。
+
+受管原来源失效时不能以新的 ambient 重新授予原 Goal；managed resume 不能自动换根，
+本片不开放持久 ACTIVE 记录的受管 attach。get/peek 保持只读。pause/clear 的宿主
+目标选择、idle resume 的新准入、EOF handoff 与完整宿主接线不由本来源载体代替。
+
+重新构造的 Manager 读取持久 ACTIVE 记录时没有 live slot，core 保持 legacy None；
+这不是认证恢复。受管宿主必须在 attach 前拒绝或提交显式新的合法 admission，不能凭
+GoalRecord 的 ACTIVE 字段直接开放执行。旧 Goal 的迟到 begin/usage/assessment 先经
+现有 ID/revision 校验返回，不通过新绑定补权或改变新 Goal。
+
+pause/clear 的原持久写入/commit、丢弃排队 work、clear 原 cancel 顺序保持；原来源若在
+输出阶段失效，会拒绝 emit 并抛异常，但已经 PAUSED/clear 的状态不会回滚。此片未提供
+独立 cleanup-only 权限或 control selector，调用者不能把该异常解释成“未发生写入”。
