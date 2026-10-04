@@ -7,12 +7,16 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.kv_cache.kv_cache_subagent_lifecycle import is_sticky_subagent_type
 from openjiuwen.harness.subagent_runtime.activity_events import ActivityEmitter
+from openjiuwen.harness.subagent_runtime.operation_origin import (
+    _capture_operation_lifetime, _current_operation_lifetime,
+)
 from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_DEFAULT,
     WAIT_TIMEOUT_MS_MAX,
@@ -107,6 +111,16 @@ def _cursor_start_index_merged(
     return len(items)
 
 
+@dataclass(eq=False)
+class _SubagentExit:
+    control: Any
+    manager: Any
+    origin: Any
+    operations: tuple
+    emitter: Any
+    items: tuple | None = None
+
+
 class SubagentControl:
     """Parent-session orchestration entry for subagent runtime."""
 
@@ -161,6 +175,7 @@ class SubagentControl:
         role: str | None = None,
         browser_capabilities: list[str] | None = None,
     ) -> SpawnResult:
+        lifetime = _capture_operation_lifetime()
         sticky = is_sticky_subagent_type(subagent_type)
         sid = subagent_id or build_subagent_id(
             self._parent_session_id,
@@ -181,8 +196,10 @@ class SubagentControl:
         )
         task_description = self._truncate_task_description(query)
         reservation = await self._acquire_slot()
+        instance = None
 
         try:
+            self._check_operation_admission(lifetime)
             instance = await self._manager.create(
                 subagent_type=subagent_type,
                 subagent_id=sid,
@@ -191,6 +208,7 @@ class SubagentControl:
                 role=resolved_role,
                 browser_capabilities=browser_capabilities,
             )
+            self._check_operation_admission(lifetime)
             reservation.commit(
                 SubagentMetadataBuildParams(
                     subagent_id=sid,
@@ -201,15 +219,22 @@ class SubagentControl:
                     task_description=task_description,
                 ).to_metadata(parent_session_id=self._parent_session_id),
             )
-        except Exception:
+        except BaseException:
             reservation.rollback()
+            if instance is not None and self._manager.find(sid) is instance:
+                await self._remove_failed_admission(sid, instance)
             raise
 
         try:
-            await instance.enqueue(UserInputOp(query=query, task_id=task_id))
-        except Exception:
-            await self._manager.remove(sid, reason="spawn_failed")
-            self._registry.release(sid)
+            self._check_operation_admission(lifetime)
+            await instance.enqueue(UserInputOp(query=query, task_id=task_id)._with_lifetime(lifetime))
+        except BaseException:
+            metadata = self._registry.find_metadata(sid)
+            try:
+                await self._remove_failed_admission(sid, instance)
+            finally:
+                if self._manager.find(sid) is None and self._registry.find_metadata(sid) is metadata:
+                    self._registry.release(sid)
             raise
 
         self._registry.touch(sid)
@@ -220,6 +245,83 @@ class SubagentControl:
             task_id=task_id,
             status=instance.agent_status(),
         )
+
+    @staticmethod
+    def _check_operation_admission(lifetime):
+        if lifetime is None:
+            return
+        lifetime.check_admission()
+        if lifetime.parent is None:
+            lifetime.origin._check_current()
+
+    async def _remove_failed_admission(self, sid, instance):
+        if self._manager.find(sid) is not instance:
+            raise RuntimeError("failed subagent admission was replaced")
+        task = asyncio.create_task(self._manager.remove(sid, reason="spawn_failed"))
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    def _capture_origin_exit(self, origin):
+        if origin is None:
+            raise ValueError("exact subagent exit requires an original source")
+        operations = []
+        for sid in tuple(self._manager.list_ids()):
+            instance = self._manager.find(sid)
+            if instance is None:
+                raise RuntimeError("original subagent instance disappeared during capture")
+            owned = instance._capture_origin_ops(origin)
+            if owned:
+                operations.append((sid, instance, owned))
+        return _SubagentExit(self, self._manager, origin, tuple(operations), self._activity_emitter)
+
+    async def _finish_origin_exit(self, handle, *, cancel):
+        if not isinstance(handle, _SubagentExit) or handle.control is not self or handle.manager is not self._manager:
+            raise RuntimeError("original subagent exit owner changed")
+        # Reject a producer self-join before mutating any original fence.
+        for _sid, instance, ops in handle.operations:
+            instance._validate_original_ops(ops)
+        # Fence every originally captured op before awaiting any one instance.
+        if cancel:
+            for _sid, _instance, ops in handle.operations:
+                for op in ops:
+                    op._lifetime.cancel_requested = True
+        for sid, instance, ops in handle.operations:
+            if self._manager.find(sid) is not instance and any(not op._lifetime.done.is_set() for op in ops):
+                raise RuntimeError("original active subagent instance was replaced")
+            await instance._finish_original_ops(ops, cancel=cancel)
+        # No new work may be admitted from the captured source after its caller
+        # fence. Nested producers above must also be joined before this scan.
+        for sid in tuple(self._manager.list_ids()):
+            instance = self._manager.find(sid)
+            if instance is None or instance._capture_origin_ops(handle.origin):
+                raise RuntimeError("original subagent operations remain unconfirmed")
+        for key, values in tuple(self._pending_activities.items()):
+            original = [value for value in values if value._operation is not None
+                        and value._operation.origin is handle.origin]
+            if original and not cancel:
+                raise RuntimeError("original activity gate has not drained")
+            if original:
+                kept = [value for value in values if not any(value is item for item in original)]
+                if kept:
+                    self._pending_activities[key] = kept
+                else:
+                    self._pending_activities.pop(key, None)
+        emitter = handle.emitter
+        if emitter is not None:
+            if self._activity_emitter is not emitter:
+                raise RuntimeError("original activity emitter changed")
+            if handle.items is None:
+                handle.items = emitter._capture_origin_items(handle.origin)
+            await emitter._finish_original_items(handle.items, cancel=cancel)
+            if emitter._capture_origin_items(handle.origin):
+                raise RuntimeError("original activity write remains unconfirmed")
 
     async def wait(
         self,
@@ -415,6 +517,7 @@ class SubagentControl:
         interrupt: bool = False,
     ) -> str:
         """Enqueue follow-up input and return a new task_id without blocking."""
+        lifetime = _capture_operation_lifetime()
         instance = self._manager.find(subagent_id)
         if instance is None or instance.is_closed():
             raise build_subagent_runtime_error(
@@ -422,8 +525,11 @@ class SubagentControl:
             )
         if interrupt:
             await instance.interrupt()
+        self._check_operation_admission(lifetime)
+        if self._manager.find(subagent_id) is not instance:
+            raise RuntimeError("original subagent instance changed during admission")
         task_id = new_task_id()
-        await instance.enqueue(UserInputOp(query=query, task_id=task_id))
+        await instance.enqueue(UserInputOp(query=query, task_id=task_id)._with_lifetime(lifetime))
         await instance.status.set(SubagentStatus.pending_init())
         self._registry.touch(subagent_id)
         metadata = self._registry.find_metadata(subagent_id)
@@ -840,8 +946,20 @@ class SubagentControl:
         return ""
 
     def _prepare_turn_activity_gate(self, subagent_id: str, task_id: str) -> None:
-        self._activity_ready = {key for key in self._activity_ready if key[0] != subagent_id}
-        stale_keys = [key for key in self._pending_activities if key[0] == subagent_id]
+        instance = self._manager.find(subagent_id)
+        live_ids = set()
+        if instance is not None:
+            ops = tuple(instance._ops._queue) + ((instance._claimed_op,) if instance._claimed_op else ())
+            live_ids = {op.task_id for op in ops if isinstance(op, UserInputOp) and op._lifetime is not None}
+        # A second logical Turn can enqueue on this same child while an earlier
+        # managed operation is still producing activities. Preserve its gate.
+        pending_ids = {key[1] for key, values in self._pending_activities.items()
+                       if key[0] == subagent_id and any(value._operation is not None for value in values)}
+        retained = live_ids | pending_ids
+        self._activity_ready = {key for key in self._activity_ready
+                                if key[0] != subagent_id or key[1] in retained}
+        stale_keys = [key for key in self._pending_activities
+                      if key[0] == subagent_id and key[1] not in retained]
         for key in stale_keys:
             del self._pending_activities[key]
 
@@ -870,6 +988,12 @@ class SubagentControl:
             self._dispatch_activity(activity)
 
     def _handle_activity(self, activity: SubagentActivity) -> None:
+        lifetime = _current_operation_lifetime()
+        if lifetime is not None:
+            op = lifetime.operation
+            if op is None or activity.task_id != op.task_id:
+                raise RuntimeError("activity does not belong to its original operation")
+            activity = activity._with_operation(lifetime)
         task_id = activity.task_id or self._resolve_task_id(activity.subagent_id)
         if task_id:
             gate_key = (activity.subagent_id, task_id)
@@ -888,7 +1012,7 @@ class SubagentControl:
             sid,
             deque(maxlen=MAX_ACTIVITIES_PER_INSTANCE),
         )
-        bucket.append(activity)
+        bucket.append(activity._with_operation(None))
         self._activity_seq[sid] = max(self._activity_seq.get(sid, 0), activity.seq)
 
     async def _handle_transcript_message(self, message: SubagentMessage) -> None:

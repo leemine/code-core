@@ -60,6 +60,17 @@ def current_execution_origin() -> ExecutionOrigin | None:
     return scope.origin if scope is not None and scope.active else None
 
 
+def _capture_live_execution_origin() -> ExecutionOrigin | None:
+    """Strict admission read: inherited expired scopes cannot become legacy."""
+    scope = _scope.get()
+    if scope is not None and not scope.active:
+        raise RuntimeError("original execution origin scope expired")
+    value = scope.origin if scope is not None else None
+    if value is not None:
+        value._check_current()
+    return value
+
+
 def resolve_execution_origin(origin=ORIGIN_UNSET) -> ExecutionOrigin | None:
     """Capture omission once, while an explicit None always masks the source."""
     if origin is ORIGIN_UNSET:

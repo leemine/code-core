@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, replace
 from enum import Enum
 from typing import Any, Union
+
+from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin, resolve_execution_origin
+from openjiuwen.harness.subagent_runtime.operation_origin import _OperationLifetime
 
 
 class SubagentStatusKind(str, Enum):
@@ -73,6 +76,29 @@ class UserInputOp:
 
     query: str
     task_id: str
+    _origin: InitVar[ExecutionOrigin | None] = None
+    _lifetime: InitVar[_OperationLifetime | None] = None
+
+    def __post_init__(self, _origin, _lifetime):
+        # This is lifecycle provenance, not authority for the child's tools.
+        # It is never restored from public fields or captured from ambient state.
+        source = resolve_execution_origin(_origin)
+        if _lifetime is not None and _lifetime.origin is not source:
+            raise ValueError("subagent operation source does not match its lifetime")
+        object.__setattr__(self, "_origin", source)
+        object.__setattr__(self, "_lifetime", _lifetime or (_OperationLifetime(source) if source is not None else None))
+
+    @property
+    def execution_origin(self):
+        return self._origin
+
+    def with_execution_origin(self, origin):
+        source = resolve_execution_origin(origin)
+        lifetime = self._lifetime if source is self.execution_origin else None
+        return replace(self, _origin=source, _lifetime=lifetime)
+
+    def _with_lifetime(self, lifetime):
+        return replace(self, _origin=lifetime.origin if lifetime is not None else None, _lifetime=lifetime)
 
 
 @dataclass(frozen=True)
@@ -284,6 +310,13 @@ class SubagentActivity:
     at_ms: float = 0.0
     dropped: int | None = None
     phase_id: int = 0
+    _operation: InitVar[_OperationLifetime | None] = None
+
+    def __post_init__(self, _operation):
+        object.__setattr__(self, "_operation", _operation)
+
+    def _with_operation(self, operation):
+        return replace(self, _operation=operation)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {

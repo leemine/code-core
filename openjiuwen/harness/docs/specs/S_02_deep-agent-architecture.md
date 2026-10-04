@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
+| 关联 feature | `F_33_subagent-origin-exit.md`、`F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
 
 ## 范围 / 边界
 
@@ -228,6 +228,9 @@ Native 凭据退出；未绑定 checker 的 legacy 保留旧入口行为。细�
 原 `_interaction_emit_tasks` 仍是唯一 emit Task 集合，Task 创建时保留 live origin；
 来源 fence 后等待同原来源的实际尾部，不把 EOF/业务结果当作全部生产者退出。
 
-原子 Agent 的 UserInputOp/ActivityEmitter 尚未提供原 Turn 来源证明；存在 queued、
-claimed、current 子任务或未证明的 activity drain 时，本精确端口拒绝确认退出。不会
-为确认成功而释放整个 Session 的子 Agent，也不因此宣称 B4 完整出口通过。
+UserInputOp/ActivityEmitter 的私有来源与精确尾部端口见 S_10；完整子树仍未自动接入
+本端口。无 queued/claimed/current/pending 子操作、无 pending 活动、无 emitter queued
+或 current write 时，允许常驻空 worker/drain。存在实际 child 工作仍拒绝确认，不以
+取消整 Session 代替原来源退出。旧 session_spawn 内存 toolkit 记录、非终态 task、
+存活 wrapper/auto-invoke 缺乏精确来源，仍为 unknown；completed toolkit 记录本身也不
+证明其延迟尾部退出。这项保守限制及尚未启用的完整后台组合详见 F_33，不宣称 B4 完整通过。
