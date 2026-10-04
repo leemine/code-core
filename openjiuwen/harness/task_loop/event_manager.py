@@ -34,6 +34,10 @@ class EventManager:
         self._user_queue.append(work)
 
     def push_goal(self, work: RoundWorkItem) -> bool:
+        """Queue a Goal once per goal id/revision in the original inventory."""
+        return self._push_goal_checked(work)
+
+    def _push_goal_checked(self, work: RoundWorkItem, check_after_source=None) -> bool:
         """Queue a goal item unless its goal id/revision already exists.
 
         ``False`` means pending, dequeued, or active work already represents
@@ -44,6 +48,8 @@ class EventManager:
             raise ValueError("push_goal requires a goal RoundWorkItem")
         if work.execution_origin is not None:
             work.execution_origin._check_current()
+        if check_after_source is not None:
+            check_after_source()
         goal_id = work.context.get("goal_id")
         revision = work.context.get("revision")
         if self.has_goal_work(goal_id=goal_id, revision=revision):

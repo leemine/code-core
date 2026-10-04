@@ -807,3 +807,68 @@ async def test_ack_callback_cannot_change_original_operation_or_result(case, cha
 
     with pytest.raises(PermissionError, match="result changed"):
         await c.h.manager._apply_owned_control(target, action="clear", check_current=lambda: None, check_ack=ack)
+
+
+@pytest.mark.asyncio
+async def test_owned_control_callback_cannot_retarget_store_same_sid(case):
+    from openjiuwen.core.session.agent import create_agent_session
+    from openjiuwen.harness.goal.store import SessionGoalStore
+
+    c = case
+    original_store = c.h.store
+    original_session = original_store._session
+    replacement = create_agent_session(session_id=original_session.get_session_id(), card=c.agent.card)
+    await replacement._inner.checkpointer().pre_agent_execute(replacement._inner, None)
+    replacement_store = SessionGoalStore(replacement)
+    replacement_store.save(original_store.load())
+    selector = c.h.manager._capture_owned_control(expected_origin=c.source)
+
+    def checker():
+        original_store._session = replacement
+
+    try:
+        with pytest.raises(PermissionError):
+            await c.h.manager._apply_owned_control(selector, action="pause", check_current=checker)
+        assert replacement_store.load().status is GoalStatus.ACTIVE
+    finally:
+        original_store._session = original_session
+
+
+@pytest.mark.asyncio
+async def test_owned_control_capture_source_checker_cannot_replace_backing(case):
+    c = case
+    from openjiuwen.harness.goal.store import SessionGoalStore
+
+    original = c.h.store._session
+    replacement = type(original)()
+    SessionGoalStore(replacement).save(c.h.store.load())
+    checker = c.source._checker
+
+    def replace_backing():
+        c.h.store._session = replacement
+
+    object.__setattr__(c.source, "_checker", replace_backing)
+    try:
+        with pytest.raises(PermissionError):
+            c.h.manager._capture_owned_control(expected_origin=c.source)
+    finally:
+        object.__setattr__(c.source, "_checker", checker)
+        c.h.store._session = original
+
+
+@pytest.mark.asyncio
+async def test_owned_control_commit_await_rechecks_backing(case):
+    c = case
+    target = c.h.manager._capture_owned_control(expected_origin=c.source)
+    original = c.h.store._session
+    replacement = type(original)()
+
+    async def commit():
+        c.h.store._session = replacement
+
+    c.h.session.commit = commit
+    try:
+        with pytest.raises(PermissionError):
+            await c.h.manager._apply_owned_control(target, action="pause", check_current=lambda: None)
+    finally:
+        c.h.store._session = original

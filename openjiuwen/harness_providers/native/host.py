@@ -31,6 +31,13 @@ class NativeHostHooks:
     ``before_start`` installs the host's input guard after
     pre_run and before agent start.
 
+    ``prepare_goal_readmission`` is an optional synchronous, keyword-only port
+    for an explicitly admitted new Goal root. It runs before output attachment
+    with the exact new Pending origin and returns a private typed plan (or None
+    for ordinary input). Native validates the old Pending exit proof; DeepAgent
+    attaches its sole lease and applies the plan before ``dispatch_input`` reads
+    the plan's result. The hook must not mutate or execute a Goal itself.
+
     ``dispatch_input`` runs after the sole output lease is acquired. It may
     translate the default request to a host-owned request preserving Python
     object identity, or dispatch a Native Goal command. True means drain the
@@ -40,6 +47,9 @@ class NativeHostHooks:
     dispatch. Hooks must not start another event consumer or call harness stop.
     """
 
+    prepare_goal_readmission: Callable[[DeepAgent, HarnessInput, ExecutionOrigin], Any] | None = field(
+        default=None, repr=False, kw_only=True,
+    )
     capture_execution_origin: Callable[[HarnessInput], ExecutionOrigin | None] | None = field(
         default=None, repr=False, kw_only=True,
     )

@@ -90,6 +90,22 @@ class NativeGoalExecutionAdapter:
             self._notify_work()
         return queued
 
+    def _ensure_readmitted_work(self, record, check):
+        from openjiuwen.harness.prompts.sections.goal import build_goal_task_query
+        origin = _capture_live_execution_origin()
+        work = RoundWorkItem.goal(
+            inputs={"query": build_goal_task_query(record, self._language)},
+            goal_id=record.goal_id, revision=record.revision, session_id=record.session_id,
+        ).with_execution_origin(origin)
+        try:
+            if not self._event_manager._push_goal_checked(work, check):
+                raise PermissionError("Goal readmission unexpectedly found duplicate work")
+            self._notify_work()
+        except BaseException:
+            self._event_manager._discard_captured_work((work,))
+            raise
+        return work
+
     def discard_work(self, *, session_id: str, goal_id: str) -> None:
         """Remove only pending work for this session and goal."""
         self._event_manager.discard_goal_work(session_id=session_id, goal_id=goal_id)

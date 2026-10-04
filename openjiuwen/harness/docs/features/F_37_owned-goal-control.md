@@ -73,3 +73,12 @@ ACK 不授予执行或修改，临时凭据/owner/原宿主 entry 与精确退�
 实际 Native/Goal/TaskLoop 组件反例：只延迟已确认退出的 ACK，等待真实 terminal_event
 后原实现抛原 source 过期；新接口与宿主 ACK checker 组合后正常与延迟两项均通过。
 该验证使用合成回调与模型 IO，不是真实 Provider 负向探针或锁安装验收。
+
+## 原 Store backing 归属修正
+
+正式 F37 的 selector 曾只核 Store 对象/session_id，没有核 Store 持有的实际 Session。
+同 ID/同 GoalRecord 的另一 Session 可在同步 checker 中被替入并接收 pause commit。
+现在 capture 在所有来源回调前固定 `store._session`，要求其与原 attempt Session 为同一对象；
+后续静态复核（含 commit await 和 clear ACK）持续检查，不能凭同 ID 补选。
+回归覆盖实际 core Session 替换、capture 来源 checker 重入以及 commit await 替换；
+这是存储归属修正，不增加控制动作、权限或恢复语义。

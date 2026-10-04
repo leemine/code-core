@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
 | 最近一次修订日期 | 2026-10-05 |
-| 关联 feature | `F_37_owned-goal-control.md`、 `F_33_subagent-origin-exit.md`、`F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
+| 关联 feature | `F_38_goal-idle-readmission.md`、 `F_37_owned-goal-control.md`、 `F_33_subagent-origin-exit.md`、`F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
 
 ## 范围 / 边界
 
@@ -243,3 +243,16 @@ ActiveInteractionRound/work/facade/session/controller。clear/overwrite 只取�
 复用原 `_drain_owned_round` 与输出完成信号确认原 producer 退出；不 join 常驻 supervisor，
 不使用 whole-origin abort。原 Goal 控制锁不能跨尾部 join 持有。出队后旧 managed Goal
 若被清除/覆盖，原消费检查拒绝该项，supervisor 继续处理原队列其它工作。详见 S_11。
+
+
+## 显式 idle Goal 新准入（F38）
+
+`GoalManager._capture_idle_readmission(expected_record=...)` 固定原记录/slot 与 Native
+执行所有者。`NativeHostHooks.prepare_goal_readmission` 在 managed Pending 的 attach 前
+返回私有 `_NativeGoalReadmissionPlan`，包含 selector/action/同步 checker/原 previous_turn。
+热路径复核同 source 的原 Pending 精确退出回执；冷路径仅首个受管 Pending 且无原工作。
+`DeepAgent._attach_output_for_goal_readmission` 按原 send→control 锁取得 sole lease 后
+绑定实际新 Pending source；idle resume 递增 revision，ACTIVE attach 保留 id/revision。
+回调之后纯事实复核，跨 commit 再验，失败仅清本次 lease/原队列项。原 F37 live 控制、
+legacy None 及单消费者不变。来源不入 GoalRecord，不据持久记录恢复权限。宿主新 producer
+和 EOF 触发的权限构造不属于此 core 接口。详见 F_38_goal-idle-readmission.md。
