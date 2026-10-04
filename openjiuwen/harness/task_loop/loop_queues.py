@@ -18,6 +18,7 @@ from typing import List
 
 from openjiuwen.core.controller.schema.execution_origin import (
     ORIGIN_UNSET,
+    _unwrap_origin_inputs,
     capture_origin_input,
     consume_origin_input,
 )
@@ -87,6 +88,20 @@ class LoopQueues:
             List of follow-up message strings.
         """
         return _drain(self.follow_up, expected_origin)
+
+    def drain_sourced_follow_up(self):
+        """Take one batch from the existing queue, preserving its actual source.
+
+        A mixed batch is rejected as a whole; no later enqueued work is touched.
+        This synchronous operation never consults the consumer's ambient scope.
+        """
+        values = []
+        while not self.follow_up.empty():
+            try:
+                values.append(self.follow_up.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return _unwrap_origin_inputs(values)
 
     def clear_follow_up(self) -> None:
         """Discard queued values without treating them as executable input."""
