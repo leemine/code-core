@@ -52,3 +52,10 @@ The resource owner must still enforce revocation at its own asynchronous resourc
 use boundaries inside a running tool. This API validates final admission, not all
 internal I/O of arbitrary code. Product MCP transport, framework tool mappings,
 Team/subagent credentials and real Provider acceptance are independent checks.
+
+For resource consumers inside the already authorized original method,
+[current_tool_execution and ToolExecution](tool-execution-certificate.md) provide
+separate read-only live origin evidence. They do not prolong ToolInvocation or
+authorize post-parse I/O. Acquisition remains restricted to the original Task;
+an inherited SDK child may only check an already captured origin and must still
+satisfy the host's own current predicate and resource policy.
