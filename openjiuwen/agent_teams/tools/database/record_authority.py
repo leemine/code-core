@@ -162,6 +162,7 @@ class MemberWritePermit(_LiveOnly):
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class MemberRecordAuthorizer(_LiveOnly):
     bind_for_write: Callable[[MemberWriteOperation, ExecutionOrigin], MemberWritePermit]
+    bind_for_effect: Callable | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False, init=False)
