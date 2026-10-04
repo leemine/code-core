@@ -554,6 +554,11 @@ class DeepAgentHarness(SerializedTurnHarness):
                 await self._wait_turn_exit_barrier(turn)
         return self._build_result(turn, state, timing)
 
+    def _capture_idle_goal_control(self, *, expected_record, previous_turn, check_current):
+        from openjiuwen.harness_providers.native.goal_control import capture_idle
+        return capture_idle(self, expected_record=expected_record,
+                            previous_turn=previous_turn, check_current=check_current)
+
     def _goal_readmission_proof(self, turn, plan):
         from openjiuwen.harness.goal.readmission import _IdleGoalReadmission, _NativeGoalReadmissionPlan
         if (type(plan) is not _NativeGoalReadmissionPlan
@@ -561,12 +566,8 @@ class DeepAgentHarness(SerializedTurnHarness):
                 or plan.selector.agent is not turn._agent or plan.selector.session is not turn._session):
             raise HarnessStateError("Goal readmission target is not this Native Session")
         old, slot = plan.previous_turn, plan.selector.slot
-        barrier = None if old is None else getattr(old, '_exit', None)
-        round_handle = None if barrier is None else barrier.round_handle
-        cleanup = None if barrier is None else barrier.cleanup
-        confirmed = None if barrier is None else barrier.confirmed
-        admissions = () if barrier is None else barrier.admissions
-        interactions = () if barrier is None else barrier.interactions
+        from openjiuwen.harness_providers.native.goal_control import capture_previous_exit
+        old_check = None if old is None else capture_previous_exit(self, plan.selector, old)
 
         def check_previous():
             self._check_original_native_turn(turn)
@@ -575,32 +576,10 @@ class DeepAgentHarness(SerializedTurnHarness):
             if old is None:
                 if slot is not None or self._first_managed_turn is not turn:
                     raise HarnessStateError("cold Goal admission requires the first fresh managed Turn")
-                return
-            if (type(old) is not _NativePendingTurn or old is turn or old._harness_owner is not self
-                    or old._agent is not turn._agent or old._session is not turn._session
-                    or slot is None or old._origin is not slot[3]
-                    or type(barrier) is not _NativeTurnExit or old._exit is not barrier
-                    or barrier.turn is not old or barrier.round_handle is not round_handle
-                    or barrier.cleanup is not cleanup or barrier.confirmed is not confirmed
-                    or barrier.admissions is not admissions or barrier.interactions is not interactions
-                    or not old._execution_done.is_set() or old._admissions
-                    or confirmed is None or not confirmed.done() or confirmed.cancelled()
-                    or cleanup is None or not cleanup.done() or cleanup.cancelled()
-                    or round_handle is None or round_handle.agent is not turn._agent
-                    or round_handle.session is not turn._session or round_handle.origin is not old._origin):
-                raise HarnessStateError("original Goal Pending exit is unconfirmed")
-            confirmed.result()
-            cleanup.result()
-            if (any(not task.done() for task in admissions)
-                    or self._capture_turn_interactions(old)
-                    or any(not entry.handle_done.is_set() or entry.handling
-                           or (entry.cancel_task is not None and (
-                               not entry.cancel_task.done() or entry.cancel_task.cancelled()
-                               or entry.cancel_task.exception() is not None)) for entry in interactions)
-                    or turn._agent._event_manager._capture_origin_work(old._origin)
-                    or turn._agent._capture_owned_round(old._origin) is not None):
-                raise HarnessStateError("original Goal Pending still owns work")
-            turn._agent._check_origin_exit(round_handle)
+            else:
+                if old is turn:
+                    raise HarnessStateError("Goal readmission cannot reuse its new Turn")
+                old_check()
         check_previous()
         return check_previous
 

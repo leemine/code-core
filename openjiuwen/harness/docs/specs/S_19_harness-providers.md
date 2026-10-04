@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
-| 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
+| 最近一次修订日期 | 2026-10-05 |
+| 关联 feature | `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
 
 ## 范围 / 边界
 
@@ -460,3 +460,13 @@ resolve 原 confirmed Future；execute 出口继续阻塞，重试仍使用原 h
 回调之后纯事实复核，跨 commit 再验，失败仅清本次 lease/原队列项。原 F37 live 控制、
 legacy None 及单消费者不变。来源不入 GoalRecord，不据持久记录恢复权限。宿主新 producer
 和 EOF 触发的权限构造不属于此 core 接口。详见 F_38_goal-idle-readmission.md。
+
+## 空闲 Goal 的停止性控制（F39）
+
+Native 私有 `_capture_idle_goal_control` 只接已有 Goal 的 pause/clear；控制授权与旧执行来源
+分离。hot 必须显式原 Pending 及成功的原退出图，cold 必须首次 managed Pending 尚未
+产生、原 slot 为 None 且所有原库存为空。复用 F38 原选择器及真实 store backing Session
+检查，持久 GoalRecord 不赋权。原 command → send → control 锁内复用 GoalManager
+保存和 commit；await 后及最终 `check_result` 重验当前控制授权和原目标。pause 保持
+slot，clear 清 slot。无新 Turn/模型/attach/输出 lease；idle 仅原调用 ACK，legacy/live
+goal_updated 事件保持。调用者取消不丢原操作 Task，同对象同行为重试等待同一结果。

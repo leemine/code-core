@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_PATHS = (
+    "tests/unit_tests/harness_providers/test_native_goal_idle_control.py",
     "tests/unit_tests/harness_providers/test_native_goal_readmission.py",
     "tests/unit_tests/harness/prompts/test_context_file_cache.py",
     "tests/unit_tests/harness/subagent_runtime/test_owned_operation_exit.py",
