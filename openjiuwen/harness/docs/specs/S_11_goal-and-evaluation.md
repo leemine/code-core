@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/goal/` |
-| 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_10_provider-neutral-goal-driver.md`, `F_35_goal-live-execution-origin.md` |
+| 最近一次修订日期 | 2026-10-05 |
+| 关联 feature | `F_10_provider-neutral-goal-driver.md`, `F_35_goal-live-execution-origin.md`, `F_37_owned-goal-control.md` |
 
 ## 范围 / 边界
 
@@ -97,7 +97,7 @@ EventManager 仍为唯一工作队列。旧无来源记录保持 legacy；重建
 
 受管原来源失效时不能以新的 ambient 重新授予原 Goal；managed resume 不能自动换根，
 本片不开放持久 ACTIVE 记录的受管 attach。get/peek 保持只读。pause/clear 的宿主
-目标选择、idle resume 的新准入、EOF handoff 与完整宿主接线不由本来源载体代替。
+权限、idle resume 的新准入、EOF handoff 与完整宿主接线不由本来源载体代替。
 
 重新构造的 Manager 读取持久 ACTIVE 记录时没有 live slot，core 保持 legacy None；
 这不是认证恢复。受管宿主必须在 attach 前拒绝或提交显式新的合法 admission，不能凭
@@ -105,5 +105,30 @@ GoalRecord 的 ACTIVE 字段直接开放执行。旧 Goal 的迟到 begin/usage/
 现有 ID/revision 校验返回，不通过新绑定补权或改变新 Goal。
 
 pause/clear 的原持久写入/commit、丢弃排队 work、clear 原 cancel 顺序保持；原来源若在
-输出阶段失效，会拒绝 emit 并抛异常，但已经 PAUSED/clear 的状态不会回滚。此片未提供
-独立 cleanup-only 权限或 control selector，调用者不能把该异常解释成“未发生写入”。
+输出阶段失效，会拒绝 emit 并抛异常，但已经 PAUSED/clear 的状态不会回滚。F35 不提供独立 cleanup-only 权限；F37 私有 selector 也不回滚已经发生的持久写入，
+调用者不能把该异常解释成“未发生写入”。
+
+
+## 原 root 精确控制（F37）
+
+私有 `_capture_owned_control(expected_origin=...)` 返回不入 wire/持久化的 selector；
+`_apply_owned_control(selector, action=..., check_current=..., ...)` 保留旧公开方法与返回值。
+clear 成功返回已移除记录副本。peek/get 仍只读，不触发运行；宿主另验 owner 权限。
+
+捕获先固定 manager/store/控制锁/Session/记录事实以及原 Round、work、facade，随后
+执行原 source checker 并静态复核。apply 在原控制锁内核原 source 和临时同步 checker，
+回调后复核固定引用与参数，每次 commit await 后重验。不要求调用 Task 相同；不得以
+当前 ambient 或新控制身份替换原 source。usage、计量、assessment 不等同 Goal 换代。
+
+active set/pause/clear 与同 live attempt resume 属于原 root。无记录 set 要求真实原
+live Round；idle resume、冷 attach 和 EOF 新 root 仍需新的宿主准入，不能据此开放。
+clear/overwrite 只取消原 attempt，不取消相同来源下的新 Goal 或其它排队 work。
+原锁提交后释放锁，等待原 facade、submission、scheduler wrapper 和原输出尾部。
+外层取消保留同一操作；明确尾部失败可用同 selector/参数/checker 仅重试退出与确认，
+不得重复持久修改或二次打断原 finally。成功缓存返回前仍重验当前权限。
+
+仅 managed Goal 在出队、原 wrapper/model 消费点复核原 Goal ID/revision/source；
+clear/overwrite 后的旧工作拒绝，pause 不撤原 root、不改变原 revision，允许在途收尾。
+待答原 attempt 的退出只在 active 仍是原对象时清理原 Session interruption state，
+并唤醒既有 supervisor；不能清理后继 Round 状态。
+legacy None 的队列顺序、公开控制签名、状态格式和行为保持。
