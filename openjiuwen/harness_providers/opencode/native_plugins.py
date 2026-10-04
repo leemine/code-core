@@ -31,6 +31,7 @@ _SUPPORTED_HOOKS = frozenset(
     {
         "chat.message",
         "chat.params",
+        "chat.headers",
         "event",
         "experimental.chat.system.transform",
         "tool.execute.before",

@@ -142,10 +142,15 @@ def native_config(
     include_product_mcp=True,
     runtime_policy: HarnessRuntimePolicy | None = None,
     governed: bool = False,
+    model_gateway=None,
 ):
     model = config.model
     if model is None:
         raise OpenCodeError("explicit_model_required", category="process_start_failed")
+    if model_gateway is not None:
+        if not governed:
+            raise OpenCodeError("model_gateway_requires_preflight", category="process_start_failed")
+        model_gateway.validate_model(model)
     if config.skills and skill_path is None:
         raise OpenCodeError("explicit_skill_path_required", category="process_start_failed")
     return {
@@ -158,7 +163,10 @@ def native_config(
             model.provider: {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "OpenJiuwen managed model",
-                "options": {"baseURL": model.api_base, "apiKey": model.api_key or "not-required"},
+                "options": {
+                    "baseURL": model_gateway.url if model_gateway else model.api_base,
+                    "apiKey": model_gateway.token if model_gateway else model.api_key or "not-required",
+                },
                 "models": {
                     model.model: {
                         "name": model.model, "tool_call": True,
