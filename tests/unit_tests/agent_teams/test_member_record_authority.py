@@ -551,3 +551,112 @@ async def test_committed_receipt_checks_issuance_facts_not_modified_fields(case,
     object.__setattr__(receipt, field, value)
     with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
         receipt.check_current()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["source", "permit", "transaction"])
+@pytest.mark.parametrize("target", ["mapper", "table"])
+@pytest.mark.parametrize("operation", ["status", "delete_team"])
+async def test_mapper_routing_cannot_replace_original_sql_sink(case, tmp_path, monkeypatch, phase, target, operation):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    c = case
+    await c.create()
+    other = TeamDatabase(DatabaseConfig(connection_string=str(tmp_path / "routing-other.sqlite")))
+    await other.initialize()
+    await other.team.create_team("same-team", "Different DB", "member")
+    row = await c.db.member.get_member("member", "same-team")
+    async with other._sessions.write() as tx:
+        tx.add(TeamMember(**row.model_dump()))
+        await tx.commit()
+    factory = c.db.session_local
+    original_kw = dict(factory.kw)
+    key = TeamMember if target == "mapper" else TeamMember.__table__
+
+    def redirect():
+        factory.configure(binds={key: other.engine})
+
+    if phase == "source":
+        object.__setattr__(c.origin, "_checker", redirect)
+    elif phase == "permit":
+        c.hook = lambda *_: redirect()
+    else:
+        actual_execute = AsyncSession.execute
+
+        async def execute_then_redirect(session, *args, **kwargs):
+            result = await actual_execute(session, *args, **kwargs)
+            if session.bind is c.db.engine:
+                if target == "mapper":
+                    session.sync_session.bind_mapper(TeamMember, other.engine.sync_engine)
+                else:
+                    session.sync_session.bind_table(TeamMember.__table__, other.engine.sync_engine)
+            return result
+
+        monkeypatch.setattr(AsyncSession, "execute", execute_then_redirect)
+    try:
+        with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+            if operation == "delete_team":
+                await c.db.team.delete_team("same-team")
+            else:
+                await mutate(c, "status")
+    finally:
+        object.__setattr__(c.origin, "_checker", None)
+        c.hook = None
+        factory.kw.clear()
+        factory.kw.update(original_kw)
+        monkeypatch.undo()
+        try:
+            for db in (c.db, other):
+                unchanged = await db.member.get_member("member", "same-team")
+                assert unchanged.status == "ready" and unchanged.record_revision == 1
+                assert await db.team.team_exists("same-team")
+        finally:
+            await other.close()
+
+
+@pytest.mark.asyncio
+async def test_bulk_cleanup_reserves_database_before_protected_row_check(case, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncConnection
+
+    c = case
+    legacy = TeamDatabase(c.config)
+    await legacy.initialize()
+    entered, release, create_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = AsyncConnection.run_sync
+
+    async def gated(conn, function, *args, **kwargs):
+        if function.__name__ == "_clear_table" and conn.engine is legacy.engine:
+            entered.set()
+            await release.wait()
+        return await original(conn, function, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncConnection, "run_sync", gated)
+    cleanup = asyncio.create_task(legacy.cleanup_all_runtime_state())
+
+    async def create():
+        create_started.set()
+        return await c.create()
+
+    creator = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        creator = asyncio.create_task(create())
+        await create_started.wait()
+        done, _ = await asyncio.wait({creator}, timeout=0.1)
+        assert not done, "independent managed create must wait for original DB transaction"
+        release.set()
+        await asyncio.wait_for(cleanup, 3)
+        result = (await asyncio.wait_for(asyncio.gather(creator, return_exceptions=True), 3))[0]
+        # SQLite may enforce the removed parent FK or allow the create after
+        # cleanup. Neither ordering can confirm a receipt and then erase it.
+        if isinstance(result, MemberWriteReceipt):
+            current = await c.db.member.get_member("member", "same-team")
+            assert member_record_stamp(current) == result.stamp
+        else:
+            from sqlalchemy.exc import IntegrityError
+
+            assert result is False or isinstance(result, IntegrityError)
+    finally:
+        release.set()
+        await asyncio.gather(cleanup, *([creator] if creator else []), return_exceptions=True)
+        await legacy.close()
