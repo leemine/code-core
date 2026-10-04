@@ -3,11 +3,12 @@
 import uuid
 from typing import Any, AsyncIterator, Dict, Optional
 
-from pydantic import Field, BaseModel
+from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
+from openjiuwen.core.foundation.tool.authority import _mask_tool_execution
 from openjiuwen.core.foundation.tool.base import (
     EMPTY_SUCCESS_TEXT,
     Input,
@@ -200,20 +201,24 @@ class MCPTool(Tool):
             # Prepare arguments for MCP tool call
             arguments = inputs if isinstance(inputs, dict) else {}
             if self._card.input_params is not None:
-                await trigger(
-                    ToolCallEvents.TOOL_PARSE_STARTED,
-                    tool_name=self.card.name, tool_id=self.card.id,
-                    raw_inputs=inputs, schema=self._card.input_params)
+                # Parsing callbacks may transform inputs, but are not the actual
+                # MCP client's execution boundary and must not borrow its proof.
+                with _mask_tool_execution():
+                    await trigger(
+                        ToolCallEvents.TOOL_PARSE_STARTED,
+                        tool_name=self.card.name, tool_id=self.card.id,
+                        raw_inputs=inputs, schema=self._card.input_params)
                 skip_none_value = kwargs.get("skip_none_value", True)
                 arguments = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                            skip_none_value=False,
                                                            skip_validate=kwargs.get("skip_inputs_validate", False))
                 if skip_none_value:
                     arguments = SchemaUtils.remove_none_values(arguments) or {}
-                await trigger(
-                    ToolCallEvents.TOOL_PARSE_FINISHED,
-                    tool_name=self.card.name, tool_id=self.card.id,
-                    formatted_inputs=arguments)
+                with _mask_tool_execution():
+                    await trigger(
+                        ToolCallEvents.TOOL_PARSE_FINISHED,
+                        tool_name=self.card.name, tool_id=self.card.id,
+                        formatted_inputs=arguments)
 
             result = await self._mcp_client.call_tool(tool_name=self._card.name, arguments=arguments)
             if isinstance(result, McpToolResult):
