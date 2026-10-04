@@ -23,6 +23,7 @@ REQUIRED_PATHS = (
     "tests/unit_tests/harness/goal",
     "tests/unit_tests/harness/test_task_completion_extensions.py",
     "tests/unit_tests/harness/test_deep_agent_interaction.py",
+    "tests/unit_tests/harness/test_deep_agent_round_stop.py",
     "tests/unit_tests/harness/test_deep_agent_event_executor.py",
     "tests/unit_tests/harness/test_deep_agent_rail_event_routing.py",
     "tests/unit_tests/harness/test_deep_agent_stream_aclose.py",
