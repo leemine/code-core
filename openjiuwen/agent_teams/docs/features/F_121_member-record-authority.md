@@ -46,3 +46,6 @@
 这些外层副作用需要原 host admission 前置，当前不因 DAO 新 SPI 就开放受管 Team。
 普通 status 更新不冻结：host 必须把每次 committed receipt 保存到已有成员登记对象；
 source/projection 仅能消费该原 receipt，而不能在 monitor 读取时取最新 stamp 自封来源。
+
+受管 fallback model 提升保留原 no-op 语义：已提升/无候选时返回 False，不写行、不增加 revision，
+不伪造新的 committed receipt。该反例纳入同一稳定回归文件。
