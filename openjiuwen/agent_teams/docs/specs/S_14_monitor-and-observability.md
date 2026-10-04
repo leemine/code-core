@@ -410,3 +410,7 @@ class MonitorEvent(BaseModel):
 不授权。合法写入在原事务提交时产生不可序列化 receipt。旧无 stamp 行不自动认领。
 monitor 的 `MemberInfo` 仅在进程内携带写时 stamp，JSON 不含该字段；读取不补签。
 此接缝尚未挂入 Team host；从成员 stamp 到跨 E2A 最终交付的来源重验仍须独立接线。
+
+原成员事务的 receipt 不是当前 ACK 授权：commit 返回后来源漂移须报告
+`MemberWriteCommittedButUnconfirmed` 并保留原交易事实。宿主在保留或当前交付 receipt 前
+调用其 `check_current()`；该方法对照原发行字段和原 source，不读最新 owner 或 latest row 补签。

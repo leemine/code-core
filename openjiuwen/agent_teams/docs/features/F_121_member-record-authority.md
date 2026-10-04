@@ -49,3 +49,18 @@ source/projection 仅能消费该原 receipt，而不能在 monitor 读取时取
 
 受管 fallback model 提升保留原 no-op 语义：已提升/无候选时返回 False，不写行、不增加 revision，
 不伪造新的 committed receipt。该反例纳入同一稳定回归文件。
+
+## 首回调与提交后确认
+
+首次 origin checker/bind callback 前固定实际 DAO、DB、DbSessions、write factory/engine 与原锁引用；
+不仅比较相同成员名/nonce。实际 SQL Session 的 bind 与原 DB 必须相同。两个真实不同 SQLite 文件
+复制同一初始记录后，首 source callback / bind callback 的 DB、sessions、DAO 重定向均拒绝。
+
+commit 成功返回后再次检查原来源。若真实写入已经提交但来源不再允许当前 ACK，抛
+`MemberWriteCommittedButUnconfirmed` 并保留原 immutable receipt；不得声称未写、返回普通 True
+或自动重放。`receipt.check_current()` 对原 issuance facts/原 bound source 复核，宿主保存或交付
+前仍须调用。异常中的 receipt 只是原交易事实/补偿线索，不能借当前新 owner 授权。commit 本身
+异常/取消且未知实际持久结果时不造 receipt，也不得推断一定未写。
+
+本次新增/累计 58 个确定性反例与正常行为用例，DB/concurrency/monitor 共 210 通过；
+58 例均在既有 stable discover/command 内。旧完整产品 Team 的挂载与外层副作用阻断未因此关闭。
