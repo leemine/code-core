@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md`、`F_28_round-execution-origin.md`、`F_29_scheduler-submitted-admission.md` |
+| 关联 feature | `F_30_owned-round-admission-fence.md`、`F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md`、`F_28_round-execution-origin.md`、`F_29_scheduler-submitted-admission.md` |
 
 ## 范围 / 边界
 
@@ -209,3 +209,15 @@ class TaskLoopController(Controller):
 旧 `_run_task_loop` 的受管路径遵守同样的 live-only 边界，停止后仍有待续批次时明确报错并
 执行原 cleanup；generator yield 不持有新的词法 scope。source-less legacy 保留原字符串
 持久化语义，不能在恢复时借用新来源。
+
+### 原 dispatch receipt
+
+TaskManager 私有插入端口在原存储锁内返回 original stored receipt；公开查询仍为深复制。
+F29 原扫描锁内捕获 receipt 后，wrapper 词法 scope 固定 manager、stored、source 和 Session。
+执行器及状态/事件写入用原锁下 CAS；过期继承 scope 与被替换记录拒绝，不能按 ID 查询最新
+记录重建 authority。公开 execute_task override 签名不变，合法 status 原地变化及 pause/resume
+新派发保留。原 owned Task Map 仍仅在 actual done 后释放，无第二队列或任务状态。
+
+原 Round 只等待保存的 submission/wrapper；未派发证明须 submission done、原存储对象与
+非可派发状态及 owned Map 联合成立。单纯 None、业务 COMPLETED 或响应 Future 完成均不
+证明退出。未知事实保留原 record，阻止终态与后继派发；确认退出的旧 wrapper 不影响新对象。

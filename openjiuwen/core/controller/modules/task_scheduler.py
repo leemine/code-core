@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator, Callable, Dict, Optional, Tuple
 
@@ -28,7 +29,9 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.modules.event_queue import EventQueue
-from openjiuwen.core.controller.modules.task_manager import TaskFilter, TaskManager
+from openjiuwen.core.controller.modules.task_manager import (
+    TaskFilter, TaskManager, _current_task_execution, _task_execution_scope, _task_execution_completion_owner,
+)
 from openjiuwen.core.controller.schema import (
     ControllerOutputChunk,
     ControllerOutputPayload,
@@ -312,6 +315,26 @@ class TaskScheduler:
             return None
         return task
 
+    def _running_matches_capture(self, task_id, session, wrapper):
+        capture = _current_task_execution(self._task_manager, task_id, session)
+        if capture is None:
+            return True  # Unmanaged legacy callers keep their original contract.
+        original = getattr(wrapper, "_jiuwen_execution_capture", None)
+        return (original is not None and original[1] is session
+                and original[0].manager is capture.manager
+                and original[0].stored is capture.stored and original[0].origin is capture.origin)
+
+    def _capture_owned_dispatch(self, capture, session):
+        wrapper = self._capture_owned_execution(capture.snapshot.task_id)
+        if wrapper is not None:
+            original = getattr(wrapper, "_jiuwen_execution_capture", None)
+            if (original is None or original[1] is not session or original[0] is None
+                    or original[0].manager is not capture.manager
+                    or original[0].stored is not capture.stored or original[0].origin is not capture.origin):
+                raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                  error_msg="original scheduler dispatch identity changed")
+        return wrapper
+
     def _forget_owned_execution(self, task_id: str, task: asyncio.Task) -> None:
         """Release only this exited wrapper, never a later reuse of its ID."""
         if task.done() and self._owned_execution_tasks.get(task_id) is task:
@@ -357,6 +380,24 @@ class TaskScheduler:
         """
         self._submit_event.set()
 
+    async def _read_execution_task(self, task_id, session, *, check_source=False):
+        capture = _current_task_execution(self._task_manager, task_id, session)
+        if capture is None:
+            tasks = await self._task_manager.get_task(task_filter=TaskFilter(task_id=task_id))
+            return tasks[0] if tasks else None
+        task = await self._task_manager._read_task_execution(capture)
+        _current_task_execution(self._task_manager, task_id, session)
+        if check_source:
+            capture.check_source()
+        return task
+
+    async def _set_execution_status(self, task_id, session, status, *, error_message=None):
+        capture = _current_task_execution(self._task_manager, task_id, session)
+        if capture is None:
+            await self._task_manager.update_task_status(task_id, status, error_message=error_message)
+        else:
+            await self._task_manager._set_task_execution_status(capture, status, error_message=error_message)
+
     async def _handle_task_execution_failure(self, task_id: str, session: Session, error_message: str):
         """Handle task failure by updating status and publishing failure event
 
@@ -366,7 +407,7 @@ class TaskScheduler:
             error_message: Error message to publish
         """
         # Update task status to FAILED
-        await self._task_manager.update_task_status(task_id, TaskStatus.FAILED, error_message=error_message)
+        await self._set_execution_status(task_id, session, TaskStatus.FAILED, error_message=error_message)
 
         # Publish failure event
         failed_chunk = ControllerOutputChunk(
@@ -379,7 +420,12 @@ class TaskScheduler:
         )
         await self._publish_task_event(task_id, session, failed_chunk)
 
-    async def _execute_task_wrapper(self, task_id: str, session: Session):
+    async def _execute_task_wrapper(self, task_id: str, session: Session, *, _capture=None):
+        scope = _task_execution_scope(_capture, session) if _capture is not None else nullcontext()
+        with scope:
+            await self._run_task_wrapper(task_id, session)
+
+    async def _run_task_wrapper(self, task_id: str, session: Session):
         """Task execution wrapper
 
         Wraps execute_task to ensure exceptions are captured and handled correctly.
@@ -413,7 +459,8 @@ class TaskScheduler:
         finally:
             # Cleanup: remove from running tasks (if not already removed by pause/cancel)
             async with self._lock:
-                if task_id in self._running_tasks:
+                running = self._running_tasks.get(task_id)
+                if running is not None and running[1] is asyncio.current_task():
                     del self._running_tasks[task_id]
 
             # Wake up the schedule loop so newly submitted tasks are
@@ -422,7 +469,12 @@ class TaskScheduler:
 
             # Critical: Check if all tasks are done and send completion signal
             # This MUST succeed, otherwise Controller will hang forever
-            await self._ensure_session_completion_signal(session.get_session_id())
+            try:
+                _current_task_execution(self._task_manager, task_id, session)
+            except Exception:
+                logger.warning("Original task record changed before completion signal: %s", task_id)
+            else:
+                await self._ensure_session_completion_signal(session.get_session_id())
 
     async def execute_task(self, task_id: str, session: Session):
         """Execute task
@@ -439,14 +491,13 @@ class TaskScheduler:
             session: Session object
         """
         # 1. Get task object
-        tasks = await self._task_manager.get_task(task_filter=TaskFilter(task_id=task_id))
-        if not tasks:
+        task = await self._read_execution_task(task_id, session, check_source=True)
+        if task is None:
             logger.error(f"Task {task_id} not found")
             raise build_error(
                 StatusCode.AGENT_CONTROLLER_TASK_EXECUTION_ERROR,
                 error_msg=f"task {task_id} not found"
             )
-        task = tasks[0]
 
         logger.info(f"Executing task {task_id} (type: {task.task_type})")
 
@@ -465,17 +516,23 @@ class TaskScheduler:
 
         # Update running task records (add executor)
         async with self._lock:
-            if task_id in self._running_tasks:
-                _, exec_task = self._running_tasks[task_id]
-                self._running_tasks[task_id] = (executor, exec_task)
+            running = self._running_tasks.get(task_id)
+            if running is not None and self._running_matches_capture(task_id, session, running[1]):
+                self._running_tasks[task_id] = (executor, running[1])
 
         # 3. Update task status to WORKING
-        await self._task_manager.update_task_status(task_id, TaskStatus.WORKING)
+        await self._set_execution_status(task_id, session, TaskStatus.WORKING)
 
+        capture = _current_task_execution(self._task_manager, task_id, session)
+        if capture is not None:
+            capture.check_source()
         # 4. Execute task in streaming mode
         async for chunk in executor.execute_ability(task_id, session):
+            # A replacement must not receive an old wrapper's outputs or status.
+            _current_task_execution(self._task_manager, task_id, session)
             # 4.1 Write to session stream (so ControllerAgent can read)
             await session.write_stream(chunk)
+            _current_task_execution(self._task_manager, task_id, session)
 
             # 4.2 Check output type and decide whether to stop the task
             if chunk.payload and chunk.payload.type:
@@ -484,14 +541,15 @@ class TaskScheduler:
                 # Task completed
                 if payload_type == EventType.TASK_COMPLETION:
                     logger.info(f"Task {task_id} completed")
-                    await self._task_manager.update_task_status(task_id, TaskStatus.COMPLETED)
+                    await self._set_execution_status(task_id, session, TaskStatus.COMPLETED)
                     # Clean up running-task bookkeeping BEFORE publishing the
                     # event so that _resolve_future consumers (NativeHarness)
                     # never see a stale _running_tasks entry.  This eliminates
                     # the race where the harness transitions to IDLE while the
                     # scheduler's finally block hasn't run yet.
                     async with self._lock:
-                        if task_id in self._running_tasks:
+                        running = self._running_tasks.get(task_id)
+                        if running is not None and self._running_matches_capture(task_id, session, running[1]):
                             del self._running_tasks[task_id]
                     self._submit_event.set()
                     await self._publish_task_event(task_id, session, chunk)
@@ -500,9 +558,10 @@ class TaskScheduler:
                 # Task requires interaction
                 elif payload_type == EventType.TASK_INTERACTION:
                     logger.info(f"Task {task_id} requires interaction")
-                    await self._task_manager.update_task_status(task_id, TaskStatus.INPUT_REQUIRED)
+                    await self._set_execution_status(task_id, session, TaskStatus.INPUT_REQUIRED)
                     async with self._lock:
-                        if task_id in self._running_tasks:
+                        running = self._running_tasks.get(task_id)
+                        if running is not None and self._running_matches_capture(task_id, session, running[1]):
                             del self._running_tasks[task_id]
                     self._submit_event.set()
                     await self._publish_task_event(task_id, session, chunk)
@@ -511,9 +570,10 @@ class TaskScheduler:
                 # Task failed
                 elif payload_type == EventType.TASK_FAILED:
                     logger.error(f"Task {task_id} failed")
-                    await self._task_manager.update_task_status(task_id, TaskStatus.FAILED)
+                    await self._set_execution_status(task_id, session, TaskStatus.FAILED)
                     async with self._lock:
-                        if task_id in self._running_tasks:
+                        running = self._running_tasks.get(task_id)
+                        if running is not None and self._running_matches_capture(task_id, session, running[1]):
                             del self._running_tasks[task_id]
                     self._submit_event.set()
                     await self._publish_task_event(task_id, session, chunk)
@@ -583,6 +643,7 @@ class TaskScheduler:
             return
 
         try:
+            original = _task_execution_completion_owner(self._task_manager, session_id)
             # Check if all tasks are done
             if not await self._are_all_tasks_completed(session_id):
                 logger.info("not all tasks completed, continue")
@@ -596,6 +657,12 @@ class TaskScheduler:
                 logger.warning(f"Session {session_id} not found, cannot send completion signal")
                 return
 
+            if original is not None:
+                capture, expected_session = original
+                if (session is not expected_session
+                        or _current_task_execution(self._task_manager, capture.snapshot.task_id, session) is not capture):
+                    raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                      error_msg="original completion owner changed")
             # Build and send completion message
             completion_chunk = ControllerOutputChunk(
                 index=0,
@@ -608,6 +675,8 @@ class TaskScheduler:
             )
 
             await session.write_stream(completion_chunk)
+            if original is not None:
+                _current_task_execution(self._task_manager, capture.snapshot.task_id, session)
             logger.info(f"Completion signal sent for session {session_id}")
 
         except Exception as e:
@@ -633,11 +702,10 @@ class TaskScheduler:
             logger.error(f"Invalid chunk for task {task_id}: missing payload or type")
             return
 
-        tasks = await self._task_manager.get_task(task_filter=TaskFilter(task_id=task_id))
-        if not tasks:
+        task = await self._read_execution_task(task_id, session)
+        if task is None:
             logger.error(f"Task {task_id} not found in TaskManager")
             return
-        task = tasks[0]
         payload_type = chunk.payload.type
         payload_data = chunk.payload.data if chunk.payload else []
         payload_metadata = chunk.payload.metadata
@@ -677,9 +745,11 @@ class TaskScheduler:
                 event.metadata = {}
             event.metadata.update(task.metadata)
 
+        _current_task_execution(self._task_manager, task_id, session)
         await self._event_queue.publish_event(
             self._card.id, session, event
         )
+        _current_task_execution(self._task_manager, task_id, session)
         logger.info(f"Published {payload_type} for task {task_id}")
 
     async def pause_task(self, task_id: str) -> bool:
@@ -891,9 +961,11 @@ class TaskScheduler:
                             continue
 
                         # Start non-blockingly using create_task
+                        capture = self._task_manager._capture_task_execution(task)
                         exec_task = asyncio.create_task(
-                            self._execute_task_wrapper(task.task_id, session)
+                            self._execute_task_wrapper(task.task_id, session, _capture=capture)
                         )
+                        exec_task._jiuwen_execution_capture = (capture, session)
 
                         self._owned_execution_tasks[task.task_id] = exec_task
                         exec_task.add_done_callback(

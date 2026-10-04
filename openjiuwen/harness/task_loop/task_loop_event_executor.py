@@ -18,6 +18,9 @@ from typing import (
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.controller.modules.task_manager import _current_task_execution
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.controller.modules.task_scheduler import (
     TaskExecutor,
     TaskExecutorDependencies,
@@ -84,8 +87,28 @@ class TaskLoopEventExecutor(TaskExecutor):
         Yields:
             ControllerOutputChunk for each output.
         """
-        tasks = await self._task_manager.get_task(task_filter=self._make_filter(task_id))
+        capture = _current_task_execution(self._task_manager, task_id, session)
+        if capture is None:
+            tasks = await self._task_manager.get_task(task_filter=self._make_filter(task_id))
+        else:
+            tasks = [await self._task_manager._read_task_execution(capture)]
+            _current_task_execution(self._task_manager, task_id, session)
         origin = shared_execution_origin(tasks[0].inputs or []) if tasks else None
+        owned = None
+        if origin is not None and origin._checker is not None:
+            if capture is None:
+                raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                  error_msg="managed executor requires original dispatch capture")
+            owned = self._deep_agent._capture_owned_round(origin)
+            if (owned is None or owned._task_capture is None
+                    or owned._task_capture.stored is not capture.stored or owned.task_id != task_id):
+                raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                  error_msg="executor does not own original round task")
+            self._deep_agent._check_owned_round(owned)
+            owned._scheduler_wrapper = owned._controller.task_scheduler._capture_owned_dispatch(capture, session)
+            if owned._scheduler_wrapper is None:
+                raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                  error_msg="original executor wrapper is unavailable")
         iterator = self._execute_with_origin(task_id, session, tasks)
         try:
             while True:
@@ -238,6 +261,16 @@ class TaskLoopEventExecutor(TaskExecutor):
         # (snapshot, otel span close, ...) must run even when the round fails.
         after_fired = False
         try:
+            capture = _current_task_execution(self._task_manager, task_id, session)
+            if capture is not None:
+                capture.check_source()
+                source = capture.origin
+                if source is not None and source._checker is not None:
+                    owned = agent._capture_owned_round(source)
+                    if owned is None or owned._task_capture is None or owned._task_capture.stored is not capture.stored:
+                        raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                          error_msg="original round changed before model execution")
+                    agent._check_owned_round(owned)
             result = await agent.react_agent.invoke(
                 effective, session, _streaming=True
             )

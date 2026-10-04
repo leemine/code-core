@@ -295,6 +295,7 @@ class TaskLoopEventHandler(EventHandler):
         agent = self._deep_agent
         event = inputs.event
         session = inputs.session
+        owned_round = agent._capture_round_input(event, session)
 
         # Read round_id from event metadata (set by
         # the publisher in _run_task_loop_core BEFORE
@@ -399,9 +400,17 @@ class TaskLoopEventHandler(EventHandler):
                 inputs=[event] if isinstance(event, InputEvent) else None,
             )
             if self._task_manager is not None:
-                await self._task_manager.add_task(
-                    core_task
-                )
+                if owned_round is None:
+                    await self._task_manager.add_task(core_task)
+                else:
+                    capture = await self._task_manager._add_task_execution(core_task)
+                    owned_round._task_capture = capture
+                    try:
+                        self._task_manager._check_task_execution(capture)
+                        agent._check_owned_round(owned_round)
+                    except Exception:
+                        await self._task_manager._set_task_execution_status(capture, CoreTaskStatus.CANCELED)
+                        raise
             else:
                 self._resolve_future(
                     _error_result("task_manager is None"),

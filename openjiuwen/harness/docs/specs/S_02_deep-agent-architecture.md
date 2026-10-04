@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
+| 关联 feature | `F_30_owned-round-admission-fence.md`、`F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
 
 ## 范围 / 边界
 
@@ -205,3 +205,11 @@ def loop_coordinator(self) -> Optional[LoopCoordinator]
 
 后继 work 和控制器 InputEvent 保持原来源；follow-up 批次遵循 S_03。此通路不代表 Native
 宿主 entry 已绑定、plain resume 已证明原 Turn，或自动 Goal 再 ensure 拥有持久授权。
+
+### 受管原 Round admission 与退出
+
+带私有同步 checker 的 ExecutionOrigin 在原队列入站及跨 await 消费前复核原根。
+原 ActiveInteractionRound 在 facade 首次 await 前固定 work/Session/controller，并保留原
+submission/wrapper。正常结果与后继入队均须原 wrapper 的尾部实际退出；未知退出保留
+原 owner slot，不以 facade 失败或 Task 业务终态代替终态证据。该内部基础不自动启用
+Native 凭据退出；未绑定 checker 的 legacy 保留旧入口行为。细节见 F30 与 S03。

@@ -22,10 +22,13 @@ Index Structure:
 """
 
 import asyncio
+from collections import defaultdict
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import (
     Callable, Dict, List, Union, Set, Optional,
 )
-from collections import defaultdict
 from pydantic import BaseModel, model_validator
 from typing_extensions import Literal
 
@@ -33,6 +36,69 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.controller.schema import Task, TaskStatus
 from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin, shared_execution_origin
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
+class _TaskExecutionCapture:
+    manager: "TaskManager"
+    stored: Task
+    snapshot: Task
+    origin: ExecutionOrigin | None
+
+    def check_source(self):
+        if self.origin is not None:
+            self.origin._check_current()
+
+
+@dataclass(slots=True)
+class _TaskExecutionScope:
+    capture: _TaskExecutionCapture
+    session: object
+    active: bool = True
+
+
+_task_execution_scope_var = ContextVar("task_execution_capture", default=None)
+
+
+@contextmanager
+def _task_execution_scope(capture, session):
+    scope = _TaskExecutionScope(capture, session)
+    token = _task_execution_scope_var.set(scope)
+    try:
+        yield
+    finally:
+        scope.active = False
+        _task_execution_scope_var.reset(token)
+
+
+def _current_task_execution(manager, task_id, session):
+    scope = _task_execution_scope_var.get()
+    if scope is None:
+        return None
+    if (not scope.active or scope.capture.manager is not manager
+            or scope.session is not session or scope.capture.snapshot.task_id != task_id
+            or scope.capture.snapshot.session_id != session.get_session_id()):
+        raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                          error_msg="original task execution scope is no longer valid")
+    manager._check_task_execution(scope.capture)
+    return scope.capture
+
+
+def _task_execution_completion_owner(manager, session_id):
+    scope = _task_execution_scope_var.get()
+    if scope is None:
+        return None
+    capture = _current_task_execution(manager, scope.capture.snapshot.task_id, scope.session)
+    if capture.snapshot.session_id != session_id:
+        raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                          error_msg="completion belongs to another original Session")
+    return capture, scope.session
+
+
+def _execution_fields(task):
+    # Runtime result/status fields may advance without changing dispatched input.
+    return task.model_dump(exclude={"status", "outputs", "error_message"})
 
 
 class TaskManagerState(BaseModel):
@@ -149,6 +215,40 @@ class TaskManager:
             Callable[[], None]
         ] = None
 
+    def _capture_task_execution(self, expected):
+        """Capture the original stored record on the owning event loop."""
+        if (not isinstance(expected, Task) or self.tasks.get(expected.task_id) is not expected
+                or expected.status != TaskStatus.SUBMITTED):
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="task dispatch record was replaced")
+        snapshot = expected.model_copy(deep=True)
+        return _TaskExecutionCapture(self, expected, snapshot,
+                                     shared_execution_origin(snapshot.inputs or []))
+
+    def _check_task_execution(self, capture):
+        if (not isinstance(capture, _TaskExecutionCapture) or capture.manager is not self
+                or self.tasks.get(capture.snapshot.task_id) is not capture.stored
+                or _execution_fields(capture.stored) != _execution_fields(capture.snapshot)
+                or shared_execution_origin(capture.stored.inputs or []) is not capture.origin):
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="original task execution record changed")
+        return capture.stored
+
+    async def _read_task_execution(self, capture):
+        async with self._lock:
+            stored = self._check_task_execution(capture)
+            # Public query semantics remain copies; execution input is fixed.
+            return capture.snapshot.model_copy(deep=True, update={"status": stored.status})
+
+    async def _set_task_execution_status(self, capture, status, *, error_message=None):
+        async with self._lock:
+            stored = self._check_task_execution(capture)
+            stored.status = status
+            if status == TaskStatus.FAILED:
+                stored.error_message = error_message or "Task execution failed"
+        if status == TaskStatus.SUBMITTED and self._on_task_submitted is not None:
+            self._on_task_submitted()
+
     def set_on_task_submitted(
         self, callback: Optional[Callable[[], None]]
     ) -> None:
@@ -237,7 +337,16 @@ class TaskManager:
         Args:
             task: Single task or list of tasks
         """
+        await self._add_tasks(task)
+
+    async def _add_task_execution(self, task):
+        """Return the original inserted record, never a later lookup by ID."""
+        captures = await self._add_tasks(task, capture_execution=True)
+        return captures[0]
+
+    async def _add_tasks(self, task, *, capture_execution=False):
         tasks = [task] if isinstance(task, Task) else task
+        captures = []
         async with self._lock:
             for t in tasks:
                 # Add task to dictionary
@@ -247,6 +356,8 @@ class TaskManager:
                         error_msg=f"{t.task_id} already exists!"
                     )
                 self.tasks[t.task_id] = t.model_copy()
+                if capture_execution:
+                    captures.append(self._capture_task_execution(self.tasks[t.task_id]))
 
                 # Update priority index
                 self._priority_index[t.priority].append(t.task_id)
@@ -264,6 +375,7 @@ class TaskManager:
 
         # Notify outside lock
         self._notify_if_submitted(tasks)
+        return captures
 
     async def get_task(
             self,
