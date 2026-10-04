@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-09-27 |
-| 关联 feature | `F_04_authoritative-terminal-stream.md` |
+| 最近一次修订日期 | 2026-10-04 |
+| 关联 feature | `F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md` |
 
 ## 范围 / 边界
 
@@ -122,6 +122,12 @@ def loop_coordinator(self) -> Optional[LoopCoordinator]
 
 - `invoke` 未初始化 / `_react_agent is None` → `build_error`（`StatusCode`），不返回半结果。
 - `start` 已停（TERMINATED）→ `RuntimeError("interaction_terminated")`。
+- `stop` 进入 teardown 即置 TERMINATED；phase 不是 owned task 已退出的证明。
+  `controller.stop()` 的超时或清理错误必须传给调用方；失败保留原 controller、session
+  和 `_interaction_started`，由同一实例再次 `stop()`，不创建替代实例掩盖未退出任务。
+  controller 确认退出后才清除 started 标记。实际调度任务的有界 join 见 S_03。
+- `unbind_session` 的既有错误抑制不影响调度任务所有权：解绑只保存任务状态、退订事件
+  并移除 session 映射，不能替代 `controller.stop()`，也不清除其 owned task 记录。
 - `start` 绑到第二个 session → `RuntimeError`。
 - `attach_output` 已有消费者 → 返回 `None`（非异常）。
 - `detach_output(token, *, abort_active_round)`：token 不匹配 → `False`。
@@ -134,9 +140,9 @@ def loop_coordinator(self) -> Optional[LoopCoordinator]
 
 | 状态 | 进入条件 | 退出 |
 |---|---|---|
-| `IDLE` | 构造 / `stop()` 完成后可重新 start | → `RUNNING`（`start`） |
+| `IDLE` | 构造或非终态交互的轮次间空闲；stop 后不回到此态 | → `RUNNING`（轮次执行） |
 | `RUNNING` | `start()` 成功绑定会话 | → `TERMINATED`（`stop`）；临时复位不换状态 |
-| `TERMINATED` | `stop()` 完成 | 终态，不再接受 `start` |
+| `TERMINATED` | `stop()` 开始 teardown | 终态，不再接受 `start`；失败时仍可重试 stop |
 
 ### OutputLeaseManager 生命周期
 

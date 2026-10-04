@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | N/A |
+| 关联 feature | `F_24_owned-task-stop-confirmation.md` |
 
 ## 范围 / 边界
 
@@ -66,6 +66,14 @@
     排序、`event_id` 唯一（uuid）、`created_at` 单调时钟；类型全集只有
     `FOLLOWUP` / `STEER` / `ABORT` 三型；`create_loop_event(...)` /
     `default_event_priority(...)` 是构造与查表的唯一入口。
+
+11. `TaskLoopController.stop()` 复用 core `Controller.stop()`：先停止 TaskScheduler，
+    确认其原始执行 Tasks 退出后再关闭 EventQueue。调度器保留从 create_task 到 done 的
+    生命周期引用；运行任务列表为保持事件顺序而提前摘除时，尾部事件 IO 仍属于该引用。
+    停止以内部五秒预算等待，不持调度锁跨 join；超时/调用方取消保留原引用，确认前拒绝 start。
+    并发 stop 不重复取消清理中的任务；owned task 内部自停被拒，后续外部停止仍可取消它。
+    已退出任务的异常须报告，但报告后不永久持有已完成引用；允许后续 stop 结清其余控制器清理。
+    不全局扫描 asyncio tasks，不创建另一任务队列或调度状态机。
 
 ## 接口契约
 

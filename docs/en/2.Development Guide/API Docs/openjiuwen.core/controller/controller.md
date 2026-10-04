@@ -550,7 +550,9 @@ Start background scheduling loop `schedule`, begin periodic scanning of `SUBMITT
 
 ### async stop() -> None
 
-Stop scheduler: cancel unfinished tasks, terminate scheduling loop and wait for cleanup.
+Stop the scheduling loop and cancel only its owned execution tasks. Wait up to five seconds for their actual exit, including terminal event publication after a task leaves the running-task list. A timeout or cleanup failure raises a controller runtime error; it does not confirm resource release. Once all owned tasks have exited, their exception is reported without permanently retaining exited tasks, so a later stop can finish remaining controller cleanup. An owned task cannot stop and join itself; rejecting that call leaves a subsequent external stop able to cancel it.
+
+Concurrent stop calls join the same owned tasks without cancelling cleanup twice. If the caller is cancelled or the deadline expires, ownership is retained for a later `stop()` retry, and `start()` remains blocked until stop is confirmed. `DeepAgent.stop()` propagates controller stop failures and retains the same controller for retry. This task drain must be present in the installed core version before a host can treat a successful stop as confirmation that all scheduler-owned tasks exited.
 
 ### async schedule() -> None
 
