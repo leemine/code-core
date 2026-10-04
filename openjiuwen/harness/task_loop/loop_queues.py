@@ -69,6 +69,26 @@ class LoopQueues:
         """
         self.follow_up.put_nowait(capture_origin_input(msg, origin))
 
+    def _discard_origin(self, origin):
+        if origin is None:
+            raise ValueError("exact input discard requires an original source")
+        for queue in (self.steering, self.follow_up):
+            # Synchronous event-loop operation on the existing queue. Balance
+            # retained entries before acknowledging removed originals, so join()
+            # cannot observe a transient zero while foreign inputs remain.
+            retained = []
+            removed = 0
+            while not queue.empty():
+                value = queue.get_nowait()
+                source, _ = _unwrap_origin_inputs([value])
+                removed += 1
+                if source is not origin:
+                    retained.append(value)
+            for value in retained:
+                queue.put_nowait(value)
+            for _ in range(removed):
+                queue.task_done()
+
     def has_follow_up(self) -> bool:
         """Return whether follow-up messages are pending."""
         return not self.follow_up.empty()

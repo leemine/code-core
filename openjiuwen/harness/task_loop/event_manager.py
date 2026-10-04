@@ -143,6 +143,21 @@ class EventManager:
             )
         return discarded
 
+    def _capture_origin_work(self, origin):
+        if origin is None:
+            raise ValueError("exact work capture requires an original source")
+        return tuple(work for work in (*self._user_queue, *self._goal_queue, self._dequeued)
+                     if work is not None and work.execution_origin is origin)
+
+    def _discard_captured_work(self, expected):
+        # Identity only: two immutable work values can describe different owners.
+        def keep(work):
+            return not any(work is old for old in expected)
+        self._user_queue = deque(work for work in self._user_queue if keep(work))
+        self._goal_queue = deque(work for work in self._goal_queue if keep(work))
+        if self._dequeued is not None and not keep(self._dequeued):
+            self._dequeued = None
+
     def discard_all_work(self) -> None:
         """Drop queued work when its output lease disconnects.
 

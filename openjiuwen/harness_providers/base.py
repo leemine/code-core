@@ -99,6 +99,7 @@ class _PendingInteraction:
     owner: PendingTurn | None = field(repr=False)
     handling: bool = True
     cancel_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    handle_done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,7 +408,7 @@ class SerializedTurnHarness(ABC):
             self._require_accepting()
             has_earlier_turn = self._active_turn is not None or bool(self._pending)
             accepted_mode = DeliveryMode.FOLLOW_UP if mode is DeliveryMode.AUTO and has_earlier_turn else mode
-            pending = PendingTurn(
+            pending = self._make_pending_turn(
                 content=content,
                 message_id=f"message-{uuid.uuid4().hex}",
                 turn_id=f"turn-{uuid.uuid4().hex}",
@@ -426,6 +427,10 @@ class SerializedTurnHarness(ABC):
             turn_id=pending.turn_id,
             accepted_mode=pending.accepted_mode,
         )
+
+    def _make_pending_turn(self, *, content, message_id, turn_id, accepted_mode) -> PendingTurn:
+        """Provider-private admission factory, synchronous inside the original lock."""
+        return PendingTurn(content=content, message_id=message_id, turn_id=turn_id, accepted_mode=accepted_mode)
 
     def _require_accepting(self) -> None:
         if not self._cycle_started or self._stopping or self._state is HarnessState.TERMINATED:
@@ -605,6 +610,7 @@ class SerializedTurnHarness(ABC):
             response = await entry.handler.handle(request)
         finally:
             entry.handling = False
+            entry.handle_done.set()
             self._release_interaction_entry(entry)
         if entry.cancel_task is not None or (owner is not None and (
                 self._active_turn is not owner or owner.abort_requested)):
@@ -651,8 +657,15 @@ class SerializedTurnHarness(ABC):
     ) -> None:
         # Reserve every original entry before the first await. Releasing the ID
         # early would let a late handler.cancel(id) cancel a successor's entry.
-        pending = tuple(entry for entry in self._pending_interactions.values()
-                        if expected_turn is None or entry.owner is expected_turn)
+        pending = self._capture_turn_interactions(expected_turn)
+        await self._cancel_interaction_snapshot(pending, reason=reason)
+
+    def _capture_turn_interactions(self, expected_turn):
+        return tuple(entry for entry in self._pending_interactions.values()
+                     if expected_turn is None or entry.owner is expected_turn)
+
+    async def _cancel_interaction_snapshot(self, pending, *, reason, wait_handles=False):
+        """Cancel captured entries; managed exit additionally waits each handle finally."""
         tasks = []
         for entry in pending:
             task = entry.cancel_task
@@ -666,6 +679,11 @@ class SerializedTurnHarness(ABC):
             # free its ID before the real handler has finished. Failure stays
             # in the same ledger and is reported; another call can retry it.
             await asyncio.shield(task)
+        if wait_handles:
+            for entry in pending:
+                await entry.handle_done.wait()
+                if entry.handling:
+                    raise HarnessStateError("original interaction handle exit is unconfirmed")
 
     # ------------------------------------------------------------------
     # Checkpoints

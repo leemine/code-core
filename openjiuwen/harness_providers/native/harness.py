@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping
 
+from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin, execution_origin_scope
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
@@ -32,6 +35,8 @@ from openjiuwen.harness_protocol import (
     HarnessProtocolError,
     HostCapability,
     InteractionResponseStatus,
+    InteractionCancelReason,
+    HarnessStateError,
     ItemEventKind,
     ItemLifecycleEvent,
     MessageRole,
@@ -73,6 +78,27 @@ _TOOL_CALL_CHUNK = "tool_call"
 _TOOL_RESULT_CHUNK = "tool_result"
 
 AgentFactory = Callable[[HarnessContext], "DeepAgent | Awaitable[DeepAgent]"]
+
+
+@dataclass(slots=True, eq=False)
+class _NativePendingTurn(PendingTurn):
+    _origin: ExecutionOrigin | None = field(default=None, repr=False)
+    _agent: Any = field(default=None, repr=False)
+    _session: Any = field(default=None, repr=False)
+    _admissions: set[asyncio.Task] = field(default_factory=set, repr=False)
+    _stream: Any = field(default=None, repr=False)
+    _execution_done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _exit: Any = field(default=None, repr=False)
+
+
+@dataclass(slots=True, eq=False)
+class _NativeTurnExit:
+    turn: _NativePendingTurn
+    admissions: tuple
+    interactions: tuple
+    confirmed: asyncio.Future
+    cleanup: asyncio.Task | None = None
+    round_handle: Any = None
 
 
 class _ObservationRail(AgentRail):
@@ -331,6 +357,11 @@ class DeepAgentHarness(SerializedTurnHarness):
         return session_id
 
     async def _close_session(self) -> None:
+        original = self._active_turn
+        if isinstance(original, _NativePendingTurn):
+            # Do not clear the Binding underneath the original execute barrier.
+            # Unknown exit retains agent/session so stop can retry the same handle.
+            await self._abort_owned_turn(original, mode=AbortMode.FORCE)
         agent = self._agent
         session = self._agent_session
         errors: list[Exception] = []
@@ -353,6 +384,137 @@ class DeepAgentHarness(SerializedTurnHarness):
                     self._agent_session = None
         if errors:
             raise ExceptionGroup("Native provider cleanup was not confirmed", errors)
+
+    def _make_pending_turn(self, *, content, message_id, turn_id, accepted_mode):
+        hook = self._host_hooks.capture_execution_origin
+        if hook is None:
+            return super()._make_pending_turn(content=content, message_id=message_id,
+                                              turn_id=turn_id, accepted_mode=accepted_mode)
+        source = hook(content)
+        if inspect.iscoroutine(source):
+            source.close()
+        if not isinstance(source, ExecutionOrigin):
+            raise HarnessStateError("managed Native admission requires an original synchronous source")
+        source._check_current()
+        agent, session, context = self._agent, self._agent_session, self._context
+        if agent is None or session is None or context is None:
+            raise HarnessStateError("managed Native session is unavailable")
+        turn = _NativePendingTurn(content=content, message_id=message_id, turn_id=turn_id,
+                                  accepted_mode=accepted_mode, _agent=agent, _session=session)
+        def check():
+            if (self._agent is not agent or self._agent_session is not session or self._context is not context
+                    or self._capture_owned_turn(turn.turn_id) is not turn or self._stopping
+                    or turn.abort_requested or turn._exit is not None):
+                raise HarnessStateError("original Native Turn no longer accepts work")
+            source._check_current()
+        turn._origin = ExecutionOrigin(source.host_value, _checker=check)
+        return turn
+
+    def _check_original_native_turn(self, turn):
+        if (not isinstance(turn, _NativePendingTurn) or turn._origin is None
+                or self._agent is not turn._agent or self._agent_session is not turn._session):
+            raise HarnessStateError("original Native Turn/session changed")
+
+    def _start_turn_exit(self, turn):
+        # Publish the original barrier even if the live Session was replaced.
+        # Cleanup then reports unknown; replacement cannot turn unfinished work
+        # into a base crash/terminal event and promote a successor.
+        handle = turn._exit
+        if handle is None:
+            handle = _NativeTurnExit(turn, tuple(turn._admissions), self._capture_turn_interactions(turn),
+                                     asyncio.get_running_loop().create_future())
+            turn._exit = handle  # Original admission fence, before cleanup first await.
+        task = handle.cleanup
+        if task is None or (task.done() and not handle.confirmed.done()):
+            if task is not None and not task.cancelled():
+                task.exception()
+            handle.cleanup = asyncio.create_task(self._cleanup_original_turn(handle))
+        return handle
+
+    async def _cleanup_original_turn(self, handle):
+        turn = handle.turn
+        self._check_original_native_turn(turn)
+        current = asyncio.current_task()
+        if current in handle.admissions:
+            raise HarnessStateError("Native admission cannot confirm its own exit")
+        if handle.admissions:
+            await asyncio.wait(handle.admissions)
+            for task in handle.admissions:
+                if not task.cancelled():
+                    task.exception()
+        self._check_original_native_turn(turn)
+        await self._cancel_interaction_snapshot(handle.interactions,
+            reason=InteractionCancelReason.TURN_ABORTED, wait_handles=True)
+        self._check_original_native_turn(turn)
+        if handle.round_handle is None:
+            handle.round_handle = turn._agent._capture_origin_exit(turn._origin, expected_session=turn._session)
+        await turn._agent._cancel_owned_origin(handle.round_handle)
+        self._check_original_native_turn(turn)
+        stream = turn._stream
+        if stream is not None:
+            await turn._agent._detach_owned_output(stream._lease.token, expected_origin=turn._origin,
+                                                   expected_session=turn._session)
+        # The shared Native supervisor itself is not owned by this Turn. Wait
+        # only its original execute-body finally, which excludes the exit barrier.
+        await turn._execution_done.wait()
+        self._check_original_native_turn(turn)
+        turn._agent._check_origin_exit(handle.round_handle)
+        turn._agent._check_unattributed_subagent_exit(turn._session)
+        if not handle.confirmed.done():
+            handle.confirmed.set_result(None)
+
+    async def _wait_turn_exit_barrier(self, turn):
+        handle = self._start_turn_exit(turn)
+        while not handle.confirmed.done():
+            try:
+                await asyncio.shield(handle.confirmed)
+            except asyncio.CancelledError:
+                # Unknown exit must not escape to the shared supervisor crash
+                # handler and promote another Turn. External callers have a budget.
+                continue
+        handle.confirmed.result()
+
+    async def _abort_owned_turn(self, expected, *, mode=AbortMode.FORCE):
+        if mode is not AbortMode.FORCE:
+            raise UnsupportedHarnessCapabilityError("Native exact abort requires force mode")
+        async with self._command_lock:
+            self._check_original_native_turn(expected)
+            if asyncio.current_task() is self._supervisor_task or asyncio.current_task() in expected._admissions:
+                raise HarnessStateError("original Native producer cannot confirm its own exit")
+            if expected._exit is not None and expected._exit.confirmed.done():
+                return
+            if self._capture_owned_turn(expected.turn_id) is not expected:
+                raise HarnessStateError("original Native Turn was replaced")
+            expected.abort_requested = True
+            expected.abort_mode = mode
+            if self._active_turn is not expected:
+                # The original serialized supervisor will emit queued ABORTED.
+                return
+            handle = self._start_turn_exit(expected)
+        from openjiuwen.core.controller.modules.task_scheduler import _STOP_TIMEOUT_SECONDS
+        try:
+            await asyncio.wait_for(asyncio.shield(handle.cleanup), timeout=_STOP_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            raise HarnessStateError("original Native Turn exit is unconfirmed") from exc
+        handle.confirmed.result()
+
+    async def abort(self, *, mode=AbortMode.GRACEFUL):
+        turn = self._active_turn
+        if isinstance(turn, _NativePendingTurn):
+            await self._abort_owned_turn(turn, mode=mode)
+        else:
+            await super().abort(mode=mode)
+
+    async def _managed_admission(self, turn, operation):
+        turn._origin._check_current()
+        async def invoke():
+            turn._origin._check_current()
+            with execution_origin_scope(turn._origin):
+                return await operation()
+        task = asyncio.create_task(invoke())
+        turn._admissions.add(task)
+        task.add_done_callback(turn._admissions.discard)
+        return await asyncio.shield(task)
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
@@ -381,24 +543,45 @@ class DeepAgentHarness(SerializedTurnHarness):
                     code=type(exc).__name__,
                     category="sdk_error",
                 )
+        finally:
+            if isinstance(turn, _NativePendingTurn):
+                turn._execution_done.set()
+                await self._wait_turn_exit_barrier(turn)
         return self._build_result(turn, state, timing)
 
     async def _run_round(
         self, agent: DeepAgent, turn: PendingTurn, state: _TurnState, query: Any, *, resuming: bool = False
     ) -> None:
-        stream = await agent.attach_output()
+        managed = isinstance(turn, _NativePendingTurn)
+        if managed:
+            async def attach():
+                stream = await agent.attach_output()
+                turn._stream = stream
+                return stream
+            stream = await self._managed_admission(turn, attach)
+        else:
+            stream = await agent.attach_output()
         if stream is None:
             raise HarnessProtocolError("DeepAgent output stream already has a consumer")
         try:
-            if turn.abort_requested:
+            if turn.abort_requested or (managed and turn._exit is not None):
                 return
             request = SendInputRequest(request_id=turn.turn_id, inputs={"query": query})
-            if not await self._dispatch_input(agent, request, turn.content, resuming=resuming):
+            if managed:
+                drain = await self._managed_admission(turn, lambda: self._dispatch_input(
+                    agent, request, turn.content, resuming=resuming))
+            else:
+                drain = await self._dispatch_input(agent, request, turn.content, resuming=resuming)
+            if not drain:
                 return
             async for chunk in stream:
                 await self._consume_chunk(turn, state, chunk)
         finally:
-            await stream.close(abort_active_round=turn.abort_requested)
+            if managed:
+                await agent._detach_owned_output(stream._lease.token, expected_origin=turn._origin,
+                                                  expected_session=turn._session)
+            else:
+                await stream.close(abort_active_round=turn.abort_requested)
 
     async def _consume_chunk(self, turn: PendingTurn, state: _TurnState, chunk: Any) -> None:
         chunk_type = getattr(chunk, "type", None)
@@ -586,19 +769,15 @@ class DeepAgentHarness(SerializedTurnHarness):
         )
 
     async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
-        _ = turn
         agent = self._agent
         if agent is None:
             raise HarnessProtocolError("DeepAgent disappeared during an active cycle")
-        await self._dispatch_input(
-            agent,
-            SendInputRequest(
-                request_id=f"steer-{uuid.uuid4().hex}",
-                inputs={"query": harness_input_text(content)},
-                mode=InputDispatchMode.STEER,
-            ),
-            content,
-        )
+        request = SendInputRequest(request_id=f"steer-{uuid.uuid4().hex}",
+                                   inputs={"query": harness_input_text(content)}, mode=InputDispatchMode.STEER)
+        if isinstance(turn, _NativePendingTurn):
+            await self._managed_admission(turn, lambda: self._dispatch_input(agent, request, content))
+        else:
+            await self._dispatch_input(agent, request, content)
 
     async def _dispatch_input(
         self, agent: DeepAgent, request: SendInputRequest, content: HarnessInput, *, resuming: bool = False
@@ -613,7 +792,9 @@ class DeepAgentHarness(SerializedTurnHarness):
         return True
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
-        _ = turn, mode
+        if isinstance(turn, _NativePendingTurn):
+            await self._abort_owned_turn(turn, mode=mode)
+            return
         agent = self._agent
         if agent is None:
             return
