@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_33_subagent-origin-exit.md`、`F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
+| 最近一次修订日期 | 2026-10-05 |
+| 关联 feature | `F_37_owned-goal-control.md`、 `F_33_subagent-origin-exit.md`、`F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
 
 ## 范围 / 边界
 
@@ -234,3 +234,12 @@ UserInputOp/ActivityEmitter 的私有来源与精确尾部端口见 S_10；完�
 取消整 Session 代替原来源退出。旧 session_spawn 内存 toolkit 记录、非终态 task、
 存活 wrapper/auto-invoke 缺乏精确来源，仍为 unknown；completed toolkit 记录本身也不
 证明其延迟尾部退出。这项保守限制及尚未启用的完整后台组合详见 F_33，不宣称 B4 完整通过。
+
+
+### 原 Goal 控制的精确 attempt 退出（F37）
+
+NativeGoalExecutionAdapter 私有绑定实际 DeepAgent，GoalManager selector 固定原
+ActiveInteractionRound/work/facade/session/controller。clear/overwrite 只取消该 facade，
+复用原 `_drain_owned_round` 与输出完成信号确认原 producer 退出；不 join 常驻 supervisor，
+不使用 whole-origin abort。原 Goal 控制锁不能跨尾部 join 持有。出队后旧 managed Goal
+若被清除/覆盖，原消费检查拒绝该项，supervisor 继续处理原队列其它工作。详见 S_11。
