@@ -660,3 +660,80 @@ async def test_bulk_cleanup_reserves_database_before_protected_row_check(case, m
         release.set()
         await asyncio.gather(cleanup, *([creator] if creator else []), return_exceptions=True)
         await legacy.close()
+
+
+@pytest.mark.asyncio
+async def test_committed_facts_survive_original_scope_without_authorizing_background_read(case):
+    c = case
+    receipt = await c.create()
+    calls = []
+    object.__setattr__(c.origin, '_checker', lambda: calls.append('writer'))
+    c.enabled = False
+    facts = await asyncio.to_thread(receipt.committed_facts)
+    assert calls == []
+    assert facts.database is c.db and facts.dao is c.db.member and facts.sessions is c.db._sessions
+    assert facts.actor is c.actor and facts.entity is c.entity
+    assert facts.kind == 'create' and facts.team_name == 'same-team' and facts.member_name == 'member'
+    assert facts.source_id == 'alice-source' and facts.stamp == receipt.stamp
+    assert dict(facts.record)['display_name'] == 'Alice'
+    receipt.check_integrity()
+    with pytest.raises(MemberRecordDenied):
+        receipt.check_current()
+    assert copy.copy(facts) is facts and copy.deepcopy(facts) is facts
+    with pytest.raises(TypeError):
+        pickle.dumps(facts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['record', 'stamp', 'operation', 'actor', 'database', 'transaction', 'type'])
+async def test_pure_committed_facts_reject_field_changes_not_only_stamp(case, change):
+    c = case
+    receipt = await c.create()
+    facts = receipt.committed_facts()
+    if change == 'record':
+        object.__setattr__(facts, 'record', tuple((k, 'someone else' if k == 'display_name' else v)
+                                                 for k, v in facts.record))
+    elif change == 'stamp':
+        object.__setattr__(facts.stamp, 'revision', 2)
+    elif change == 'operation':
+        object.__setattr__(receipt.operation, 'team_name', 'other-team')
+    elif change == 'type':
+        object.__setattr__(facts.stamp, 'revision', True)
+    else:
+        object.__setattr__(facts, change, object())
+    with pytest.raises(MemberRecordDenied):
+        receipt.check_integrity()
+    with pytest.raises(MemberRecordDenied):
+        receipt.committed_facts()
+
+
+@pytest.mark.asyncio
+async def test_receipt_copied_fields_cannot_forge_original_issuance(case):
+    receipt = await case.create()
+    fake = object.__new__(MemberWriteReceipt)
+    for name in MemberWriteReceipt.__slots__:
+        object.__setattr__(fake, name, getattr(receipt, name))
+    with pytest.raises(MemberRecordDenied):
+        fake.committed_facts()
+    blank = object.__new__(MemberWriteReceipt)
+    with pytest.raises(MemberRecordDenied):
+        blank.check_integrity()
+    assert receipt.committed_facts().stamp.revision == 1
+
+
+@pytest.mark.asyncio
+async def test_committed_row_snapshot_updates_only_from_actual_transaction(case):
+    c = case
+    created = await c.create()
+    with execution_origin_scope(c.origin):
+        updated = await mutate(c, 'status')
+        c.receipts['member'] = updated
+    before, after = created.committed_facts(), updated.committed_facts()
+    assert before.stamp.revision == 1 and after.stamp.revision == 2
+    assert dict(before.record)['status'] == 'ready'
+    assert dict(after.record)['status'] == 'busy'
+    with execution_origin_scope(c.origin):
+        # A delete has the same original immutable row, and remains only a fact.
+        assert await c.db.team.delete_team('same-team') is True
+    assert updated.committed_facts() is after
+    assert await c.db.member.get_member('member', 'same-team') is None
