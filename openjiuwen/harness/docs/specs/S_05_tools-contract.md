@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`、最终强制授权） |
-| 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_provider-neutral-subagent-execution.md` |
+| 最近一次修订日期 | 2026-10-05 |
+| 关联 feature | `F_40_goal-tool-consumer-authority.md`、`F_04_tool-result-llm-rendering.md`、`F_05_provider-neutral-subagent-execution.md` |
 
 ## 范围 / 边界
 
@@ -282,3 +282,17 @@ AgentModeRail 将配置的 enter instructions / exit notification 传入工具�
 非空文本由工具原始 invoke 在既有结果后追加两个换行，空配置保持旧返回。
 不得在 Tool 构造后替换 invoke 追加内容；强制最终授权仍拒绝未知外层包装器。
 读取计划、建立路径、保存状态和退出模式均发生在最终授权通过之后。
+
+
+## 原调用消费检查（F40）
+
+最终强制授权的原 `ToolInvocation` 可私有声明 consumer requirement，并绑定唯一同步
+checker；声明只增不减，callback 链结束时缺 checker 拒绝本次 invoke。进入原方法后
+`ToolExecution` 固定 requirement/checker 身份，消费点复核原执行证书与 checker 的
+前后不变量，不重新审批、不铸造另一次调用。失活或继承到其它 Task 的受管证书拒绝，
+不得解释为 legacy。普通旧 Native policy callback 不自动声明此 requirement。
+
+`GetCurrentGoalTool` 在原 GoalManager 控制锁内 load 前及复制结果后复核，并在返回前
+再次检查。宿主 checker 负责原 Goal/Session/来源/当前资源权限，core 固定原工具及
+Manager/store/锁/backing Session 引用（首 callback 前固定）。拒绝作为原 AbilityManager 错误结果可观察，不吞成无 Goal。
+旧未声明 consumer 的直接调用、策略回调与无 Goal 返回保持原行为。

@@ -75,6 +75,9 @@ class _Invocation:
     final_entered: bool = False
     task: asyncio.Task | None = field(default_factory=asyncio.current_task, repr=False)
     execution: ToolExecution | None = field(default=None, repr=False)
+    consumer_required: bool = False
+    consumer_check: Callable[[], None] | None = field(default=None, repr=False)
+    consumer_seal: tuple | None = field(default=None, repr=False)
 
 
 _CALL: ContextVar[_Call | None] = ContextVar("native_authority_call", default=None)
@@ -250,6 +253,21 @@ class ToolInvocation:
     _callbacks: tuple = field(repr=False)
     _live: list[bool] = field(default_factory=lambda: [True], repr=False)
 
+    def _require_consumer_check(self) -> None:
+        """Declare this original invocation's private consumer requirement."""
+        if not self.is_current() or self._invocation.consumer_seal is not None:
+            raise PermissionError(_DENIED)
+        self._invocation.consumer_required = True
+
+    def _bind_consumer_check(self, check: Callable[[], None]) -> None:
+        """Bind once in the original final scope; never mint another operation."""
+        invocation = self._invocation
+        if (not self.is_current() or invocation.consumer_seal is not None
+                or invocation.consumer_required is not True or not callable(check)
+                or (invocation.consumer_check is not None and invocation.consumer_check is not check)):
+            raise PermissionError(_DENIED)
+        invocation.consumer_check = check
+
     @property
     def source_operation(self) -> BeforeToolContext | None:
         """Original host object, distinct from the final transformed operation."""
@@ -307,6 +325,22 @@ class ToolExecution:
     _callbacks: tuple = field(repr=False)
     _live: list[bool] = field(default_factory=lambda: [True], repr=False)
 
+    _consumer_seal: tuple | None = field(default=None, repr=False)
+
+    def _check_consumer(self) -> None:
+        """Recheck the fixed current operation without approvals or rebinding."""
+        seal = self._consumer_seal
+        if (not self.is_current() or seal is None or seal[0] is not True or not callable(seal[1])):
+            raise PermissionError(_DENIED)
+        try:
+            result = seal[1]()
+            if inspect.iscoroutine(result):
+                result.close()
+            if result is not None or self._consumer_seal is not seal or not self.is_current():
+                raise PermissionError(_DENIED)
+        except Exception as exc:
+            raise PermissionError(_DENIED) from exc
+
     @property
     def source_operation(self) -> BeforeToolContext | None:
         """Original host source identity, or None for AbilityManager calls."""
@@ -324,6 +358,10 @@ class ToolExecution:
             return (
                 _METHOD_EXECUTION.get() is self
                 and self._live[0]
+                and invocation.consumer_seal is self._consumer_seal
+                and self._consumer_seal is not None
+                and invocation.consumer_required is self._consumer_seal[0]
+                and invocation.consumer_check is self._consumer_seal[1]
                 and invocation.execution is self
                 and invocation.task is self.owning_task
                 and not self.owning_task.done()
@@ -362,6 +400,20 @@ def current_tool_execution() -> ToolExecution | None:
     return execution if execution is not None and execution.is_current() else None
 
 
+def _capture_tool_consumer_check(executor):
+    """Return only an explicitly required managed check; old policy is unchanged."""
+    invocation, execution = _EXECUTION.get(), _METHOD_EXECUTION.get()
+    seals = (getattr(invocation, "consumer_seal", None), getattr(execution, "_consumer_seal", None))
+    required = (getattr(invocation, "consumer_required", False) is True
+                or any(seal is not None and seal[0] is True for seal in seals))
+    if not required:
+        return None
+    if execution is None or execution.executor is not executor or not execution.is_current():
+        raise PermissionError(_DENIED)
+    execution._check_consumer()
+    return execution._check_consumer
+
+
 @contextmanager
 def _mask_tool_execution():
     """Callbacks and nested tool entry must not borrow a parent's certificate."""
@@ -382,7 +434,8 @@ def _original_tool_execution(executor: Any, original: Any, operation: BeforeTool
         if (invocation.execution is None and invocation.executor is executor
                 and invocation.original_invoke is original):
             execution = ToolExecution(operation, executor, invocation.call.ctx, original, task,
-                                      invocation, kwargs, tuple(invocation.call.callbacks), live)
+                                      invocation, kwargs, tuple(invocation.call.callbacks), live,
+                                      _consumer_seal=invocation.consumer_seal)
             invocation.execution = execution
     token = _METHOD_EXECUTION.set(execution)
     try:
@@ -434,8 +487,15 @@ async def _authorize_final_invocation(
             if not proof.is_current():
                 raise PermissionError(_DENIED)
             for callback in tuple(invocation.call.callbacks):
-                if await callback(operation) is not True or not proof.is_current():
+                required, check = invocation.consumer_required, invocation.consumer_check
+                if (await callback(operation) is not True or not proof.is_current()
+                        or (required and invocation.consumer_required is not True)
+                        or (check is not None and invocation.consumer_check is not check)):
                     raise PermissionError(_DENIED)
+            if (type(invocation.consumer_required) is not bool
+                    or (invocation.consumer_required and not callable(invocation.consumer_check))):
+                raise PermissionError(_DENIED)
+            invocation.consumer_seal = (invocation.consumer_required, invocation.consumer_check)
         finally:
             live[0] = False
             _PROOF.reset(token)

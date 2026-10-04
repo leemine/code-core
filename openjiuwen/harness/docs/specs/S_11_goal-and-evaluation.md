@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/goal/` |
 | 最近一次修订日期 | 2026-10-05 |
-| 关联 feature | `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 `F_10_provider-neutral-goal-driver.md`, `F_35_goal-live-execution-origin.md`, `F_37_owned-goal-control.md` |
+| 关联 feature | `F_40_goal-tool-consumer-authority.md`、`F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 `F_10_provider-neutral-goal-driver.md`, `F_35_goal-live-execution-origin.md`, `F_37_owned-goal-control.md` |
 
 ## 范围 / 边界
 
@@ -177,3 +177,12 @@ Native 私有 `_capture_idle_goal_control` 只接已有 Goal 的 pause/clear；�
 保存和 commit；await 后及最终 `check_result` 重验当前控制授权和原目标。pause 保持
 slot，clear 清 slot。无新 Turn/模型/attach/输出 lease；idle 仅原调用 ACK，legacy/live
 goal_updated 事件保持。调用者取消不丢原操作 Task，同对象同行为重试等待同一结果。
+
+
+## 工具读取的消费边界（F40）
+
+公开 `get()` 仍保留旧语义；私有 `_check_current` 参数供原工具消费证书使用，在
+等待原控制锁前、锁内实际 load 前后及返回前同步复核。固定原 Manager/store/锁/backing Session，
+不通过新 current Goal 为旧来源补授权。checker 不得重入该锁、不做审批或异步 I/O。
+宿主必须在最终授权阶段声明并绑定同次 tool invocation 的 consumer requirement；
+core 不从 GoalRecord 或普通 policy callback 推断受管身份。详见 S_05。

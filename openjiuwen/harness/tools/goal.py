@@ -167,9 +167,37 @@ class GetCurrentGoalTool(Tool):
 
     async def invoke(self, inputs: Input, **kwargs: Any) -> Output:
         """Return the current goal record summary (read-only)."""
+        from openjiuwen.core.foundation.tool.authority import _capture_tool_consumer_check
+
+        manager = self._goal_manager
+        # Pin before any source/consumer callback can synchronously re-enter.
+        store = getattr(manager, "_store", None)
+        lock = getattr(manager, "_control_lock", None)
+        session = getattr(store, "_session", None)
+
+        def exact():
+            if (self._goal_manager is not manager or getattr(manager, "_store", None) is not store
+                    or getattr(manager, "_control_lock", None) is not lock
+                    or getattr(store, "_session", None) is not session):
+                raise PermissionError("[PERMISSION_DENIED] original Goal tool target changed")
+
+        consumer = _capture_tool_consumer_check(self)
+
+        def check():
+            exact()
+            consumer()
+            exact()
+
         record = None
         try:
-            record = await self._goal_manager.get()
+            record = await manager.get(**({"_check_current": check} if consumer is not None else {}))
+            if consumer is not None:
+                check()
+        except PermissionError:
+            if consumer is not None:
+                raise
+            logger.debug("[GetCurrentGoal] Failed to load goal record", exc_info=True)
+            record = None
         except Exception:
             logger.debug("[GetCurrentGoal] Failed to load goal record", exc_info=True)
             record = None
