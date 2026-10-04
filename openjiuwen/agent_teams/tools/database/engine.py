@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
-from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -265,6 +266,20 @@ def _ensure_team_member_role_column(sync_conn) -> None:
         "Migrated legacy team_member table: added role column with default %s",
         default_role,
     )
+
+
+def _ensure_team_member_record_columns(sync_conn) -> None:
+    """Idempotent additive migration; unknown historical rows stay unowned."""
+    inspector = inspect(sync_conn)
+    if "team_member" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("team_member")}
+    for name, sql_type in (("record_nonce", "VARCHAR(64)"),
+                           ("record_source_id", "VARCHAR(512)"),
+                           ("record_revision", "BIGINT"),
+                           ("record_digest", "VARCHAR(64)")):
+        if name not in columns:
+            sync_conn.exec_driver_sql(f"ALTER TABLE team_member ADD COLUMN {name} {sql_type}")
 
 
 def _ensure_team_member_options_column(sync_conn) -> None:
@@ -763,6 +778,7 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
         await conn.run_sync(_create_static_tables)
         await conn.run_sync(_ensure_team_member_role_column)
         await conn.run_sync(_ensure_team_member_options_column)
+        await conn.run_sync(_ensure_team_member_record_columns)
         await conn.run_sync(_ensure_team_info_capability_columns)
 
     return SqlEngines(write_engine, read_engine, write_session_local, read_session_local)
@@ -897,6 +913,20 @@ async def cleanup_all_runtime_state(
     cleared_tables: list[str] = []
     async with engine.begin() as conn:
         table_names = await conn.run_sync(_get_table_names)
+        if "team_member" in table_names:
+            # Storage-wide reset has no original member/entity authority. Reject
+            # before dropping any session table; partial provenance is unknown.
+            from sqlalchemy import or_, select
+
+            from openjiuwen.agent_teams.tools.database.record_authority import MemberRecordDenied
+            from openjiuwen.agent_teams.tools.models import TeamMember
+
+            protected = await conn.execute(select(TeamMember.member_name).where(or_(
+                TeamMember.record_nonce.is_not(None), TeamMember.record_source_id.is_not(None),
+                TeamMember.record_revision.is_not(None), TeamMember.record_digest.is_not(None),
+            )).limit(1))
+            if protected.first() is not None:
+                raise MemberRecordDenied("storage reset cannot delete governed member records")
 
         for table_name in table_names:
             if not table_name.startswith(TEAM_DYNAMIC_TABLE_PREFIXES):

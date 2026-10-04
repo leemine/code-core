@@ -5,20 +5,24 @@
 
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import delete, exists, select
 from sqlalchemy.exc import IntegrityError
 
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
-from openjiuwen.agent_teams.tools.models import Team
+from openjiuwen.agent_teams.tools.models import Team, TeamMember
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.controller.schema.execution_origin import current_execution_origin
+
+from .record_authority import MemberRecordDenied, MemberRecordWrites, record_values
 
 
 class TeamDao:
     """Data access object for the team_info table."""
 
-    def __init__(self, sessions: DbSessions) -> None:
+    def __init__(self, sessions: DbSessions, *, record_writes: MemberRecordWrites | None = None) -> None:
         """Initialize team DAO with the shared read/write session provider."""
         self._sessions = sessions
+        self._record_writes = record_writes or MemberRecordWrites(self, None)
 
     async def create_team(
         self,
@@ -88,6 +92,15 @@ class TeamDao:
             not exist. Callers that treat "missing" as success can map
             ``False`` themselves.
         """
+        record_writes = self._record_writes
+        authorizer = record_writes.authorizer
+        original_origin = current_execution_origin()
+
+        def check_admission():
+            if (self._record_writes is not record_writes or record_writes.authorizer is not authorizer
+                    or (authorizer is not None and current_execution_origin() is not original_origin)):
+                raise MemberRecordDenied("original team delete source changed")
+
         async with self._sessions.write() as session:
             result = await session.execute(select(Team).where(Team.team_name == team_name))
             team = result.scalar_one_or_none()
@@ -95,7 +108,49 @@ class TeamDao:
                 team_logger.debug("Team %s not found for deletion", team_name)
                 return False
 
-            await session.delete(team)
+            members = list((await session.execute(select(TeamMember).where(
+                TeamMember.team_name == team_name,
+            ))).scalars().all())
+            transaction = session.get_transaction()
+            check_admission()
+            bounds = []
+            for member in members:
+                check_admission()
+                bound = record_writes.bind("delete_team", team_name, member.member_name)
+                if bound is None:
+                    self._record_writes.require_legacy(member)
+                else:
+                    before = bound.authorize_row(member)
+                    bound.check(before, record_values(member), session=session, transaction=transaction)
+                    bounds.append((bound, before, record_values(member)))
+            # Remove only the rows we checked. A concurrent replacement/new member
+            # makes the final team DELETE fail instead of joining its cascade.
+            for member in members:
+                conditions = (self._record_writes.legacy_where(TeamMember)
+                              if member.record_nonce is None else (
+                                  TeamMember.record_nonce == member.record_nonce,
+                                  TeamMember.record_revision == member.record_revision,
+                                  TeamMember.record_source_id == member.record_source_id,
+                                  TeamMember.record_digest == member.record_digest,
+                              ))
+                result = await session.execute(delete(TeamMember).where(
+                    TeamMember.team_name == team_name,
+                    TeamMember.member_name == member.member_name, *conditions,
+                ))
+                if result.rowcount != 1:
+                    raise MemberRecordDenied("member changed before team deletion")
+            for bound, before, proposed in bounds:
+                bound.check(before, proposed, session=session, transaction=transaction)
+            result = await session.execute(delete(Team).where(
+                Team.team_name == team_name,
+                ~exists().where(TeamMember.team_name == team_name),
+            ))
+            if result.rowcount != 1:
+                raise MemberRecordDenied("team roster changed before deletion")
+            await session.flush()
+            check_admission()
+            for bound, before, proposed in bounds:
+                bound.check(before, proposed, session=session, transaction=transaction)
             await session.commit()
             team_logger.info("Team %s deleted", team_name)
             return True

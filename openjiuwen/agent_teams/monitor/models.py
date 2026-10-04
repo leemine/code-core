@@ -12,8 +12,12 @@ from __future__ import annotations
 
 import time
 from enum import Enum
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.tools.database.record_authority import MemberRecordStamp
 
 
 class TeamInfo(BaseModel):
@@ -62,6 +66,13 @@ class MemberInfo(BaseModel):
         ),
     )
 
+    _record_stamp: MemberRecordStamp | None = PrivateAttr(default=None)
+
+    @property
+    def record_stamp(self) -> MemberRecordStamp | None:
+        """Validated write-time stamp; not permission and never read from JSON."""
+        return self._record_stamp
+
     @classmethod
     def from_internal(cls, member) -> MemberInfo:
         """Build from internal ``TeamMember`` SQLModel instance.
@@ -71,7 +82,7 @@ class MemberInfo(BaseModel):
         """
         from openjiuwen.agent_teams.tools.member_options import load_member_options
 
-        return cls(
+        result = cls(
             member_name=member.member_name,
             team_name=member.team_name,
             display_name=member.display_name,
@@ -82,6 +93,10 @@ class MemberInfo(BaseModel):
             role=member.role,
             cli_agent=load_member_options(getattr(member, "options", None)).cli_agent,
         )
+        from openjiuwen.agent_teams.tools.database.record_authority import member_record_stamp
+
+        result._record_stamp = member_record_stamp(member)
+        return result
 
 
 class TaskInfo(BaseModel):

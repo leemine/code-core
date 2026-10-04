@@ -15,7 +15,7 @@ import json
 from typing import Dict, Optional, cast
 
 from sqlalchemy import BigInteger, Index, Table
-from sqlmodel import SQLModel, Field
+from sqlmodel import Field, SQLModel
 from sqlmodel.main import SQLModelMetaclass
 
 from openjiuwen.agent_teams.context import get_session_id
@@ -93,6 +93,11 @@ class TeamMember(SQLModel, table=True):
             "worktree: {isolation, path}, permissions_override: {bash: deny, ...}}"
         ),
     )
+    # Optional host-governed record provenance. NULL legacy rows are not adopted.
+    record_nonce: str | None = Field(default=None, nullable=True)
+    record_source_id: str | None = Field(default=None, nullable=True)
+    record_revision: int | None = Field(default=None, sa_type=BigInteger, nullable=True)
+    record_digest: str | None = Field(default=None, nullable=True)
     # Set on roster mutations only (create_member).  Status / execution
     # status updates intentionally do NOT bump this column because they
     # do not change how the # 成员关系 prompt section is rendered.

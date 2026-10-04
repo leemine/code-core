@@ -30,6 +30,7 @@ from openjiuwen.agent_teams.tools.member_options import (
 from openjiuwen.agent_teams.tools.models import TeamMember
 from openjiuwen.core.common.logging import team_logger
 
+from .record_authority import MemberRecordWrites, MemberWriteReceipt, record_values
 
 _DEPARTED_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_DEPARTED_STATUSES)
 _UNREACHABLE_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_UNREACHABLE_STATUSES)
@@ -56,9 +57,48 @@ def _valid_predecessor_values(target, transitions) -> list[str]:
 class MemberDao:
     """Data access object for the team_member table."""
 
-    def __init__(self, sessions: DbSessions) -> None:
+    def __init__(self, sessions: DbSessions, *, record_writes: MemberRecordWrites | None = None) -> None:
         """Initialize member DAO with the shared read/write session provider."""
         self._sessions = sessions
+        self._record_writes = record_writes or MemberRecordWrites(self, None)
+
+    async def _write_guarded(self, bound, changes, *, valid_from=None, return_receipt=False):
+        async with self._sessions.write() as session:
+            op = bound.operation
+            bound.check(bound.permit.expected_stamp, op.changes)
+            row = (await session.execute(select(TeamMember).where(
+                TeamMember.member_name == op.member_name,
+                TeamMember.team_name == op.team_name,
+            ))).scalar_one_or_none()
+            transaction = session.get_transaction()
+            before = bound.authorize_row(row)
+            bound.check(before, op.changes, session=session, transaction=transaction)
+            if valid_from is not None and getattr(row, valid_from[0]) not in valid_from[1]:
+                return False
+            values = changes(row) if callable(changes) else changes
+            candidate = TeamMember(**dict(record_values(row)))
+            for key, value in values.items():
+                setattr(candidate, key, value)
+            proposed = record_values(candidate)
+            bound.check(before, proposed, session=session, transaction=transaction)
+            stamp = bound.stamp(candidate, before)
+            result = await session.execute(update(TeamMember).where(
+                TeamMember.member_name == op.member_name,
+                TeamMember.team_name == op.team_name,
+                TeamMember.record_nonce == before.nonce,
+                TeamMember.record_revision == before.revision,
+                TeamMember.record_digest == before.digest,
+                TeamMember.record_source_id == before.source_id,
+            ).values(**dict(proposed), record_nonce=stamp.nonce,
+                     record_source_id=stamp.source_id, record_revision=stamp.revision,
+                     record_digest=stamp.digest))
+            if result.rowcount != 1:
+                return False
+            await session.flush()
+            bound.check(before, proposed, session=session, transaction=transaction)
+            await session.commit()
+            receipt = MemberWriteReceipt._committed(op, stamp, bound.permit, transaction)
+            return receipt if return_receipt else True
 
     async def create_member(
         self,
@@ -74,7 +114,8 @@ class MemberDao:
         mode: str = MemberMode.BUILD_MODE.value,
         prompt: Optional[str] = None,
         options: Optional[str] = None,
-    ) -> bool:
+        return_receipt: bool = False,
+    ) -> bool | MemberWriteReceipt:
         """Create a new team member.
 
         Args:
@@ -93,6 +134,11 @@ class MemberDao:
                 "fallback_model_ref": {...}, "cli_agent": "...",
                 "worktree": {...}, "permissions_override": {...}}``.
         """
+        self._record_writes.receipt_flag(return_receipt)
+        changes = (("display_name", display_name), ("agent_card", agent_card), ("status", status),
+                   ("role", role), ("desc", desc), ("execution_status", execution_status),
+                   ("mode", mode), ("prompt", prompt), ("options", options))
+        bound = self._record_writes.bind("create", team_name, member_name, changes)
         async with self._sessions.write() as session:
             try:
                 member = TeamMember(
@@ -109,8 +155,22 @@ class MemberDao:
                     options=options,
                     updated_at=get_current_time(),
                 )
+                if bound is not None:
+                    bound.check(None, record_values(member))
+                    existing = (await session.execute(select(TeamMember).where(
+                        TeamMember.member_name == member_name, TeamMember.team_name == team_name,
+                    ))).scalar_one_or_none()
+                    bound.authorize_row(existing)
+                    bound.check(None, record_values(member), session=session, transaction=session.get_transaction())
+                    stamp = bound.stamp(member, None)
                 session.add(member)
+                await session.flush()
+                transaction = session.get_transaction()
+                if bound is not None:
+                    bound.check(None, record_values(member), session=session, transaction=transaction)
                 await session.commit()
+                if bound is not None and return_receipt:
+                    return MemberWriteReceipt._committed(bound.operation, stamp, bound.permit, transaction)
                 team_logger.info("Member %s created", member_name)
                 return True
             except IntegrityError:
@@ -345,7 +405,8 @@ class MemberDao:
         member_name: str,
         team_name: str,
         status: str,
-    ) -> bool:
+        *, return_receipt: bool = False,
+    ) -> bool | MemberWriteReceipt:
         """Update member status via a single guarded CAS UPDATE.
 
         The transition validation lives in the ``WHERE status IN (valid
@@ -355,6 +416,11 @@ class MemberDao:
         transition was illegal.
         """
         valid_from = _valid_predecessor_values(MemberStatus(status), MEMBER_TRANSITIONS)
+        self._record_writes.receipt_flag(return_receipt)
+        bound = self._record_writes.bind("status", team_name, member_name, (("status", status),))
+        if bound is not None:
+            return await self._write_guarded(bound, {"status": status},
+                                             valid_from=("status", valid_from), return_receipt=return_receipt)
 
         async def _op() -> bool:
             async with self._sessions.write() as session:
@@ -363,6 +429,7 @@ class MemberDao:
                     .where(
                         TeamMember.member_name == member_name,
                         TeamMember.team_name == team_name,
+                        *self._record_writes.legacy_where(TeamMember),
                         TeamMember.status.in_(valid_from),
                     )
                     .values(status=status)
@@ -423,7 +490,8 @@ class MemberDao:
         team_name: str,
         from_status: MemberStatus,
         to_status: MemberStatus,
-    ) -> bool:
+        *, return_receipt: bool = False,
+    ) -> bool | MemberWriteReceipt:
         """Atomically transition member status from from_status to to_status.
 
         Uses a single UPDATE with WHERE status = from_status so only
@@ -440,12 +508,19 @@ class MemberDao:
         Returns:
             True if the transition succeeded, False otherwise.
         """
+        self._record_writes.receipt_flag(return_receipt)
+        bound = self._record_writes.bind("transition_status", team_name, member_name,
+                                        (("from_status", from_status.value), ("status", to_status.value)))
+        if bound is not None:
+            return await self._write_guarded(bound, {"status": to_status.value},
+                valid_from=("status", [from_status.value]), return_receipt=return_receipt)
         async with self._sessions.write() as session:
             result = await session.execute(
                 update(TeamMember)
                 .where(
                     TeamMember.member_name == member_name,
                     TeamMember.team_name == team_name,
+                    *self._record_writes.legacy_where(TeamMember),
                     TeamMember.status == from_status.value,
                 )
                 .values(status=to_status.value)
@@ -467,7 +542,8 @@ class MemberDao:
         member_name: str,
         team_name: str,
         execution_status: str,
-    ) -> bool:
+        *, return_receipt: bool = False,
+    ) -> bool | MemberWriteReceipt:
         """Update member execution status via a single guarded CAS UPDATE.
 
         Mirror of ``update_member_status``: the transition validation is the
@@ -476,12 +552,19 @@ class MemberDao:
         to log the precise rejection reason.
         """
         valid_from = _valid_predecessor_values(ExecutionStatus(execution_status), EXECUTION_TRANSITIONS)
+        self._record_writes.receipt_flag(return_receipt)
+        bound = self._record_writes.bind(
+            "execution_status", team_name, member_name, (("execution_status", execution_status),))
+        if bound is not None:
+            return await self._write_guarded(bound, {"execution_status": execution_status},
+                                             valid_from=("execution_status", valid_from), return_receipt=return_receipt)
         async with self._sessions.write() as session:
             result = await session.execute(
                 update(TeamMember)
                 .where(
                     TeamMember.member_name == member_name,
                     TeamMember.team_name == team_name,
+                        *self._record_writes.legacy_where(TeamMember),
                     TeamMember.execution_status.in_(valid_from),
                 )
                 .values(execution_status=execution_status)
@@ -501,7 +584,8 @@ class MemberDao:
         member_name: str,
         team_name: str,
         execution_status: str,
-    ) -> bool:
+        *, return_receipt: bool = False,
+    ) -> bool | MemberWriteReceipt:
         """Reset member execution status without predecessor checks.
 
         This is intentionally NOT a normal state-machine transition; it is
@@ -511,12 +595,19 @@ class MemberDao:
         to be forced back to IDLE, eliminating illegal-transition noise like
         ``RUNNING -> STARTING`` on restart (issue #4318).
         """
+        self._record_writes.receipt_flag(return_receipt)
+        bound = self._record_writes.bind(
+            "reset_execution_status", team_name, member_name, (("execution_status", execution_status),))
+        if bound is not None:
+            return await self._write_guarded(bound, {"execution_status": execution_status},
+                                             valid_from=None, return_receipt=return_receipt)
         async with self._sessions.write() as session:
             result = await session.execute(
                 update(TeamMember)
                 .where(
                     TeamMember.member_name == member_name,
                     TeamMember.team_name == team_name,
+                        *self._record_writes.legacy_where(TeamMember),
                 )
                 .values(execution_status=execution_status)
             )
@@ -542,8 +633,19 @@ class MemberDao:
         *,
         isolation: Optional[str] = None,
         worktree_path: Optional[str] = None,
-    ) -> bool:
+        return_receipt: bool = False,
+    ) -> bool | MemberWriteReceipt:
         """Update worktree isolation metadata for a member."""
+        self._record_writes.receipt_flag(return_receipt)
+        frozen_worktree = worktree.model_dump_json() if worktree is not None else None
+        bound = self._record_writes.bind("worktree", team_name, member_name,
+            (("worktree", frozen_worktree), ("isolation", isolation), ("worktree_path", worktree_path)))
+        if bound is not None:
+            def changes(row):
+                original = MemberWorktreeOptions.model_validate_json(frozen_worktree) if frozen_worktree else None
+                return {"options": set_member_worktree_options(
+                    row.options, original, isolation=isolation, worktree_path=worktree_path)}
+            return await self._write_guarded(bound, changes, return_receipt=return_receipt)
         async with self._sessions.write() as session:
             result = await session.execute(
                 select(TeamMember).where(
@@ -555,6 +657,7 @@ class MemberDao:
             if not member:
                 team_logger.error("Member %s not found in team %s", member_name, team_name)
                 return False
+            self._record_writes.require_legacy(member)
             member.options = set_member_worktree_options(
                 member.options,
                 worktree,
@@ -568,8 +671,14 @@ class MemberDao:
         self,
         member_name: str,
         team_name: str,
-    ) -> bool:
+        *, return_receipt: bool = False,
+    ) -> bool | MemberWriteReceipt:
         """Promote the persisted fallback model to the active model reference."""
+        self._record_writes.receipt_flag(return_receipt)
+        bound = self._record_writes.bind("promote_fallback", team_name, member_name)
+        if bound is not None:
+            return await self._write_guarded(bound,
+                lambda row: {"options": promote_member_fallback_model(row.options)}, return_receipt=return_receipt)
         async with self._sessions.write() as session:
             result = await session.execute(
                 select(TeamMember).where(
@@ -581,6 +690,7 @@ class MemberDao:
             if member is None:
                 team_logger.error("Member %s not found in team %s", member_name, team_name)
                 return False
+            self._record_writes.require_legacy(member)
             promoted = promote_member_fallback_model(member.options)
             if promoted == member.options:
                 return False
