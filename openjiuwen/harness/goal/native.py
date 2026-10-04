@@ -38,10 +38,10 @@ class NativeGoalExecutionAdapter:
             raise PermissionError("Native Goal control requires an original execution owner")
         return self._owner._capture_goal_control(record, origin)
 
-    def _check_owned_control(self, target, *, live=False):
+    def _check_owned_control(self, target, *, live=False, mutation=False):
         if self._owner is None or self._event_manager is not target.events:
             raise PermissionError("Native Goal control owner unavailable")
-        self._owner._check_goal_control(target, live=live)
+        self._owner._check_goal_control(target, live=live, mutation=mutation)
 
     def _require_owned_attempt(self, target):
         self._check_owned_control(target, live=True)
@@ -84,7 +84,7 @@ class NativeGoalExecutionAdapter:
             inputs={"query": build_goal_task_query(record, self._language)},
             goal_id=record.goal_id, revision=record.revision, session_id=record.session_id,
         ).with_execution_origin(control.origin)
-        control.check()
+        control.check(mutation=True)
         queued = self._event_manager.push_goal(work)
         if queued:
             self._notify_work()

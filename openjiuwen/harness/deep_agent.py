@@ -4509,7 +4509,9 @@ class DeepAgent(BaseAgent):
         self._check_goal_control(target, live=True)
         return target
 
-    def _check_goal_control(self, target, *, live=False):
+    def _check_goal_control(self, target, *, live=False, mutation=False):
+        if (live or mutation) and not self._is_interaction_running():
+            raise PermissionError("original Goal control Session has stopped")
         if (type(target) is not _OwnedGoalAttempt or target.agent is not self
                 or target.session is not self._interaction_session
                 or target.controller is not self.loop_controller

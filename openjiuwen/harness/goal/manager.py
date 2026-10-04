@@ -199,7 +199,7 @@ class GoalManager:
         if control is None:
             self._origin_for_record(record)
         else:
-            control.check()
+            control.check(mutation=True)
 
         # An existing stream remains the one and only consumer.  Queue the
         # replacement work before aborting the old goal round so the stream
@@ -220,7 +220,7 @@ class GoalManager:
         if control is None:
             self._origin_for_record(record)
         else:
-            control.check()
+            control.check(mutation=True)
         return record.copy_for_response()
 
     async def pause(self) -> Optional[GoalRecord]:
@@ -330,7 +330,7 @@ class GoalManager:
                 with execution_origin_scope(self._origin_for_record(record)):
                     self._execution.goal_updated(None)
             else:
-                control.check()
+                control.check(mutation=True)
                 self._execution.goal_updated(None)
         return record.copy_for_response()
 
@@ -460,7 +460,7 @@ class GoalManager:
 
     def _emit_goal_updated_locked(self, record: GoalRecord, *, control=None) -> None:
         if control is not None:
-            control.check()
+            control.check(mutation=True)
             self._execution.goal_updated(record.copy_for_response())
             return
         with execution_origin_scope(self._origin_for_record(record)):
@@ -484,10 +484,10 @@ class GoalManager:
 
     async def _commit_control_locked(self, control):
         if control is not None:
-            control.check()
+            control.check(mutation=True)
         await self._commit_store_locked()
         if control is not None:
-            control.check()
+            control.check(mutation=True)
 
     async def _commit_store_locked(self) -> None:
         commit = getattr(self._store, "commit", None)

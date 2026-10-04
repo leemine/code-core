@@ -67,7 +67,7 @@ class _OwnedGoalControl:
         if slot is not None and slot[3] is not self.origin:
             raise PermissionError("original Goal source changed")
 
-    def check(self, *, initial=False, live=False):
+    def check(self, *, initial=False, live=False, mutation=False):
         self.origin._check_current()
         result = self._run.checker()
         if inspect.iscoroutine(result):
@@ -77,7 +77,7 @@ class _OwnedGoalControl:
         # All callback code has finished. Recheck references, record and source
         # without invoking another callback before the actual mutation.
         self._check_static(initial=initial)
-        self.execution._check_owned_control(self.target, live=live)
+        self.execution._check_owned_control(self.target, live=live, mutation=mutation)
 
     def saved(self, record):
         self._run.expected = _identity(record)
