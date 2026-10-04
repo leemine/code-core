@@ -912,7 +912,20 @@ async def cleanup_all_runtime_state(
     deleted_tables: list[str] = []
     cleared_tables: list[str] = []
     async with engine.begin() as conn:
+        # SQLite's deferred read transaction does not exclude another writer.
+        # Reserve the original database writer before inspecting protected rows
+        # so no independent TeamDatabase can insert between check and cleanup.
+        if conn.dialect.name == "sqlite":
+            await conn.exec_driver_sql("BEGIN IMMEDIATE")
         table_names = await conn.run_sync(_get_table_names)
+        if "team_member" in table_names and conn.dialect.name == "postgresql":
+            await conn.exec_driver_sql("LOCK TABLE team_member IN SHARE ROW EXCLUSIVE MODE")
+        elif "team_member" in table_names and conn.dialect.name != "sqlite":
+            from openjiuwen.agent_teams.tools.database.record_authority import MemberRecordDenied
+
+            # In particular MySQL DDL implicitly commits and releases table
+            # protection. Do not pretend the check covers subsequent DROP.
+            raise MemberRecordDenied("storage reset requires a transactional member-write barrier")
         if "team_member" in table_names:
             # Storage-wide reset has no original member/entity authority. Reject
             # before dropping any session table; partial provenance is unknown.

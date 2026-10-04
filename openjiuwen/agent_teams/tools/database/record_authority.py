@@ -13,6 +13,9 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Callable
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import Session
+
 from openjiuwen.core.controller.schema.execution_origin import (
     ExecutionOrigin,
     current_execution_origin,
@@ -260,7 +263,7 @@ class _BoundWrite:
                     session is not None
                     and (
                         session.get_transaction() is not transaction
-                        or session.bind is not self.operation.database.engine
+                        or not self.guard.transaction_matches(session)
                     )
                 )
             ):
@@ -320,10 +323,34 @@ class MemberRecordWrites:
             raise TypeError("member authorizer must be a live MemberRecordAuthorizer")
         self.database, self.authorizer = database, authorizer
 
+    def transaction_matches(self, session):
+        """Check the actual ORM sinks, not only AsyncSession's default bind."""
+        from openjiuwen.agent_teams.tools.models import Team, TeamMember
+
+        engine = self.database.engine
+        if (type(session) is not AsyncSession or type(session.sync_session) is not Session
+                or session.bind is not engine or session.sync_session.bind is not engine.sync_engine):
+            return False
+        return all(
+            session.sync_session.get_bind(mapper=model) is engine.sync_engine
+            and session.sync_session.get_bind(clause=model.__table__) is engine.sync_engine
+            for model in (Team, TeamMember)
+        )
+
     def references(self, dao):
         """Pure checks of the actual DAO and DB before any host callback."""
         database = self.database
         sessions = getattr(database, "_sessions", None)
+        factory = getattr(database, "session_local", None)
+        # The original TeamDatabase uses one standard writer engine. Mapper
+        # binds/custom Session classes could route writes elsewhere while the
+        # factory object and its default bind remain unchanged.
+        if (type(factory) is not async_sessionmaker or factory.class_ is not AsyncSession
+                or type(factory.kw) is not dict
+                or set(factory.kw) != {"bind", "autoflush", "expire_on_commit"}
+                or factory.kw["autoflush"] is not False
+                or factory.kw["expire_on_commit"] is not False):
+            raise MemberRecordDenied("governed member requires the original single-engine session factory")
         if (
             sessions is None
             or dao._sessions is not sessions

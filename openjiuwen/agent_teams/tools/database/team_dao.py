@@ -105,7 +105,7 @@ class TeamDao:
 
         async with self._sessions.write() as session:
             check_admission()
-            if authorizer is not None and session.bind is not record_writes.database.engine:
+            if authorizer is not None and not record_writes.transaction_matches(session):
                 raise MemberRecordDenied("original team delete transaction database changed")
             result = await session.execute(select(Team).where(Team.team_name == team_name))
             team = result.scalar_one_or_none()
@@ -118,6 +118,8 @@ class TeamDao:
             ))).scalars().all())
             transaction = session.get_transaction()
             check_admission()
+            if authorizer is not None and not record_writes.transaction_matches(session):
+                raise MemberRecordDenied("original team delete transaction database changed")
             bounds = []
             for member in members:
                 check_admission()
@@ -154,6 +156,8 @@ class TeamDao:
                 raise MemberRecordDenied("team roster changed before deletion")
             await session.flush()
             check_admission()
+            if authorizer is not None and not record_writes.transaction_matches(session):
+                raise MemberRecordDenied("original team delete transaction database changed")
             for bound, before, proposed in bounds:
                 bound.check(before, proposed, session=session, transaction=transaction)
             await session.commit()
