@@ -7,6 +7,7 @@ The public proof is available only while its final authorizers are executing.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
@@ -23,6 +24,26 @@ ToolAuthorizer = Callable[[BeforeToolContext], Awaitable[bool | None]]
 _DENIED = "[PERMISSION_DENIED] Final tool authority rejected the operation"
 
 
+@dataclass(frozen=True, slots=True)
+class _HostSource:
+    operation: BeforeToolContext
+    current: Callable[[], bool]
+    task: asyncio.Task
+    runtime_kwargs: Mapping
+    kwargs_snapshot: Mapping
+
+    def is_current(self) -> bool:
+        """Require the original live task, source and runtime dependencies."""
+        return (
+            asyncio.current_task() is self.task
+            and not self.task.done()
+            and not self.task.cancelling()
+            and self.current() is True
+            and self.runtime_kwargs.keys() == self.kwargs_snapshot.keys()
+            and all(value is self.runtime_kwargs[key] for key, value in self.kwargs_snapshot.items())
+        )
+
+
 @dataclass
 class _Call:
     ctx: Any
@@ -32,6 +53,7 @@ class _Call:
     active: bool = True
     inherited: bool = False
     protected: bool = False
+    host: _HostSource | None = None
 
 
 @dataclass
@@ -43,8 +65,10 @@ class _Invocation:
     resolve_executor: Any
     card: Any
     card_id: str
+    card_name: str
     runtime_kwargs: Mapping
     active: bool = True
+    final_entered: bool = False
 
 
 _CALL: ContextVar[_Call | None] = ContextVar("native_authority_call", default=None)
@@ -92,11 +116,14 @@ def bind_tool_authorizer(ctx: Any, callback: ToolAuthorizer) -> None:
 @contextmanager
 def _tool_call_scope(ctx: Any):
     parent = _CALL.get()
+    if parent is not None and parent.host is not None:
+        raise PermissionError(_DENIED)
     call = _Call(
         ctx,
-        ctx.agent,
-        ctx.session,
+        getattr(ctx, "agent", None),
+        getattr(ctx, "session", None),
         inherited=bool(parent and (parent.protected or parent.inherited)),
+        host=ctx if isinstance(ctx, _HostSource) else None,
     )
     token = _CALL.set(call)
     try:
@@ -120,7 +147,10 @@ def _tool_execution_scope(ctx: Any, executor: Any, resolve_executor: Callable, r
         return
     if call is None or not call.active or call.ctx is not ctx or not call.callbacks:
         raise PermissionError(_DENIED)
-    if ctx.agent is not call.agent or ctx.session is not call.session:
+    if call.host is not None:
+        if not call.host.is_current():
+            raise PermissionError(_DENIED)
+    elif ctx.agent is not call.agent or ctx.session is not call.session:
         raise PermissionError(_DENIED)
     registered = _registered(executor)
     if registered is None or executor.invoke is not registered[0]:
@@ -132,6 +162,7 @@ def _tool_execution_scope(ctx: Any, executor: Any, resolve_executor: Callable, r
         resolve_executor,
         executor.card,
         executor.card.id,
+        executor.card.name,
         MappingProxyType(dict(runtime_kwargs)),
     )
     token = _EXECUTION.set(invocation)
@@ -145,12 +176,24 @@ def _tool_execution_scope(ctx: Any, executor: Any, resolve_executor: Callable, r
 def _operation(invocation: _Invocation, inputs: Any, kwargs: dict) -> BeforeToolContext:
     call = invocation.call
     ctx = call.ctx
-    tool_call = ctx.inputs.tool_call
     final_runtime = {key: value for key, value in kwargs.items() if key != "inputs"}
     if final_runtime.keys() != invocation.runtime_kwargs.keys() or any(
         value is not invocation.runtime_kwargs[key] for key, value in final_runtime.items()
     ):
         raise PermissionError(_DENIED)
+    if call.host is not None:
+        if not isinstance(inputs, Mapping) or not call.host.is_current():
+            raise PermissionError(_DENIED)
+        source = call.host.operation
+        return BeforeToolContext(
+            source.agent_name,
+            source.provider_session_id,
+            source.turn_id,
+            source.call_id,
+            source.tool_name,
+            inputs,
+        )
+    tool_call = ctx.inputs.tool_call
     if (
         not isinstance(inputs, Mapping)
         or kwargs.get("session") is not call.session
@@ -174,6 +217,7 @@ def _fingerprint(operation: BeforeToolContext) -> tuple:
     return (
         operation.agent_name,
         operation.provider_session_id,
+        operation.turn_id,
         operation.call_id,
         operation.tool_name,
         json.dumps(json_value_to_builtin(operation.arguments), sort_keys=True, allow_nan=False),
@@ -194,6 +238,12 @@ class ToolInvocation:
     _callbacks: tuple = field(repr=False)
     _live: list[bool] = field(default_factory=lambda: [True], repr=False)
 
+    @property
+    def source_operation(self) -> BeforeToolContext | None:
+        """Original host object, distinct from the final transformed operation."""
+        source = self._invocation.call.host
+        return source.operation if source is not None else None
+
     def is_current(self) -> bool:
         """Check lifetime, exact execution identity, and final inputs after awaits."""
         invocation = self._invocation
@@ -203,12 +253,14 @@ class ToolInvocation:
                 and self._live[0]
                 and invocation.active
                 and invocation.call.active
+                and (invocation.call.host is None or invocation.call.host.is_current())
                 and _EXECUTION.get() is invocation
                 and _CALL.get() is invocation.call
                 and invocation.executor is self.executor
                 and invocation.resolve_executor() is self.executor
                 and self.executor.card is invocation.card
                 and self.executor.card.id == invocation.card_id
+                and self.executor.card.name == invocation.card_name
                 and self.executor.invoke is invocation.outer_invoke
                 and _registered(self.executor) == (invocation.outer_invoke, self.original_invoke)
                 and invocation.original_invoke is self.original_invoke
@@ -237,6 +289,10 @@ async def _authorize_final_invocation(executor: Any, original: Any, args: tuple,
             or invocation.original_invoke is not original
         ):
             raise PermissionError(_DENIED)
+        if invocation.call.host is not None:
+            if invocation.final_entered:
+                raise PermissionError(_DENIED)
+            invocation.final_entered = True
         if len(args) > 1:
             raise PermissionError(_DENIED)
         bound = inspect.signature(original).bind(*args, **kwargs)
@@ -271,3 +327,50 @@ async def _authorize_final_invocation(executor: Any, original: Any, args: tuple,
 def _deny_protected_stream() -> None:
     if _mandatory():
         raise PermissionError("[PERMISSION_DENIED] Mandatory authority does not support Tool.stream")
+
+
+async def invoke_tool_with_authority(
+    executor: Any,
+    inputs: Mapping,
+    *,
+    operation: BeforeToolContext,
+    authorizer: ToolAuthorizer,
+    runtime_kwargs: Mapping,
+    is_current: Callable[[], bool],
+    resolve_executor: Callable[[], Any],
+) -> Any:
+    """Invoke a host-owned Tool through its existing final mandatory boundary.
+
+    No Agent or global registration is created. The host supplies a fixed source
+    operation and must verify its resource/session ownership in ``is_current``
+    and ``authorizer``. The authorizer sees actual transformed inputs; its live
+    ToolInvocation.source_operation retains the original object for host proof.
+    """
+    task = asyncio.current_task()
+    parent = _CALL.get()
+    registered = _registered(executor)
+    if task is None or not isinstance(operation, BeforeToolContext) or not isinstance(inputs, Mapping):
+        raise PermissionError(_DENIED)
+    if (
+        not isinstance(runtime_kwargs, Mapping)
+        or "inputs" in runtime_kwargs
+        or any(not isinstance(key, str) for key in runtime_kwargs)
+        or not all(callable(value) for value in (authorizer, is_current, resolve_executor))
+    ):
+        raise PermissionError(_DENIED)
+    if registered is None or executor.invoke is not registered[0]:
+        raise PermissionError(_DENIED)
+    if parent is not None and parent.host is not None:
+        raise PermissionError(_DENIED)
+    if json.dumps(json_value_to_builtin(operation.arguments), sort_keys=True, allow_nan=False) != json.dumps(
+        json_value_to_builtin(inputs), sort_keys=True, allow_nan=False
+    ):
+        raise PermissionError(_DENIED)
+    snapshot = MappingProxyType(dict(runtime_kwargs))
+    source = _HostSource(operation, is_current, task, runtime_kwargs, snapshot)
+    if not source.is_current() or resolve_executor() is not executor:
+        raise PermissionError(_DENIED)
+    with _tool_call_scope(source):
+        bind_tool_authorizer(source, authorizer)
+        with _tool_execution_scope(source, executor, resolve_executor, snapshot):
+            return await registered[0](inputs=inputs, **snapshot)
