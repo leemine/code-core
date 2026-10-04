@@ -292,3 +292,34 @@ async def test_actual_cold_goal_attempts_keep_new_pending_source_to_completion()
     finally:
         await harness.stop()
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_readmission_owner_callback_cannot_retarget_store_same_sid(monkeypatch):
+    from openjiuwen.core.session.agent import create_agent_session
+
+    c = await setup(monkeypatch)
+    old_store = c.agent.goal_manager._store
+    old_session = old_store._session
+    replacement = create_agent_session(session_id=old_session.get_session_id(), card=c.agent.card)
+    SessionGoalStore(replacement).save(old_store.load())
+
+    def prepare(instance, content, origin):
+        selector = instance.goal_manager._capture_idle_readmission(expected_record=instance.goal_manager.peek())
+
+        def checker():
+            old_store._session = replacement
+
+        plan = _NativeGoalReadmissionPlan(selector, "attach", checker)
+        c.plans.append(plan)
+        return plan
+
+    object.__setattr__(c.harness._host_hooks, "prepare_goal_readmission", prepare)
+    try:
+        _, lifecycle = await submit(c, "A")
+        assert lifecycle[-1] is TurnEventKind.FAILED
+        assert not c.dispatched
+        assert c.agent.goal_manager._execution_origin is None
+    finally:
+        old_store._session = old_session
+        await c.harness.stop()

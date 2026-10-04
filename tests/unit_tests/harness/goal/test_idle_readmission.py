@@ -329,3 +329,58 @@ async def test_existing_non_active_and_legacy_attach_remain_available(idle, stat
         stream = await c.agent._attach_output_for_origin(c.origin)
         assert not c.h.events.has_pending_work()
     assert stream is not None
+
+
+@pytest.mark.asyncio
+async def test_readmission_commit_await_cannot_replace_store_backing(idle):
+    c = idle
+    record = c.h.store.load()
+    record.status = GoalStatus.PAUSED
+    c.h.store.save(record)
+    p = c.plan("resume")
+    original = c.h.store._session
+    from openjiuwen.harness.goal.store import SessionGoalStore
+
+    replacement = type(original)()
+
+    async def commit():
+        SessionGoalStore(replacement).save(c.h.store.load())
+        c.h.store._session = replacement
+
+    c.h.session.commit = commit
+    try:
+        with pytest.raises(PermissionError):
+            await c.apply(p)
+        assert not c.h.events.has_pending_work()
+        assert not c.agent.has_output_stream()
+    finally:
+        c.h.store._session = original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_record", [True, False])
+async def test_ordinary_managed_attach_rejects_same_sid_backing_replacement(idle, has_record):
+    c = idle
+    if has_record:
+        record = c.h.store.load()
+        record.status = GoalStatus.PAUSED
+        c.h.store.save(record)
+    else:
+        c.h.store.clear()
+    original = c.h.store._session
+    replacement = type(original)()
+    from openjiuwen.harness.goal.store import SessionGoalStore
+
+    if has_record:
+        SessionGoalStore(replacement).save(c.h.store.load())
+
+    def checker():
+        c.h.store._session = replacement
+
+    origin = ExecutionOrigin(object(), _checker=checker)
+    try:
+        with pytest.raises(PermissionError):
+            await c.agent._attach_output_for_origin(origin)
+        assert not c.agent.has_output_stream()
+    finally:
+        c.h.store._session = original
