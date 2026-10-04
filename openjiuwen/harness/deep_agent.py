@@ -3849,6 +3849,14 @@ class DeepAgent(BaseAgent):
             raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, cause=errors[0],
                               error_msg="owned interaction round failed during stop")
 
+    async def _attach_output_for_goal_readmission(self, plan, *, new_origin, check_previous):
+        from openjiuwen.harness.goal.readmission import attach
+        return await attach(self, plan, new_origin, check_previous)
+
+    async def _attach_output_for_origin(self, origin):
+        from openjiuwen.harness.goal.readmission import attach_existing
+        return await attach_existing(self, origin)
+
     async def attach_output(self) -> Optional[InteractionOutputStream]:
         """Claim the sole output reader for this interaction.
 

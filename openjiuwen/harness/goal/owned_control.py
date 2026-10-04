@@ -49,6 +49,7 @@ class _OwnedGoalControl:
     execution: object
     lock: object
     session_id: str
+    session: object
     origin: ExecutionOrigin
     target: object
     original: object
@@ -60,6 +61,8 @@ class _OwnedGoalControl:
         expected, slot = (self.original, self.slot) if initial else (p.expected, p.slot)
         if (
             m._store is not self.store
+            or self.store._session is not self.session
+            or self.target.session is not self.session
             or m._execution is not self.execution
             or m._control_lock is not self.lock
             or self.store.session_id != self.session_id
@@ -144,12 +147,15 @@ def capture(manager, origin):
         raise PermissionError("Goal control requires its original live source")
     store, execution, lock = manager._store, manager._execution, manager._control_lock
     record, slot, session_id = store.load(), manager._execution_origin, store.session_id
+    session = store._session
     if record is not None and (
         slot is None or slot[:3] != (record.session_id, record.goal_id, record.revision) or slot[3] is not origin
     ):
         raise PermissionError("Goal control source does not own the record")
     target = execution._capture_owned_control(record, origin)
-    result = _OwnedGoalControl(manager, store, execution, lock, session_id, origin, target, _identity(record), slot)
+    result = _OwnedGoalControl(
+        manager, store, execution, lock, session_id, session, origin, target, _identity(record), slot
+    )
     result._check_static(initial=True)
     execution._check_owned_control(target, live=True)
     return result

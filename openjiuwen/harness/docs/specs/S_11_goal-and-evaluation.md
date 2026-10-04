@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/goal/` |
 | 最近一次修订日期 | 2026-10-05 |
-| 关联 feature | `F_10_provider-neutral-goal-driver.md`, `F_35_goal-live-execution-origin.md`, `F_37_owned-goal-control.md` |
+| 关联 feature | `F_38_goal-idle-readmission.md`、 `F_10_provider-neutral-goal-driver.md`, `F_35_goal-live-execution-origin.md`, `F_37_owned-goal-control.md` |
 
 ## 范围 / 边界
 
@@ -146,3 +146,24 @@ clear 取消的 facade 仍 live。退出完成/ACK 的静态复核不新增 acti
 核原记录/slot/execution refs、operation Task/applied、结果对象与完整返回字段；给
 调用者的是新副本。宿主仍核临时凭据、owner/Binding 与原 entry 退出证明。queued clear
 无 attempt、未确认退出、set/pause/resume 都不能借用此例外，执行前仍用原 live checker。
+
+
+## 显式 idle Goal 新准入（F38）
+
+`GoalManager._capture_idle_readmission(expected_record=...)` 固定原记录/slot 与 Native
+执行所有者。`NativeHostHooks.prepare_goal_readmission` 在 managed Pending 的 attach 前
+返回私有 `_NativeGoalReadmissionPlan`，包含 selector/action/同步 checker/原 previous_turn。
+热路径复核同 source 的原 Pending 精确退出回执；冷路径仅首个受管 Pending 且无原工作。
+`DeepAgent._attach_output_for_goal_readmission` 按原 send→control 锁取得 sole lease 后
+绑定实际新 Pending source；idle resume 递增 revision，ACTIVE attach 保留 id/revision。
+回调之后纯事实复核，跨 commit 再验，失败仅清本次 lease/原队列项。原 F37 live 控制、
+legacy None 及单消费者不变。来源不入 GoalRecord，不据持久记录恢复权限。宿主新 producer
+和 EOF 触发的权限构造不属于此 core 接口。详见 F_38_goal-idle-readmission.md。
+
+空闲重新准入与普通受管输出 attach 固定原 `SessionGoalStore._session` 对象，不能仅凭
+同 session_id 或相同 GoalRecord 接受另一存储 Session。原 checker 后、跨 commit/attach
+await 后均复核该归属，失败不排队、不触发自动 ensure。
+
+活动 Goal 控制 selector 在来源回调前固定实际 Store backing Session，并要求其与
+原 attempt Session 为同一对象。capture/apply/commit await 后/clear ACK 的静态复核
+均检查该对象归属；同 ID 和相同记录不是可替换存储的证明。

@@ -83,6 +83,7 @@ AgentFactory = Callable[[HarnessContext], "DeepAgent | Awaitable[DeepAgent]"]
 @dataclass(slots=True, eq=False)
 class _NativePendingTurn(PendingTurn):
     _origin: ExecutionOrigin | None = field(default=None, repr=False)
+    _harness_owner: object = field(default=None, repr=False)
     _agent: Any = field(default=None, repr=False)
     _session: Any = field(default=None, repr=False)
     _admissions: set[asyncio.Task] = field(default_factory=set, repr=False)
@@ -253,6 +254,7 @@ class DeepAgentHarness(SerializedTurnHarness):
         self._language = language
         self._agent: DeepAgent | None = None
         self._agent_session: Any = None
+        self._first_managed_turn: _NativePendingTurn | None = None
 
     @property
     def agent(self) -> DeepAgent | None:
@@ -275,6 +277,7 @@ class DeepAgentHarness(SerializedTurnHarness):
             )
 
     async def _open_session(self, context: HarnessContext) -> str | None:
+        self._first_managed_turn = None
         from openjiuwen.core.session.agent import create_agent_session
 
         try:
@@ -400,7 +403,7 @@ class DeepAgentHarness(SerializedTurnHarness):
         if agent is None or session is None or context is None:
             raise HarnessStateError("managed Native session is unavailable")
         turn = _NativePendingTurn(content=content, message_id=message_id, turn_id=turn_id,
-                                  accepted_mode=accepted_mode, _agent=agent, _session=session)
+                                  accepted_mode=accepted_mode, _agent=agent, _session=session, _harness_owner=self)
         def check():
             if (self._agent is not agent or self._agent_session is not session or self._context is not context
                     or self._capture_owned_turn(turn.turn_id) is not turn or self._stopping
@@ -408,6 +411,8 @@ class DeepAgentHarness(SerializedTurnHarness):
                 raise HarnessStateError("original Native Turn no longer accepts work")
             source._check_current()
         turn._origin = ExecutionOrigin(source.host_value, _checker=check)
+        if self._first_managed_turn is None:
+            self._first_managed_turn = turn
         return turn
 
     def _check_original_native_turn(self, turn):
@@ -549,13 +554,79 @@ class DeepAgentHarness(SerializedTurnHarness):
                 await self._wait_turn_exit_barrier(turn)
         return self._build_result(turn, state, timing)
 
+    def _goal_readmission_proof(self, turn, plan):
+        from openjiuwen.harness.goal.readmission import _IdleGoalReadmission, _NativeGoalReadmissionPlan
+        if (type(plan) is not _NativeGoalReadmissionPlan
+                or type(plan.selector) is not _IdleGoalReadmission
+                or plan.selector.agent is not turn._agent or plan.selector.session is not turn._session):
+            raise HarnessStateError("Goal readmission target is not this Native Session")
+        old, slot = plan.previous_turn, plan.selector.slot
+        barrier = None if old is None else getattr(old, '_exit', None)
+        round_handle = None if barrier is None else barrier.round_handle
+        cleanup = None if barrier is None else barrier.cleanup
+        confirmed = None if barrier is None else barrier.confirmed
+        admissions = () if barrier is None else barrier.admissions
+        interactions = () if barrier is None else barrier.interactions
+
+        def check_previous():
+            self._check_original_native_turn(turn)
+            if turn._harness_owner is not self or self.active_turn is not turn:
+                raise HarnessStateError("Goal readmission lost its exact admitted Turn")
+            if old is None:
+                if slot is not None or self._first_managed_turn is not turn:
+                    raise HarnessStateError("cold Goal admission requires the first fresh managed Turn")
+                return
+            if (type(old) is not _NativePendingTurn or old is turn or old._harness_owner is not self
+                    or old._agent is not turn._agent or old._session is not turn._session
+                    or slot is None or old._origin is not slot[3]
+                    or type(barrier) is not _NativeTurnExit or old._exit is not barrier
+                    or barrier.turn is not old or barrier.round_handle is not round_handle
+                    or barrier.cleanup is not cleanup or barrier.confirmed is not confirmed
+                    or barrier.admissions is not admissions or barrier.interactions is not interactions
+                    or not old._execution_done.is_set() or old._admissions
+                    or confirmed is None or not confirmed.done() or confirmed.cancelled()
+                    or cleanup is None or not cleanup.done() or cleanup.cancelled()
+                    or round_handle is None or round_handle.agent is not turn._agent
+                    or round_handle.session is not turn._session or round_handle.origin is not old._origin):
+                raise HarnessStateError("original Goal Pending exit is unconfirmed")
+            confirmed.result()
+            cleanup.result()
+            if (any(not task.done() for task in admissions)
+                    or self._capture_turn_interactions(old)
+                    or any(not entry.handle_done.is_set() or entry.handling
+                           or (entry.cancel_task is not None and (
+                               not entry.cancel_task.done() or entry.cancel_task.cancelled()
+                               or entry.cancel_task.exception() is not None)) for entry in interactions)
+                    or turn._agent._event_manager._capture_origin_work(old._origin)
+                    or turn._agent._capture_owned_round(old._origin) is not None):
+                raise HarnessStateError("original Goal Pending still owns work")
+            turn._agent._check_origin_exit(round_handle)
+        check_previous()
+        return check_previous
+
     async def _run_round(
         self, agent: DeepAgent, turn: PendingTurn, state: _TurnState, query: Any, *, resuming: bool = False
     ) -> None:
         managed = isinstance(turn, _NativePendingTurn)
         if managed:
             async def attach():
-                stream = await agent.attach_output()
+                hook = self._host_hooks.prepare_goal_readmission
+                plan = hook(agent, turn.content, turn._origin) if hook is not None and not resuming else None
+                if inspect.iscoroutine(plan):
+                    plan.close()
+                    raise TypeError("Goal readmission preparation must be synchronous")
+                turn._origin._check_current()
+                if plan is None:
+                    stream = await agent._attach_output_for_origin(turn._origin)
+                else:
+                    proof = self._goal_readmission_proof(turn, plan)
+                    try:
+                        stream = await agent._attach_output_for_goal_readmission(
+                            plan, new_origin=turn._origin, check_previous=proof)
+                    finally:
+                        # Even a failed commit/late checker keeps its exact
+                        # acquired lease on the original exit owner.
+                        turn._stream = plan._run.stream
                 turn._stream = stream
                 return stream
             stream = await self._managed_admission(turn, attach)
