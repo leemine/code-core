@@ -76,6 +76,9 @@ from openjiuwen.agent_teams.tools.models import (
 )
 from openjiuwen.core.common.logging import team_logger
 
+from .effect_authority import MemberEffectOperation as MemberEffectOperation
+from .effect_authority import MemberEffectPermit as MemberEffectPermit
+from .record_authority import MemberCommittedFacts as MemberCommittedFacts
 from .record_authority import MemberRecordAuthorizer as MemberRecordAuthorizer
 from .record_authority import MemberRecordDenied as MemberRecordDenied
 from .record_authority import MemberRecordStamp as MemberRecordStamp
@@ -232,7 +235,14 @@ class TeamDatabase:
         await _drop_cur_session_tables(self.engine)
 
     async def cleanup_all_runtime_state(self) -> tuple[list[str], list[str]]:
-        """Delete all dynamic team tables and clear static team tables."""
+        """Delete all dynamic team tables and clear static team tables.
+
+        SQLite reserves its original database write transaction. PostgreSQL
+        uses a transaction table lock (not validated against a real service in
+        this change). MySQL/other dialects with a member table fail closed:
+        their DDL cannot preserve the implemented transaction barrier, even if
+        current rows happen to be legacy. Per-member operations are unchanged.
+        """
         await self._ensure_initialized()
         if self.engine is None:
             return [], []
@@ -265,7 +275,15 @@ class TeamDatabase:
         team row also counts as success here since the goal is "no
         trace left".
         """
+        # The existing git/repo-lock/worker path has no final source guard.
+        # Do not enter it on behalf of a governed member, even with a live
+        # record permit: record deletion cannot authorize earlier FS effects.
+        if self._member_record_writes.authorizer is not None:
+            from .record_authority import MemberRecordDenied
+            raise MemberRecordDenied("governed force-delete workspace cleanup is not supported")
         await self._ensure_initialized()
+        from .effect_authority import require_legacy_team
+        await require_legacy_team(self, team_name)
         cleanup_success = True
         from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
 

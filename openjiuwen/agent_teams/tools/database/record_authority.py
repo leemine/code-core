@@ -162,6 +162,58 @@ class MemberWritePermit(_LiveOnly):
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class MemberRecordAuthorizer(_LiveOnly):
     bind_for_write: Callable[[MemberWriteOperation, ExecutionOrigin], MemberWritePermit]
+    bind_for_effect: Callable | None = field(default=None, repr=False)
+
+
+def _immutable_value(value):
+    """Type-sensitive issuance snapshot; bool must not impersonate revision 1."""
+    if type(value) is tuple:
+        return (tuple, tuple(_immutable_value(item) for item in value))
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return (type(value), value)
+    raise MemberRecordDenied("committed record contains mutable fields")
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
+class MemberCommittedFacts(_LiveOnly):
+    """Immutable successful-write facts, never permission to read or execute.
+
+    Consumers still need original live parent/member registration authority and
+    must compare the complete current DAO row with this original committed row.
+    These in-process facts contain private row content and must not enter wire,
+    persistence, audit payloads, or general UI responses.
+    """
+
+    database: object
+    dao: object
+    sessions: object
+    transaction: object
+    kind: str
+    team_name: str
+    member_name: str
+    actor: object
+    entity: object
+    source_id: str
+    stamp: MemberRecordStamp
+    record: tuple
+    _database_references: tuple = field(default=(), repr=False)
+    _database_objects: tuple = field(default=(), repr=False)
+
+    def _facts(self):
+        return (
+            id(self),
+            id(self.database),
+            id(self.dao),
+            id(self.sessions),
+            id(self.transaction),
+            _immutable_value((self.kind, self.team_name, self.member_name, self.source_id)),
+            id(self.actor),
+            id(self.entity),
+            _immutable_value(_stamp_facts(self.stamp)),
+            _immutable_value(self.record),
+            _immutable_value(self._database_references),
+            tuple(id(value) for value in self._database_objects),
+        )
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False, init=False)
@@ -174,12 +226,15 @@ class MemberWriteReceipt(_LiveOnly):
     _transaction: object
     _source_check: Callable[[], None]
     _issued_facts: tuple
+    _committed_record: MemberCommittedFacts
 
     def __init__(self):
         raise TypeError("receipts originate only from a committed member transaction")
 
     @classmethod
-    def _committed(cls, operation, stamp, permit, transaction, source_check):
+    def _committed(
+        cls, operation, stamp, permit, transaction, source_check, record, database_references, database_objects
+    ):
         result = object.__new__(cls)
         for key, value in (
             ("operation", operation),
@@ -189,35 +244,90 @@ class MemberWriteReceipt(_LiveOnly):
             ("_source_check", source_check),
         ):
             object.__setattr__(result, key, value)
+        committed = MemberCommittedFacts(
+            operation.database,
+            operation._dao,
+            operation._sessions,
+            transaction,
+            operation.kind,
+            operation.team_name,
+            operation.member_name,
+            permit.actor,
+            permit.entity,
+            permit.source_id,
+            MemberRecordStamp(*_stamp_facts(stamp)),
+            tuple(record),
+            database_references,
+            database_objects,
+        )
+        object.__setattr__(result, "_committed_record", committed)
         object.__setattr__(result, "_issued_facts", result._facts())
         return result
 
     def _facts(self):
+        op, permit = self.operation, self._permit
+        if type(op) is not MemberWriteOperation or type(permit) is not MemberWritePermit:
+            raise MemberRecordDenied("invalid committed receipt references")
+        if type(self._committed_record) is not MemberCommittedFacts:
+            raise MemberRecordDenied("invalid committed record facts")
         return (
-            id(self.operation),
-            _stamp_facts(self.stamp),
-            id(self._permit),
+            id(self),
+            id(op),
+            id(op.database),
+            id(op._dao),
+            id(op._sessions),
+            _immutable_value((op.kind, op.team_name, op.member_name, op.changes)),
+            _immutable_value(_stamp_facts(self.stamp)),
+            id(permit),
+            id(permit.operation),
+            id(permit.origin),
+            id(permit.entity),
+            id(permit.actor),
+            _immutable_value(permit.source_id),
+            _immutable_value(_stamp_facts(permit.expected_stamp)),
+            id(permit.check_current),
             id(self._transaction),
             id(self._source_check),
+            self._committed_record._facts(),
         )
 
+    def check_integrity(self) -> None:
+        """Pure original issuance check: no host callback or origin installation.
+
+        This does not check current ownership, DB row existence, or permission.
+        It remains usable after the original writer scope ends for comparing
+        facts under a separately authorized current read.
+        """
+        try:
+            valid = type(self) is MemberWriteReceipt and self._facts() == self._issued_facts
+        except (AttributeError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise MemberRecordDenied("original committed receipt changed")
+
+    def committed_facts(self) -> MemberCommittedFacts:
+        """Return original immutable transaction/row facts, not a current grant."""
+        self.check_integrity()
+        return self._committed_record
+
     def check_current(self) -> None:
-        """Recheck original live source before host retention/current delivery.
+        """Recheck original live writer source before immediate host retention.
 
         A committed-but-unconfirmed receipt still fails this check after its
-        source expires; its transaction fact alone is never new authorization.
+        source expires; pure transaction facts never replace current authority.
         """
-        if self._facts() != self._issued_facts:
-            raise MemberRecordDenied("original committed receipt changed")
+        self.check_integrity()
         _sync(self._source_check)
-        if self._facts() != self._issued_facts:
-            raise MemberRecordDenied("original committed receipt changed")
+        self.check_integrity()
 
 
 class _BoundWrite:
     def __init__(self, guard, operation, origin, permit):
         self.guard, self.operation, self.origin, self.permit = guard, operation, origin, permit
         self._facts = self._snapshot()
+        self._database_objects = (guard, operation.database.engine, operation.database.session_local,
+                                  operation._sessions._write_lock, guard.authorizer,
+                                  guard.authorizer.bind_for_write)
         self._checking = False
         self._invalid = False
 
@@ -306,7 +416,8 @@ class _BoundWrite:
     def committed(self, stamp, transaction, before, proposed):
         """Keep the confirmed transaction fact even if source changes during commit."""
         receipt = MemberWriteReceipt._committed(
-            self.operation, stamp, self.permit, transaction, lambda: self.check(before, proposed)
+            self.operation, stamp, self.permit, transaction, lambda: self.check(before, proposed), proposed,
+            self._facts[0], self._database_objects,
         )
         try:
             receipt.check_current()
@@ -366,7 +477,7 @@ class MemberRecordWrites:
             id(sessions),
             id(dao),
             id(self.authorizer),
-            id(self.authorizer.bind_for_write),
+            id(getattr(self.authorizer, "bind_for_write", None)),
             id(database.engine),
             id(database.session_local),
             id(sessions._write_session_local),

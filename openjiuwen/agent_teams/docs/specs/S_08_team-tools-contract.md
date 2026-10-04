@@ -651,3 +651,30 @@ SQLite 全量清理在原事务内先取得数据库 write reservation，再检�
 独立数据库实例不能在检查和清理之间插入已授权成员。PostgreSQL 对原 member 表取事务锁
 （未做真实服务验证）。无法跨 DDL 保持同一屏障的 MySQL 全量清理在 member 表存在时拒绝，
 包括当次只有 legacy 行的情况；逐成员原授权操作不因此开放或关闭。
+
+### 原 workspace 副作用前置能力（F_122）
+
+MemberRecordAuthorizer 的可选 bind_for_effect 仅为原 spawn 操作绑定 live 来源；不可由 wire
+重建，不代替 member DAO 的原事务授权/CAS。来源、Backend/DB、placement/config 和原输入须
+在首 await 前捕获，读后及每个同步写入口前重验。真实 committed receipt 只交原 permit 的
+同步 on_committed，保存到宿主已有 member 登记槽；回调失败必须保留 committed-but-unconfirmed
+事实。受管 force_delete 的 git/worker 最终消费尚无检查，首入口拒绝，不把 DAO 后置拒绝当保护。
+
+外层决定 FS 副作用的 legacy 查询绑定原 writer 的实际 DB/DAO/factory 与 mapper/table 路由；
+不能用另一 read replica 的空结果放行。复用原 DbSessions 的查询写锁仅到查询完成，不跨文件
+副作用持锁；这仍不是跨进程并发创建受管成员与 FS 的资源事务。
+
+### 原提交事实与当前权限分离（F_123）
+
+MemberWriteReceipt.check_integrity / committed_facts 是原实例/字段的纯发行校验，不调用原
+写入来源，也不授予任何当前权限。返回完整不可变原 row/stamp/transaction 事实；当前读取
+必须另外证明原 parent/member registration 与原数据库来源，再逐字段对照，不从当前DB补签。
+原 check_current 继续要求原写入来源，后台不得通过重装旧 origin 绕过它。事实不可进普通 wire。
+
+### 原 receipt 关联的纯事实查询（F_124）
+
+`MemberDao.read_committed_member(receipt)` 在原 writer transaction 内核对发行时固定的
+DB/DAO/sessions/engine/factory 和实际 mapper 目的地，完整匹配 row/stamp 后返回原
+不可变 facts。它不调用原 writer checker、不恢复 ExecutionOrigin、不授予当前读取权。
+宿主仍需当前 parent/entity/credential 与最终发送检查；查询返回后不保持数据库 fence。
+旧 get_member/legacy 查询不改变。

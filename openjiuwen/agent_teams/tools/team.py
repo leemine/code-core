@@ -699,17 +699,6 @@ class TeamBackend:
             through to ``ok`` so legacy ``if await spawn_member(...): ...``
             patterns keep working.
         """
-        existing = await self.db.member.get_member(member_name, self.team_name)
-        if existing is not None:
-            return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
-        if isolation is not None and isolation != "worktree":
-            return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
-
-        if not await self.db.team.team_exists(self.team_name):
-            return MemberOpResult.fail(
-                f"Team {self.team_name} does not exist; call build_team first"
-            )
-
         from openjiuwen.agent_teams.tools.member_options import build_member_options
 
         options = build_member_options(
@@ -719,6 +708,50 @@ class TeamBackend:
             worktree_isolation=isolation,
             permissions_override=permissions_override,
         )
+
+        from openjiuwen.agent_teams.tools.database.effect_authority import (
+            BoundMemberEffect, MemberEffectOperation, require_legacy_team,
+        )
+        from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.paths import get_openjiuwen_home, team_member_workspace_dir
+
+        database, team_name = self.db, self.team_name
+        card_json = agent_card.model_dump_json()
+        effect = None
+
+        def effect_facts():
+            return (
+                id(self.db), self.team_name, self.member_name, self.is_leader,
+                id(self._workspace_manager), id(self.workspace_cache), self._spec_evolution_enabled,
+                self.leader_member_name, tuple(m.member_name for m in self.predefined_members),
+                self._member_workspace_prefix, get_session_id(), str(get_openjiuwen_home()),
+                str(team_member_workspace_dir(self.team_name, member_name)), agent_card.model_dump_json(),
+            )
+
+        if database._member_record_writes.authorizer is not None:
+            operation = MemberEffectOperation(
+                database, self, "spawn_workspace", team_name, member_name, get_session_id(),
+                (display_name, card_json, desc, prompt, status.value, execution_status.value,
+                 mode.value, role.value, options),
+                effect_facts(),
+            )
+            effect = BoundMemberEffect(database, self, operation, effect_facts)
+
+        existing = await database.member.get_member(member_name, team_name)
+        if effect is not None:
+            effect.check()
+        if existing is not None:
+            return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
+        if isolation is not None and isolation != "worktree":
+            return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
+
+        team_exists = await database.team.team_exists(team_name)
+        if effect is not None:
+            effect.check()
+        if not team_exists:
+            return MemberOpResult.fail(
+                f"Team {self.team_name} does not exist; call build_team first"
+            )
 
         # Resolve the latest identity from the evolvable md before writing the
         # db row. ``prepare_member_workspace`` builds the in-team root first
@@ -732,12 +765,18 @@ class TeamBackend:
         # This closes the first-roster race: by the time the leader renders the
         # roster, the cache already carries the evolved value and the db row is an
         # evolved-value snapshot, not the spec baseline.
+        if effect is None:
+            await require_legacy_team(database, team_name)
+        else:
+            effect.check()
         desc_to_write, prompt_to_write = desc, prompt
         if self._spec_evolution_enabled and self.workspace_cache is not None:
             from openjiuwen.agent_teams.team_workspace.binder import (
                 prepare_member_workspace,
             )
 
+            if effect is not None:
+                effect.check()
             prepare_member_workspace(
                 team_name=self.team_name,
                 member_name=member_name,
@@ -750,6 +789,8 @@ class TeamBackend:
             )
             from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
 
+            if effect is not None:
+                effect.check()
             resolved_desc, resolved_prompt = WorkspaceAssembler(
                 cache=self.workspace_cache
             ).write_member_identity(
@@ -763,19 +804,24 @@ class TeamBackend:
             if resolved_prompt is not None:
                 prompt_to_write = resolved_prompt
 
-        success = await self.db.member.create_member(
+        if effect is not None:
+            effect.check()
+        success = await database.member.create_member(
             member_name=member_name,
             team_name=self.team_name,
             display_name=display_name,
-            agent_card=agent_card.model_dump_json(),
-            status=status,
+            agent_card=card_json,
+            status=status.value if effect is not None else status,
             role=role.value,
             desc=desc_to_write,
-            execution_status=execution_status,
+            execution_status=execution_status.value if effect is not None else execution_status,
             mode=mode.value,
             prompt=prompt_to_write,
             options=options,
+            **({"return_receipt": True} if effect is not None else {}),
         )
+        if effect is not None and success:
+            effect.committed(success)
         if not success:
             return MemberOpResult.fail(f"Database rejected create_member for {member_name} in team {self.team_name}")
 
