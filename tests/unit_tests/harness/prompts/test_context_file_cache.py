@@ -167,3 +167,98 @@ async def test_distinct_files_do_not_collide(tmp_path: Path) -> None:
 
     assert "agent file body" in agent_result
     assert "soul file body" in soul_result
+
+
+@pytest.mark.asyncio
+async def test_real_local_optional_context_absence_is_quiet_and_later_creation_is_read(tmp_path, monkeypatch, caplog):
+    """The real local reader must not emit errors for absent optional files."""
+    from unittest.mock import AsyncMock
+    from openjiuwen.core.sys_operation.config import LocalWorkConfig
+    from openjiuwen.core.sys_operation.sys_operation import SysOperation, SysOperationCard
+
+    path = tmp_path / "HEARTBEAT.md"
+    operation = SysOperation(SysOperationCard(
+        id="optional-context", mode=OperationMode.LOCAL,
+        work_config=LocalWorkConfig(sandbox_root=[str(tmp_path)], restrict_to_sandbox=True),
+    ))
+    fs = operation.fs()
+    read = AsyncMock(wraps=fs.read_file)
+    monkeypatch.setattr(fs, "read_file", read)
+    workspace = _FakeWorkspace(path)
+    for _ in range(3):
+        assert await _read_context_file(operation, workspace, "HEARTBEAT.md") is None
+    read.assert_not_awaited()
+    assert not [record for record in caplog.records if record.levelno >= 40]
+    assert str(path) not in context_module._CONTEXT_FILE_CACHE
+    path.write_text("Run the synthetic workspace check.\n", encoding="utf-8")
+    assert await _read_context_file(operation, workspace, "HEARTBEAT.md") == path.read_text()
+    read.assert_awaited_once_with(str(path))
+
+
+@pytest.mark.asyncio
+async def test_observed_absence_evicts_old_cache_before_same_stamp_recreation(agent_md):
+    """An observed missing path cannot revive its previous same-stamp cache."""
+    operation = _FakeSysOperation()
+    workspace = _FakeWorkspace(agent_md)
+    original = await _read_context_file(operation, workspace, "AGENT.md")
+    original_stat = agent_md.stat()
+    agent_md.unlink()
+    assert await _read_context_file(operation, workspace, "AGENT.md") is None
+    assert str(agent_md) not in context_module._CONTEXT_FILE_CACHE
+    replacement = original.replace("real", "next")
+    assert len(replacement) == len(original)
+    agent_md.write_text(replacement, encoding="utf-8")
+    os.utime(agent_md, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert await _read_context_file(operation, workspace, "AGENT.md") == replacement
+    assert len(operation.fs().reads) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [OperationMode.SANDBOX, None])
+async def test_host_absence_does_not_skip_remote_or_unknown_operation(tmp_path, mode):
+    """A missing host path says nothing about a remote filesystem."""
+    from unittest.mock import AsyncMock
+    operation = _FakeSysOperation(mode)
+    operation.fs().read_file = AsyncMock(return_value=SimpleNamespace(
+        code=0, data=SimpleNamespace(content="Remote content must still be read."),
+    ))
+    path = tmp_path / "absent.md"
+    result = await _read_context_file(operation, _FakeWorkspace(path), "AGENT.md")
+    assert result == "Remote content must still be read."
+    operation.fs().read_file.assert_awaited_once_with(str(path))
+    assert context_module._CONTEXT_FILE_CACHE == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [PermissionError("denied"), OSError("stat unavailable"), NotADirectoryError("not a directory")])
+async def test_non_missing_stat_errors_keep_original_read_path(agent_md, monkeypatch, error):
+    """Unknown/inaccessible is not known absent and must not suppress the read."""
+    original_stat = Path.stat
+    def stat(path, *args, **kwargs):
+        if path == agent_md:
+            raise error
+        return original_stat(path, *args, **kwargs)
+    operation = _FakeSysOperation()
+    monkeypatch.setattr(Path, "stat", stat)
+    result = await _read_context_file(operation, _FakeWorkspace(agent_md), "AGENT.md")
+    assert "real content" in result
+    assert operation.fs().reads == [str(agent_md)]
+    assert context_module._CONTEXT_FILE_CACHE == {}
+
+
+@pytest.mark.asyncio
+async def test_existing_file_still_uses_real_local_sandbox_authorization(tmp_path, caplog):
+    """Quiet absence handling must not become an alternate file-content reader."""
+    from openjiuwen.core.sys_operation.config import LocalWorkConfig
+    from openjiuwen.core.sys_operation.sys_operation import SysOperation, SysOperationCard
+
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    denied = tmp_path / "outside.md"
+    denied.write_text("Synthetic content outside the allowed root.\n", encoding="utf-8")
+    operation = SysOperation(SysOperationCard(
+        id="context-sandbox-deny", mode=OperationMode.LOCAL,
+        work_config=LocalWorkConfig(sandbox_root=[str(allowed)], restrict_to_sandbox=True),
+    ))
+    assert await _read_context_file(operation, _FakeWorkspace(denied), "AGENT.md") is None
+    assert [record for record in caplog.records if record.levelno >= 40]

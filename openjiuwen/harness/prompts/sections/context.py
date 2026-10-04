@@ -134,12 +134,17 @@ def _local_context_file_stamp(sys_operation, full_path: Path) -> tuple[int, int]
 
     Returns:
         ``(mtime_ns, size)`` for a local, stat-able file; None when the read is
-        not local or the file cannot be stat'd, meaning it must not be cached.
+        not local or stat is otherwise unavailable, meaning it must not be cached.
+
+    Raises:
+        FileNotFoundError: A local optional file is known to be absent.
     """
     if getattr(sys_operation, "mode", None) != OperationMode.LOCAL:
         return None
     try:
         stat_result = full_path.stat()
+    except FileNotFoundError:
+        raise
     except OSError:
         return None
     return stat_result.st_mtime_ns, stat_result.st_size
@@ -177,8 +182,15 @@ async def _read_context_file(
     if full_path is None:
         return None
 
-    stamp = _local_context_file_stamp(sys_operation, full_path)
     cache_key = str(full_path)
+    try:
+        stamp = _local_context_file_stamp(sys_operation, full_path)
+    except FileNotFoundError:
+        # Missing is optional, not an error-producing read. Do not cache this
+        # absence: a later creation must be read even if its stamp is reused.
+        with _CONTEXT_FILE_CACHE_LOCK:
+            _CONTEXT_FILE_CACHE.pop(cache_key, None)
+        return None
     if stamp is not None:
         with _CONTEXT_FILE_CACHE_LOCK:
             cached = _CONTEXT_FILE_CACHE.get(cache_key)

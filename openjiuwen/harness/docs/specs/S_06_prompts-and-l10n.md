@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/prompts/`（67 文件） |
-| 最近一次修订日期 | 2026-08-23 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-10-04 |
+| 关联 feature | `F_34_optional-context-missing.md` |
 
 ## 范围 / 边界
 
@@ -52,6 +52,10 @@ report。`prompts/` 67 文件是 DeepAgent 的"输入面"，只定义契约，�
    截断用户内容。任何透传给 LLM 的用户内容必须先过这两道。
 7. **`prompts/__init__.py` 的 `__all__` 是契约**；`from openjiuwen.harness.prompts import sections`
    暴露子包供引用（`# noqa: F401` 刻意）。
+
+8. **可选 context 文件缺失**：本地 stat 明确 FileNotFoundError 时返回 None，移除该路径
+   旧缓存但不缓存 missing；文件后来创建仍读取。远端、未知 mode 及其它 stat 错误
+   继续原 SysOperation.read_file，权限与错误语义不变。参见 F_34。
 
 ## 接口契约
 
