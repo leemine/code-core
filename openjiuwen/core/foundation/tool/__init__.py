@@ -2,8 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 from openjiuwen.core.foundation.tool.authority import (
+    ToolExecution,
     ToolInvocation,
     bind_tool_authorizer,
+    current_tool_execution,
     current_tool_invocation,
     invoke_tool_with_authority,
 )
@@ -32,8 +34,10 @@ __all__ = [
     "Input",
     "Output",
     "tool",
+    "ToolExecution",
     "ToolInvocation",
     "bind_tool_authorizer",
+    "current_tool_execution",
     "current_tool_invocation",
     "invoke_tool_with_authority",
     # all tools

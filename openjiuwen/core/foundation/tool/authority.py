@@ -2,7 +2,8 @@
 """Mandatory authorization at the final Native invocation boundary.
 
 Bindings belong to one AbilityManager call, not an agent, Turn, or wire payload.
-The public proof is available only while its final authorizers are executing.
+The authorization proof covers final callbacks; the execution certificate covers
+only the registered original method after those callbacks have succeeded.
 """
 
 from __future__ import annotations
@@ -34,9 +35,12 @@ class _HostSource:
 
     def is_current(self) -> bool:
         """Require the original live task, source and runtime dependencies."""
+        return asyncio.current_task() is self.task and self.is_current_origin()
+
+    def is_current_origin(self) -> bool:
+        """Recheck an existing source, never admit another host invocation."""
         return (
-            asyncio.current_task() is self.task
-            and not self.task.done()
+            not self.task.done()
             and not self.task.cancelling()
             and self.current() is True
             and self.runtime_kwargs.keys() == self.kwargs_snapshot.keys()
@@ -69,11 +73,14 @@ class _Invocation:
     runtime_kwargs: Mapping
     active: bool = True
     final_entered: bool = False
+    task: asyncio.Task | None = field(default_factory=asyncio.current_task, repr=False)
+    execution: ToolExecution | None = field(default=None, repr=False)
 
 
 _CALL: ContextVar[_Call | None] = ContextVar("native_authority_call", default=None)
 _EXECUTION: ContextVar[_Invocation | None] = ContextVar("native_authority_execution", default=None)
 _PROOF: ContextVar[ToolInvocation | None] = ContextVar("native_authority_proof", default=None)
+_METHOD_EXECUTION: ContextVar[ToolExecution | None] = ContextVar("tool_method_execution", default=None)
 _REGISTERED: dict[int, tuple] = {}
 
 
@@ -173,7 +180,9 @@ def _tool_execution_scope(ctx: Any, executor: Any, resolve_executor: Callable, r
         _EXECUTION.reset(token)
 
 
-def _operation(invocation: _Invocation, inputs: Any, kwargs: dict) -> BeforeToolContext:
+def _operation(
+    invocation: _Invocation, inputs: Any, kwargs: dict, *, origin_only: bool = False
+) -> BeforeToolContext:
     call = invocation.call
     ctx = call.ctx
     final_runtime = {key: value for key, value in kwargs.items() if key != "inputs"}
@@ -182,7 +191,10 @@ def _operation(invocation: _Invocation, inputs: Any, kwargs: dict) -> BeforeTool
     ):
         raise PermissionError(_DENIED)
     if call.host is not None:
-        if not isinstance(inputs, Mapping) or not call.host.is_current():
+        if not isinstance(inputs, Mapping):
+            raise PermissionError(_DENIED)
+        source_current = call.host.is_current_origin() if origin_only else call.host.is_current()
+        if not source_current:
             raise PermissionError(_DENIED)
         source = call.host.operation
         return BeforeToolContext(
@@ -277,7 +289,114 @@ def current_tool_invocation() -> ToolInvocation | None:
     return proof if proof is not None and proof.is_current() else None
 
 
-async def _authorize_final_invocation(executor: Any, original: Any, args: tuple, kwargs: dict) -> None:
+@dataclass(frozen=True, slots=True)
+class ToolExecution:
+    """Read-only origin evidence for an already authorized, running method.
+
+    This is not a grant for another operation. Internal I/O consumers must check
+    their actual post-parse arguments and resource authority independently.
+    """
+
+    operation: BeforeToolContext
+    executor: Any
+    agent_context: Any
+    original_invoke: Any
+    owning_task: asyncio.Task
+    _invocation: _Invocation = field(repr=False)
+    _kwargs: dict = field(repr=False)
+    _callbacks: tuple = field(repr=False)
+    _live: list[bool] = field(default_factory=lambda: [True], repr=False)
+
+    @property
+    def source_operation(self) -> BeforeToolContext | None:
+        """Original host source identity, or None for AbilityManager calls."""
+        source = self._invocation.call.host
+        return source.operation if source is not None else None
+
+    def is_current_origin(self) -> bool:
+        """Validate a captured origin, including from an inherited SDK task.
+
+        Does not bypass a task-bound host predicate. The caller cannot acquire
+        a new certificate or bind a new tool operation through this method.
+        """
+        invocation = self._invocation
+        try:
+            return (
+                _METHOD_EXECUTION.get() is self
+                and self._live[0]
+                and invocation.execution is self
+                and invocation.task is self.owning_task
+                and not self.owning_task.done()
+                and not self.owning_task.cancelling()
+                and invocation.active
+                and invocation.call.active
+                and _EXECUTION.get() is invocation
+                and _CALL.get() is invocation.call
+                and invocation.executor is self.executor
+                and invocation.resolve_executor() is self.executor
+                and self.executor.card is invocation.card
+                and self.executor.card.id == invocation.card_id
+                and self.executor.card.name == invocation.card_name
+                and self.executor.invoke is invocation.outer_invoke
+                and _registered(self.executor) == (invocation.outer_invoke, self.original_invoke)
+                and invocation.original_invoke is self.original_invoke
+                and tuple(invocation.call.callbacks) == self._callbacks
+                and _fingerprint(_operation(
+                    invocation, json_value_to_builtin(self.operation.arguments), self._kwargs, origin_only=True
+                )) == _fingerprint(self.operation)
+            )
+        except Exception:
+            return False
+
+    def is_current(self) -> bool:
+        """Require the original owning task as well as current origin evidence."""
+        try:
+            return asyncio.current_task() is self.owning_task and self.is_current_origin()
+        except RuntimeError:
+            return False
+
+
+def current_tool_execution() -> ToolExecution | None:
+    """Capture execution evidence only inside the original method's own task."""
+    execution = _METHOD_EXECUTION.get()
+    return execution if execution is not None and execution.is_current() else None
+
+
+@contextmanager
+def _mask_tool_execution():
+    """Callbacks and nested tool entry must not borrow a parent's certificate."""
+    token = _METHOD_EXECUTION.set(None)
+    try:
+        yield
+    finally:
+        _METHOD_EXECUTION.reset(token)
+
+
+@contextmanager
+def _original_tool_execution(executor: Any, original: Any, operation: BeforeToolContext | None, kwargs: dict):
+    invocation = _EXECUTION.get()
+    task = asyncio.current_task()
+    execution = None
+    live = [True]
+    if operation is not None and invocation is not None and invocation.task is task:
+        if (invocation.execution is None and invocation.executor is executor
+                and invocation.original_invoke is original):
+            execution = ToolExecution(operation, executor, invocation.call.ctx, original, task,
+                                      invocation, kwargs, tuple(invocation.call.callbacks), live)
+            invocation.execution = execution
+    token = _METHOD_EXECUTION.set(execution)
+    try:
+        yield
+    finally:
+        live[0] = False
+        if execution is not None:
+            invocation.execution = None
+        _METHOD_EXECUTION.reset(token)
+
+
+async def _authorize_final_invocation(
+    executor: Any, original: Any, args: tuple, kwargs: dict
+) -> BeforeToolContext | None:
     if not _mandatory():
         return
     invocation = _EXECUTION.get()
@@ -320,6 +439,7 @@ async def _authorize_final_invocation(executor: Any, original: Any, args: tuple,
         finally:
             live[0] = False
             _PROOF.reset(token)
+        return operation
     except Exception as exc:
         raise PermissionError(_DENIED) from exc
 

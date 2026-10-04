@@ -15,6 +15,8 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.tool.authority import (
     _authorize_final_invocation,
     _deny_protected_stream,
+    _mask_tool_execution,
+    _original_tool_execution,
     _register_tool_invocation,
 )
 from openjiuwen.core.foundation.tool.exposure import ToolExposure
@@ -149,8 +151,9 @@ class _ToolMeta(ABCMeta):
                               tool_id=instance.card.id,
                               inputs=(a, kw))
             try:
-                await _authorize_final_invocation(instance, _original_invoke, a, kw)
-                result = await _original_invoke(*a, **kw)
+                operation = await _authorize_final_invocation(instance, _original_invoke, a, kw)
+                with _original_tool_execution(instance, _original_invoke, operation, kw):
+                    result = await _original_invoke(*a, **kw)
                 await _fw.trigger(ToolCallEvents.TOOL_CALL_FINISHED,
                                   tool_name=instance.card.name,
                                   tool_id=instance.card.id,
@@ -217,9 +220,17 @@ class _ToolMeta(ABCMeta):
             input_event=ToolCallEvents.TOOL_INVOKE_INPUT,
             output_event=ToolCallEvents.TOOL_INVOKE_OUTPUT,
         )(fn)
-        fn = _fw.emit_after(ToolCallEvents.TOOL_INVOKE_OUTPUT, extra_kwargs=_extra)(fn)
-        instance.invoke = fn
-        _register_tool_invocation(instance, fn, _original_invoke)
+        _output_invoke = _fw.emit_after(ToolCallEvents.TOOL_INVOKE_OUTPUT, extra_kwargs=_extra)(fn)
+
+        # Retain the existing four-layer unwrap contract. The framework's full
+        # output wrapper still runs; this outer layer only masks origin evidence.
+        @wraps(fn)
+        async def _scoped_invoke(*a, **kw):
+            with _mask_tool_execution():
+                return await _output_invoke(*a, **kw)
+
+        instance.invoke = _scoped_invoke
+        _register_tool_invocation(instance, _scoped_invoke, _original_invoke)
 
         fn = instance.stream
         fn = _fw.emit_before(ToolCallEvents.TOOL_STREAM_INPUT, extra_kwargs=_extra)(fn)
