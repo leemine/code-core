@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
+    from openjiuwen.core.foundation.llm import Model
+    from openjiuwen.harness.schema.deep_agent_spec import ModelSpec
     from openjiuwen.harness.workspace.workspace import Workspace
 
 # Key under ``BuildContext.extras`` where ``DeepAgentSpec.resolve_parts``
@@ -65,6 +67,9 @@ class BuildContext:
             Platform-filled (``None`` for members bound to a project); surfaced
             to the team policy rail so the team info body names it only when the
             member has no project of its own.
+        model_factory: Optional live model constructor, receiving the original
+            ModelSpec and derived member/child context. Never serialized.
+        subagent_name: Child identity, distinct from enclosing member fields.
         extras: Escape-hatch mapping for platform handles when subclassing is
             not convenient.
     """
@@ -77,6 +82,10 @@ class BuildContext:
     project_dir: Optional[str] = None
     team_outputs_dir: Optional[str] = None
     extras: dict[str, Any] = field(default_factory=dict)
+    # Live capability: never put this callback in a serialized context seed.
+    model_factory: Optional[Callable[["ModelSpec", "BuildContext"], "Model"]] = None
+    # A child agent is distinct from its enclosing Team member identity.
+    subagent_name: Optional[str] = None
 
     def derive(self, **overrides: Any) -> "BuildContext":
         """Return a shallow per-member copy with ``overrides`` applied.
