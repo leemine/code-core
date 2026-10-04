@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_30_owned-round-admission-fence.md`、`F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md`、`F_28_round-execution-origin.md`、`F_29_scheduler-submitted-admission.md` |
+| 关联 feature | `F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md`、`F_28_round-execution-origin.md`、`F_29_scheduler-submitted-admission.md` |
 
 ## 范围 / 边界
 
@@ -221,3 +221,13 @@ F29 原扫描锁内捕获 receipt 后，wrapper 词法 scope 固定 manager、st
 原 Round 只等待保存的 submission/wrapper；未派发证明须 submission done、原存储对象与
 非可派发状态及 owned Map 联合成立。单纯 None、业务 COMPLETED 或响应 Future 完成均不
 证明退出。未知事实保留原 record，阻止终态与后继派发；确认退出的旧 wrapper 不影响新对象。
+
+## 精确来源取消与输出尾部
+
+EventManager 的私有 `_capture_origin_work` / `_discard_captured_work` 只按原对象身份
+处理已捕获 work；LoopQueues `_discard_origin` 仅移除同原 live origin 的输入，保留
+其他来源顺序及队列 unfinished 计数。它们不创建队列，也不从 latest/current 推断来源。
+上层必须先关闭该来源的 admission 并 join 正在提交的原 Task，再捕获这些队列。
+
+Round 的原 wrapper 尾部及 forwarded marker 属于完成条件。托管 Native 超时不会
+清除这些对象或推动后继 Turn；普通 legacy cancel_round 的既有合同保持。
