@@ -32,7 +32,7 @@ TeamHarness/StreamController）的决策见 [[F_28_native-harness-team-adoption]
 | `start` | `async (*, session: Session \| None = None)` | 初始化并启动 supervisor；可注入外部 session |
 | `stop` | `async ()` | 取消在途工作、关闭输出、转 TERMINATED |
 | `outputs` | `() -> AsyncIterator[OutputSchema]` | queue-backed 输出迭代器（单消费者，`_END` sentinel 终止） |
-| `send` | `async (content, *, immediate=False) -> str` | 提交输入，immediate=True 注入当前 round，False 进 follow-up 队列（整批驱动下一轮，见下）；返回 seq id |
+| `send` | `async (content, *, immediate=False, origin=ORIGIN_UNSET) -> str` | 提交输入，immediate=True 注入当前 round，False 进 follow-up 队列（整批驱动下一轮，见下）；返回 seq id |
 | `abort` | `async (*, immediate=False)` | 中止当前 round → IDLE。graceful（False）在 iteration 边界停；immediate（True）硬取消 + 回退最近边界 |
 | `pause` | `async ()` | 在最近的 inner ReAct iteration 边界暂停 → PAUSED，round 保留可续 |
 | `resume` | `async (*, query=None)` | 从保留的 context 原地续跑 paused round（不追加新的 user turn）。`query` 驱动**冷恢复**（harness 已重建、context 来自 checkpoint）；warm 恢复忽略它 |
@@ -220,3 +220,17 @@ BLOCK 背压遵循公共协议：stop 时消费者需继续排空事件。
 最终工具权限 rail。当前显式拒绝非空 `HarnessContext.tool_authorizer`，在构造 NativeHarness、
 创建 Session 或启动 supervisor 前抛出 `UnsupportedHarnessCapabilityError`；不传回调的旧路径
 保持兼容。独立接线并验证普通、恢复与子 Agent 执行边界前，不得通过继承支持标记开放该能力。
+
+## 进程内原始执行来源
+
+`ExecutionOrigin` 是宿主生成的 opaque live-only 来源，不是授权结论。显式 scope 捕获原来源，
+既有 InboxMessage、ActiveRound、InputEvent/Task.inputs 与 coordination EventMessage 保留
+同一个对象；序列化/恢复不包含来源，也不从最新回合或字符串重新生成。词法 scope 退出只
+使自身句柄失效，origin 本体仍可排队；宿主另行核验原 admission 生命周期。
+
+Native send/steer/follow-up/pause/resume/retry 不混合不同来源。旧 None 路径保持原行为；
+非 None 来源内容不写入持久化的旧 follow-up 字符串字段。恢复缺来源的内容不能加入受管
+回合。公共 owner 检查核对 actual Native/inner agent、Session、active origin 对象，None
+始终不是所有权证明。成员来源不等于子 Agent 或其它成员的授权。
+
+以上 origin 扩展仅由普通 Native/TeamHarness 实现；MemberRuntime 的跨 Provider 基础表面仍保留原 send 参数。External/跨进程不因这项载体扩展获得来源或授权。详见 F_119_live-execution-origin。

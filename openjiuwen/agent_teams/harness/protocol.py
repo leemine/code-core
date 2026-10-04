@@ -15,9 +15,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, AsyncIterator, Protocol, runtime_checkable
 
+from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.core.controller.schema.execution_origin import ORIGIN_UNSET
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.agent_teams.harness.state import HarnessState
 
 if TYPE_CHECKING:
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -60,7 +61,7 @@ class HarnessProtocol(Protocol):
         """Return a queue-backed async iterator over output chunks."""
         ...
 
-    async def send(self, content: "str | InteractiveInput", *, immediate: bool = False) -> str:
+    async def send(self, content: "str | InteractiveInput", *, immediate: bool = False, origin=ORIGIN_UNSET) -> str:
         """Submit input; ``immediate=True`` injects into the current round.
 
         ``content`` may be an ``InteractiveInput`` to resume a pending

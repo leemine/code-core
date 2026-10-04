@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-09-28 |
+| 最近一次修订日期 | 2026-10-04 |
 | 关联 feature | `F_15_browser-execution-identity.md` |
 
 ## 范围 / 边界
@@ -130,3 +130,7 @@ async def cleanup_subagent_task_resources(subagent: Any) -> None
 - `create_*_agent` 复用 `create_deep_agent` 构造流 —— `S_01`。
 - Browser preset 后续接入 Profile/Instance/Task 身份时必须复用 `S_20`，不得把 legacy
   `browser_key`、Profile 名或 user-data-dir 当作授权主体。
+
+## 子 Agent 来源隔离
+
+`_run_subagent_with_observable_stream` 与 `NativeSubagentExecution.run_turn` 在现有实际 child 驱动边界安装 `execution_origin_scope(None)`；不自动借用 parent 或 Team member 原来源。无治理的旧路径保持原返回和清理行为；治理宿主必须独立授权 child，缺独立来源拒绝。该来源隔离不创建额外生命周期，不改变子 Agent Session/任务队列归属。见 F_23_live-execution-origin。

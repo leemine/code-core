@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-10-04 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -172,3 +172,7 @@ class TaskLoopController(Controller):
   `StopConditionEvaluator` 族 —— 本 spec（停止条件落地）。
 - `handle_task_completion` 中 `TaskCompletionRail` 的 goal 评估钩子 —— `S_04` / `S_11`。
 - `SESSION_SPAWN_TASK_TYPE` 的消费方 —— `S_05`（session 工具）。
+
+## Live execution origin
+
+`TaskLoopController.submit_round(..., origin=...)` 将原宿主 `ExecutionOrigin` 放入 InputEvent 私有来源；省略时捕获当前词法 scope，None 明确遮蔽。原 Task.inputs 保存对象身份，TaskLoopEventExecutor 据此安装 scope，TaskScheduler 的完成/失败/交互事件沿原任务来源返回。混合来源拒绝，恢复任务没有来源，不从当前调用者补齐。原 LoopQueues 允许同来源 live envelope，drain 在返回文本前比较原来源；AgentCallbackContext 使用同一队列与相同比较，不新增队列。来源不进入 JSON，不代表权限；授权仍由宿主负责。词法 scope 不跨 async-generator yield。见 F_23_live-execution-origin。

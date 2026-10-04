@@ -25,6 +25,11 @@ from openjiuwen.agent_teams.schema.external_runtime_reliability import (
     ExternalRuntimePhase,
 )
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
+from openjiuwen.core.controller.schema.execution_origin import (
+    ORIGIN_UNSET,
+    OriginCarrier,
+    resolve_execution_origin,
+)
 
 
 class TeamTopic(str, Enum):
@@ -645,7 +650,7 @@ _EVENT_CLASS_MAP: Dict[Type[BaseEventMessage], str] = {  # model class -> event_
 }
 
 
-class EventMessage(BaseModel):
+class EventMessage(OriginCarrier):
     """Wrapper that pairs a TeamEvent type with its event payload."""
 
     event_type: str = Field(..., description="Event type from TeamEvent constants")
@@ -653,7 +658,7 @@ class EventMessage(BaseModel):
     sender_id: str = Field(default="", description="Node ID of the sender, used to filter self-published messages")
 
     @classmethod
-    def from_event(cls, event: BaseEventMessage) -> "EventMessage":
+    def from_event(cls, event: BaseEventMessage, *, origin=ORIGIN_UNSET) -> "EventMessage":
         """Construct an EventMessage from a concrete BaseEventMessage instance.
 
         Args:
@@ -665,7 +670,9 @@ class EventMessage(BaseModel):
         event_type = _EVENT_CLASS_MAP.get(type(event))
         if event_type is None:
             raise ValueError(f"Unknown event class: {type(event).__name__}")
-        return cls(event_type=event_type, payload=event.model_dump())
+        return cls(event_type=event_type, payload=event.model_dump()).with_execution_origin(
+            resolve_execution_origin(origin)
+        )
 
     def get_payload(self) -> BaseEventMessage:
         """Deserialize payload to the concrete BaseEventMessage subclass based on event_type.

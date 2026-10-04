@@ -8,12 +8,12 @@ so it can be driven by the core TaskScheduler.
 from __future__ import annotations
 
 from typing import (
+    TYPE_CHECKING,
     Any,
     AsyncIterator,
     Callable,
     Dict,
     Tuple,
-    TYPE_CHECKING,
 )
 
 from openjiuwen.core.common.logging import logger
@@ -33,6 +33,11 @@ from openjiuwen.core.controller.schema.dataframe import (
 from openjiuwen.core.controller.schema.event import (
     EventType,
     InputEvent,
+)
+from openjiuwen.core.controller.schema.execution_origin import (
+    current_execution_origin,
+    execution_origin_scope,
+    shared_execution_origin,
 )
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import (
@@ -79,6 +84,23 @@ class TaskLoopEventExecutor(TaskExecutor):
         Yields:
             ControllerOutputChunk for each output.
         """
+        tasks = await self._task_manager.get_task(task_filter=self._make_filter(task_id))
+        origin = shared_execution_origin(tasks[0].inputs or []) if tasks else None
+        iterator = self._execute_with_origin(task_id, session, tasks)
+        try:
+            while True:
+                with execution_origin_scope(origin):
+                    try:
+                        chunk = await anext(iterator)
+                    except StopAsyncIteration:
+                        break
+                yield chunk
+        finally:
+            with execution_origin_scope(origin):
+                await iterator.aclose()
+
+    async def _execute_with_origin(self, task_id, session, tasks):
+        """Drive the unchanged task body under its original live source."""
         agent = self._deep_agent
         if agent.react_agent is None:
             logger.warning(
@@ -87,9 +109,6 @@ class TaskLoopEventExecutor(TaskExecutor):
             )
             return
 
-        tasks = await self._task_manager.get_task(
-            task_filter=self._make_filter(task_id)
-        )
 
         query: Any = task_id
         raw_input: Any = None
@@ -154,7 +173,7 @@ class TaskLoopEventExecutor(TaskExecutor):
         # Build iteration context for lifecycle.
         # Rails may modify iter_inputs.query in
         # before_task_iteration (e.g. task_instruction template).
-        loop_event = InputEvent.from_user_input(query)
+        loop_event = InputEvent.from_user_input(query).with_execution_origin(current_execution_origin())
         iter_inputs = TaskIterationInputs(
             iteration=iteration,
             loop_event=loop_event,

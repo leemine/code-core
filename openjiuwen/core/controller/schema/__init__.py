@@ -14,16 +14,27 @@ This module defines all controller-related data models, including:
 """
 
 
-from openjiuwen.core.controller.schema.dataframe import TextDataFrame, FileDataFrame, JsonDataFrame, DataFrame
-from openjiuwen.core.controller.schema.event import (
-    EventType, Event, InputEvent, TaskInteractionEvent, TaskCompletionEvent, TaskFailedEvent
-)
-from openjiuwen.core.controller.schema.intent import IntentType, Intent
-from openjiuwen.core.controller.schema.task import TaskStatus, Task
 from openjiuwen.core.controller.schema.controller_output import (
-    ControllerOutputPayload, ControllerOutputChunk, ControllerOutput
+    ControllerOutput,
+    ControllerOutputChunk,
+    ControllerOutputPayload,
 )
-
+from openjiuwen.core.controller.schema.dataframe import DataFrame, FileDataFrame, JsonDataFrame, TextDataFrame
+from openjiuwen.core.controller.schema.event import (
+    Event,
+    EventType,
+    InputEvent,
+    TaskCompletionEvent,
+    TaskFailedEvent,
+    TaskInteractionEvent,
+)
+from openjiuwen.core.controller.schema.execution_origin import (
+    ExecutionOrigin,
+    current_execution_origin,
+    execution_origin_scope,
+)
+from openjiuwen.core.controller.schema.intent import Intent, IntentType
+from openjiuwen.core.controller.schema.task import Task, TaskStatus
 
 Task.model_rebuild()
 TaskCompletionEvent.model_rebuild()
@@ -31,6 +42,9 @@ TaskInteractionEvent.model_rebuild()
 TaskFailedEvent.model_rebuild()
 
 __all__ = [
+    "ExecutionOrigin",
+    "current_execution_origin",
+    "execution_origin_scope",
     # DataFrame
     "TextDataFrame",
     "FileDataFrame",

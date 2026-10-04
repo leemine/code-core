@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.controller.schema.event import InputEvent
+from openjiuwen.core.controller.schema.execution_origin import ORIGIN_UNSET, resolve_execution_origin
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
@@ -53,6 +54,7 @@ class TaskLoopController(Controller):
         *,
         task_id: Optional[str] = None,
         resume_continuation: bool = False,
+        origin=ORIGIN_UNSET,
     ) -> None:
         """Prepare a round, build InputEvent, publish it.
 
@@ -80,7 +82,7 @@ class TaskLoopController(Controller):
         handler = self._event_handler
         round_id = handler.prepare_round()
 
-        event = InputEvent.from_user_input(query)
+        event = InputEvent.from_user_input(query).with_execution_origin(resolve_execution_origin(origin))
         event.metadata = event.metadata or {}
         event.metadata["_handler_round_id"] = round_id
         if is_follow_up:
@@ -121,7 +123,7 @@ class TaskLoopController(Controller):
             timeout=timeout,
         )
 
-    def drain_follow_up(self) -> List[str]:
+    def drain_follow_up(self, *, expected_origin=ORIGIN_UNSET) -> List[str]:
         """Drain follow-up messages from handler queues.
 
         Returns:
@@ -129,10 +131,10 @@ class TaskLoopController(Controller):
         """
         queues = self._get_interaction_queues()
         if queues is not None:
-            return queues.drain_follow_up()
+            return queues.drain_follow_up(expected_origin=expected_origin)
         return []
 
-    def enqueue_follow_up(self, msg: str) -> None:
+    def enqueue_follow_up(self, msg: str, *, origin=ORIGIN_UNSET) -> None:
         """Enqueue a follow-up message for the next outer round.
 
         Rails can use this to request a continuation or confirmation
@@ -140,9 +142,9 @@ class TaskLoopController(Controller):
         """
         queues = self._get_interaction_queues()
         if queues is not None:
-            queues.push_follow_up(msg)
+            queues.push_follow_up(msg, origin=origin)
 
-    def enqueue_steer(self, msg: str) -> None:
+    def enqueue_steer(self, msg: str, *, origin=ORIGIN_UNSET) -> None:
         """Push a steering message into the current round's steering queue.
 
         The inner ReAct loop drains this queue before each model call,
@@ -151,7 +153,13 @@ class TaskLoopController(Controller):
         """
         queues = self._get_interaction_queues()
         if queues is not None:
-            queues.push_steer(msg)
+            queues.push_steer(msg, origin=origin)
+
+    def clear_follow_up(self) -> None:
+        """Discard pending inputs without consuming their provenance."""
+        queues = self._get_interaction_queues()
+        if queues is not None:
+            queues.clear_follow_up()
 
     def has_follow_up(self) -> bool:
         """Check if follow-up messages are pending.

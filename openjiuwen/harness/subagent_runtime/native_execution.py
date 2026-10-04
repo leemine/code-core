@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.controller.schema.execution_origin import execution_origin_scope
 from openjiuwen.core.kv_cache.kv_cache_metadata import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
@@ -77,39 +78,40 @@ class NativeSubagentExecution:
         on_chunk: ChunkCallback | None = None,
         on_result: ResultCallback,
     ) -> None:
-        if self._closed:
-            raise RuntimeError("subagent execution is closed")
-        session = self._session_factory()
-        aggregator = TurnOutputAggregator()
-        succeeded = False
-        try:
-            await session.pre_run()
-            await prepare_subagent_task_resources(self._agent)
-            if self._on_turn_start is not None:
-                await self._on_turn_start(session)
-            inputs = {
-                "query": request.query,
-                "conversation_id": self._subagent_id,
-            }
-            if self._include_parent_session_id:
-                inputs["parent_session_id"] = self._parent_session_id
-            stream = self._agent.stream(inputs, session=session)
-            async with contextlib.aclosing(stream):
-                async for chunk in stream:
-                    aggregator.consume(chunk)
-                    if on_chunk is not None:
-                        await on_chunk(chunk)
-            result = SubagentTurnResult(
-                output=aggregator.output(),
-                reasoning=aggregator.reasoning_text(),
-                is_error=aggregator.is_error(),
-            )
-            await on_result(result)
-            succeeded = not result.is_error
-        finally:
-            task = asyncio.create_task(self._finalize_turn(session, succeeded=succeeded))
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(task)
+        with execution_origin_scope(None):
+            if self._closed:
+                raise RuntimeError("subagent execution is closed")
+            session = self._session_factory()
+            aggregator = TurnOutputAggregator()
+            succeeded = False
+            try:
+                await session.pre_run()
+                await prepare_subagent_task_resources(self._agent)
+                if self._on_turn_start is not None:
+                    await self._on_turn_start(session)
+                inputs = {
+                    "query": request.query,
+                    "conversation_id": self._subagent_id,
+                }
+                if self._include_parent_session_id:
+                    inputs["parent_session_id"] = self._parent_session_id
+                stream = self._agent.stream(inputs, session=session)
+                async with contextlib.aclosing(stream):
+                    async for chunk in stream:
+                        aggregator.consume(chunk)
+                        if on_chunk is not None:
+                            await on_chunk(chunk)
+                result = SubagentTurnResult(
+                    output=aggregator.output(),
+                    reasoning=aggregator.reasoning_text(),
+                    is_error=aggregator.is_error(),
+                )
+                await on_result(result)
+                succeeded = not result.is_error
+            finally:
+                task = asyncio.create_task(self._finalize_turn(session, succeeded=succeeded))
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(task)
 
     async def close(self, reason: str) -> None:
         _ = reason
