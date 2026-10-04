@@ -138,3 +138,11 @@ legacy None 的队列顺序、公开控制签名、状态格式和行为保持�
 前后、ensure 与 Goal emit 前的 mutation 检查亦核原 Session phase，但不要求刚被
 clear 取消的 facade 仍 live。退出完成/ACK 的静态复核不新增 active-Round 要求；
 正常完成不能被当作新控制准入，shutdown 后则不能继续持久控制/排队/输出。
+
+
+私有 `_apply_owned_control(..., check_ack=None)` 固定原 ACK callback 身份。只有原 clear
+已完成 mutation，且原精确 drain Task 成功完成时，`selector.check_result()` 才可使用
+独立同步 ACK checker，不要求已合法结束的原 PendingTurn 再提供执行来源。回调前后
+核原记录/slot/execution refs、operation Task/applied、结果对象与完整返回字段；给
+调用者的是新副本。宿主仍核临时凭据、owner/Binding 与原 entry 退出证明。queued clear
+无 attempt、未确认退出、set/pause/resume 都不能借用此例外，执行前仍用原 live checker。

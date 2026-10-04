@@ -53,3 +53,23 @@ Session commit 本身抛异常后不猜测落盘结果、不自动重放原 muta
 原 facade 仍 live。实际 commit 前后、排队与 Goal emit 前均检查 mutation；最终退出与
 ACK 复核不把正常原 Round 完成当成新入站。commit 等待期间终止的 set/pause/clear
 不会继续排队或 emit；已经发生的存储写入仍不回滚。原终止入口与队列没有新增状态。
+
+
+## clear 完成回执与执行权限分离
+
+实际 Native Goal clear 已排空原 attempt 后，原 PendingTurn 可能先收到 terminal，随后
+原执行 source checker 合法失效。该时序不能让已确认 clear 的回应依赖一个仍可执行的
+原 Turn。私有 apply 新增可选同步 `check_ack`，与原 check_current 一样按同一 callback
+身份固定；只有 clear mutation 完成且原 `_start_owned_control_exit` 返回的精确 drain
+Task 已成功完成，`selector.check_result()` 才调用 ACK checker，跳过已结束执行源检查。
+回调前后纯核原 selector、记录/slot、execution refs、operation Task/applied、返回对象
+与原结果字段。未知/失败/未完成退出不得 ACK；普通 EOF/Future 不是退出证明。
+
+queued clear 没有原 attempt/drain，仍用执行检查；set/pause/resume 不走此例外。
+未 apply 的 check_result 拒绝；缓存响应也需重新检查，返回副本不暴露内部结果引用。
+ACK 不授予执行或修改，临时凭据/owner/原宿主 entry 与精确退出回执由宿主独立 checker
+核验。跨 Session 终态或撤权不能以放宽 mutation 条件实现 ACK。
+
+实际 Native/Goal/TaskLoop 组件反例：只延迟已确认退出的 ACK，等待真实 terminal_event
+后原实现抛原 source 过期；新接口与宿主 ACK checker 组合后正常与延迟两项均通过。
+该验证使用合成回调与模型 IO，不是真实 Provider 负向探针或锁安装验收。
