@@ -19,6 +19,7 @@ from openjiuwen.harness_protocol import (
 )
 from openjiuwen.harness_providers.opencode import OpenCodeHarness, OpenCodeHarnessConfig, OpenCodeModelConfig
 from openjiuwen.harness_providers.opencode.preflight import (
+    PRODUCT_TICKET_FIELD,
     OpenCodePreflightEndpoint,
     PreflightGate,
     gate_source,
@@ -374,15 +375,27 @@ const module = await import('data:text/javascript;base64,' + Buffer.from(product
 const productHook = (await module.Preflight())["tool.execute.before"];
 let productCalls = 0;
 globalThis.fetch=async(_,o)=>{productCalls++;return {status:200,
-  text:async()=>JSON.stringify({allowed:true,nonce:JSON.parse(o.body).nonce})}};
+  text:async()=>JSON.stringify({allowed:true,nonce:JSON.parse(o.body).nonce,ticket:"pt_"+"a".repeat(64)})}};
 const productArgs={query:{values:[1,true,null]}};
 await productHook({tool:'jiuwenswarm_product_tools_workflow',sessionID:'ses_one',callID:'call_product'},
   {args:productArgs});
 assert(Object.isFrozen(productArgs.query.values));
+assert(Object.isFrozen(productArgs));
+assert.equal(productArgs.__openjiuwen_product_ticket, 'pt_'+'a'.repeat(64));
+assert.equal(JSON.parse(JSON.stringify(productArgs)).__openjiuwen_product_ticket, 'pt_'+'a'.repeat(64));
+assert.throws(()=>{productArgs.__openjiuwen_product_ticket='forged'});
 assert.throws(()=>productArgs.query.values.push('late'));
 await assert.rejects(productHook({tool:'jiuwenswarm_product_tools_unknown',sessionID:'ses_one',callID:'call_other'},
   {args:{}}));
 assert.equal(productCalls,1);
+await assert.rejects(productHook({tool:'jiuwenswarm_product_tools_workflow',sessionID:'ses_one',callID:'call_forged'},
+  {args:{__openjiuwen_product_ticket:'a'.repeat(64)}}));
+assert.equal(productCalls,1);
+for (const ticket of [undefined, 'a'.repeat(32), 12, null]) {
+  globalThis.fetch=async(_,o)=>({status:200,text:async()=>JSON.stringify({allowed:true,nonce:JSON.parse(o.body).nonce,ticket})});
+  await assert.rejects(productHook(
+    {tool:'jiuwenswarm_product_tools_workflow',sessionID:'ses_one',callID:'call_bad'}, {args:{}}));
+}
 console.log('generated JS synthetic cases passed');
 """.replace("PRODUCT_SOURCE", json.dumps(gate_source(endpoint(product_tool_names=("workflow",)), 0.1)))
     script = script.replace("SOURCE", json.dumps(gate_source(endpoint(), 0.1)))
@@ -737,3 +750,210 @@ async def test_permission_cannot_claim_a_different_native_assistant_message():
         )
         is None
     )
+
+
+async def product_ticket(*, approve=True):
+    """Synthetic native persistence plus the real Harness permission route."""
+    from openjiuwen.harness_protocol import ToolApprovalDecision, ToolApprovalResponse
+
+    harness = prepared()
+    harness._preflight = PreflightGate(endpoint(product_tool_names=("workflow", "read")))
+    harness._context = replace(
+        harness.context,
+        mcp_servers=(
+            McpServerConfig(
+                name="jiuwenswarm_product_tools",
+                transport=McpTransport.HTTP,
+                url="http://127.0.0.1:12345/mcp",
+                headers={"Authorization": "Bearer " + harness._preflight.endpoint.token},
+            ),
+        ),
+    )
+    harness._preflight.begin(harness.active_turn, "msg_root")
+    body = payload(tool="jiuwenswarm_product_tools_workflow", args={"query": {"values": [1, True, None]}})
+
+    async def request(method, path):
+        return native_messages(body)
+
+    async def approval(value):
+        return ToolApprovalResponse(value.request_id, ToolApprovalDecision.ALLOW)
+
+    async def reply(*args):
+        assert args[-1] == {"response": "once"}
+
+    harness._transport = SimpleNamespace(request=request)
+    harness._await_host_interaction = approval
+    harness._reply_native = reply
+    answer = await harness.authorize_preflight(body)
+    assert answer["allowed"] and len(answer["ticket"]) == 67
+    if approve:
+        await harness._route_permission(
+            harness.active_turn,
+            SimpleNamespace(mark_denied=lambda _: None),
+            "permission_one",
+            body["call_id"],
+            {
+                "sessionID": body["session_id"],
+                "tool": {"messageID": "msg_assistant"},
+                "permission": body["tool"],
+                "metadata": {},
+            },
+        )
+    arguments = {**body["args"], PRODUCT_TICKET_FIELD: answer["ticket"]}
+    return harness, body, answer, arguments
+
+
+@pytest.mark.asyncio
+async def test_product_ticket_returns_original_clean_identity_and_replay_is_impossible():
+    harness, body, answer, arguments = await product_ticket()
+    operation = harness.consume_product_preflight("workflow", arguments)
+    record = harness._preflight.records[body["call_id"]]
+    assert operation is record.request and harness.is_product_preflight_current(operation)
+    assert operation.call_id == body["call_id"] and operation.turn_id == "turn-one"
+    assert operation.provider_session_id == "ses_one" and PRODUCT_TICKET_FIELD not in operation.arguments
+    assert operation.arguments["query"]["values"] == (1, True, None)
+    assert not harness.is_product_preflight_current(replace(operation))
+    assert harness.consume_product_preflight("workflow", arguments) is None
+    assert harness.is_product_preflight_current(operation)
+    assert answer["ticket"] not in repr(operation)
+    assert answer["ticket"] not in harness._preflight.tickets
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["wrong_name", "extra", "missing", "different", "bool_int", "field_copy"])
+async def test_product_ticket_mismatch_burns_ticket_before_retry(mutation):
+    harness, _, _, arguments = await product_ticket()
+    altered = json.loads(json.dumps(arguments))
+    name = "workflow"
+    if mutation == "wrong_name":
+        name = "read"
+    elif mutation == "extra":
+        altered["new_argument"] = True
+    elif mutation == "missing":
+        del altered["query"]
+    elif mutation == "different":
+        altered["query"]["values"].append("changed")
+    elif mutation == "bool_int":
+        altered["query"]["values"][1] = 1
+    else:
+        altered["query"][PRODUCT_TICKET_FIELD] = altered[PRODUCT_TICKET_FIELD]
+    assert harness.consume_product_preflight(name, altered) is None
+    assert harness.consume_product_preflight("workflow", arguments) is None
+
+
+@pytest.mark.asyncio
+async def test_nonce_is_not_ticket_and_no_approval_cannot_consume():
+    harness, body, answer, arguments = await product_ticket()
+    mixed = {**body, "call_id": "mixed", "nonce": answer["ticket"]}
+    assert not (await harness.authorize_preflight(mixed))["allowed"]
+    assert harness.consume_product_preflight("workflow", {**arguments, PRODUCT_TICKET_FIELD: body["nonce"]}) is None
+    assert harness.consume_product_preflight("workflow", arguments) is not None
+    harness, _, _, arguments = await product_ticket(approve=False)
+    assert harness.consume_product_preflight("workflow", arguments) is None
+
+
+@pytest.mark.asyncio
+async def test_model_cannot_supply_reserved_ticket_or_extra_envelope_fields():
+    harness, body, _, _ = await product_ticket()
+    for value in (
+        payload(tool=body["tool"], args={PRODUCT_TICKET_FIELD: "b" * 64}, call_id="new", nonce="b" * 32),
+        payload(tool=body["tool"], args={}, ticket="b" * 64, call_id="new", nonce="b" * 32),
+    ):
+        assert not (await harness.authorize_preflight(value))["allowed"]
+    assert set(harness._preflight.records) == {body["call_id"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    ["turn", "context", "session", "abort", "stop", "clear", "close", "generation", "root", "transport", "denied"],
+)
+@pytest.mark.parametrize("consume_first", [True, False])
+async def test_product_ticket_and_consumed_identity_die_with_original_scope(change, consume_first):
+    harness, body, _, arguments = await product_ticket()
+    operation = harness.consume_product_preflight("workflow", arguments) if consume_first else None
+    if change == "turn":
+        harness._active_turn = SimpleNamespace(turn_id="new", abort_requested=False, stop_requested=False)
+    elif change == "context":
+        harness._context = replace(harness.context, agent_name="new")
+    elif change == "session":
+        harness._session_id = "ses_new"
+    elif change == "abort":
+        harness.active_turn.abort_requested = True
+    elif change == "stop":
+        harness._stopping = True
+    elif change == "generation":
+        harness._preflight.endpoint = replace(harness._preflight.endpoint, generation="next")
+    elif change == "root":
+        harness._preflight.root_message = "msg_new"
+    elif change == "transport":
+        harness._transport = SimpleNamespace()
+    elif change == "denied":
+        harness._preflight.records[body["call_id"]].permission_allowed = False
+    else:
+        getattr(harness._preflight, change)()
+    assert not harness.is_product_preflight_current(operation)
+    assert harness.consume_product_preflight("workflow", arguments) is None
+
+
+@pytest.mark.asyncio
+async def test_product_late_first_delivery_cannot_mint_ticket_for_next_turn():
+    harness, body, _, _ = await product_ticket()
+    harness._preflight.clear()
+    harness._active_turn = SimpleNamespace(turn_id="next", abort_requested=False, stop_requested=False)
+    harness._preflight.begin(harness.active_turn, "msg_next")
+    late = {**body, "call_id": "unseen_old_call", "nonce": "b" * 32}
+
+    async def request(*_):
+        return native_messages(late)
+
+    harness._transport = SimpleNamespace(request=request)
+    answer = await harness.authorize_preflight(late)
+    assert not answer["allowed"] and "ticket" not in answer
+    assert not harness._preflight.tickets
+
+
+@pytest.mark.asyncio
+async def test_product_current_must_be_rechecked_after_host_await():
+    harness, _, _, arguments = await product_ticket()
+    operation = harness.consume_product_preflight("workflow", arguments)
+    assert harness.is_product_preflight_current(operation)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def host_resource_check():
+        entered.set()
+        await release.wait()
+        return harness.is_product_preflight_current(operation)
+
+    task = asyncio.create_task(host_resource_check())
+    await entered.wait()
+    harness._preflight.clear()
+    release.set()
+    assert not await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_product_permission_reply_failure_invalidates_ticket(cancelled):
+    harness, body, _, arguments = await product_ticket(approve=False)
+
+    async def fail_reply(*_):
+        if cancelled:
+            raise asyncio.CancelledError
+        raise RuntimeError("synthetic send failure")
+
+    harness._reply_native = fail_reply
+    with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+        await harness._route_permission(
+            harness.active_turn,
+            SimpleNamespace(mark_denied=lambda _: None),
+            "permission_one",
+            body["call_id"],
+            {
+                "sessionID": body["session_id"],
+                "tool": {"messageID": "msg_assistant"},
+                "permission": body["tool"],
+                "metadata": {},
+            },
+        )
+    assert harness.consume_product_preflight("workflow", arguments) is None
