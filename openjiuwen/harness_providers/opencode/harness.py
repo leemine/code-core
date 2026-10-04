@@ -86,6 +86,21 @@ class OpenCodeHarness(SerializedTurnHarness):
             return {"allowed": False, "nonce": ""}
         return await self._preflight.authorize(self, payload)
 
+    def consume_product_preflight(self, tool_name: str, arguments: dict) -> BeforeToolContext | None:
+        """Consume authenticated MCP wire arguments; execute only the returned clean operation.
+
+        The host still owns current product/resource authorization. Recheck the
+        exact returned object after awaits and lock acquisition with
+        ``is_product_preflight_current``. Never log the wire arguments.
+        """
+        if self._preflight is None:
+            return None
+        return self._preflight.consume_product(self, tool_name, arguments)
+
+    def is_product_preflight_current(self, operation: BeforeToolContext) -> bool:
+        """Whether this exact consumed operation still belongs to its active Turn."""
+        return self._preflight is not None and self._preflight.product_current(self, operation)
+
     supports_tool_authorizer = True
 
     def _validate_context(self, context: HarnessContext) -> None:
@@ -498,12 +513,19 @@ class OpenCodeHarness(SerializedTurnHarness):
             acc.mark_denied(call_id)
         if turn.abort_requested:
             reply = "reject"
-        await self._reply_native(
-            turn,
-            "POST",
-            f"/session/{self._session_id}/permissions/{native_request_id}",
-            {"response": reply},
-        )
+        if record is not None and record.product:
+            record.permission_allowed = reply == "once"
+        try:
+            await self._reply_native(
+                turn,
+                "POST",
+                f"/session/{self._session_id}/permissions/{native_request_id}",
+                {"response": reply},
+            )
+        except BaseException:
+            if record is not None and record.product:
+                record.permission_allowed = False
+            raise
         if abort and not turn.abort_requested:
             turn.abort_requested = True
             turn.abort_mode = AbortMode.GRACEFUL

@@ -4,7 +4,7 @@
 from .config import OpenCodeHarnessConfig, OpenCodeModelConfig
 from .harness import OpenCodeHarness
 from .native_plugins import OpenCodeNativePluginConfig, opencode_plugin_content_digest
-from .preflight import OpenCodePreflightEndpoint
+from .preflight import PRODUCT_TICKET_FIELD, OpenCodePreflightEndpoint
 from .provider import OpenCodeHarnessProvider
 
 __all__ = [
@@ -13,6 +13,7 @@ __all__ = [
     "OpenCodeModelConfig",
     "OpenCodeHarnessProvider",
     "OpenCodePreflightEndpoint",
+    "PRODUCT_TICKET_FIELD",
     "OpenCodeNativePluginConfig",
     "opencode_plugin_content_digest",
 ]

@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -33,6 +34,8 @@ _MAX_BYTES = 256 * 1024
 _ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _NONCE = re.compile(r"[a-f0-9-]{32,64}")
 _PRODUCT_SERVER = "jiuwenswarm_product_tools"
+PRODUCT_TICKET_FIELD = "__openjiuwen_product_ticket"
+_TICKET = re.compile(r"pt_[a-f0-9]{64}")
 _FIELDS = {
     "read": ({"filePath"}, {"filePath", "offset", "limit"}),
     "write": ({"filePath", "content"}, {"filePath", "content"}),
@@ -183,6 +186,8 @@ class _Record:
     product: bool = False
     authorized: bool = False
     consumed: bool = False
+    permission_allowed: bool = False
+    product_consumed: bool = False
 
 
 class PreflightGate:
@@ -191,6 +196,7 @@ class PreflightGate:
         self.turn = None
         self.root_message = None
         self.records = {}
+        self.tickets = {}
         self.nonces = set()
         self.calls = set()
         self.closed = False
@@ -204,6 +210,7 @@ class PreflightGate:
         self.turn = None
         self.root_message = None
         self.records.clear()
+        self.tickets.clear()
 
     def close(self):
         self.clear()
@@ -343,6 +350,8 @@ class PreflightGate:
                 return result
             product = self.endpoint.product_name(tool)
             args = _product_arguments(payload["args"]) if product else _arguments(tool, payload["args"])
+            if product and PRODUCT_TICKET_FIELD in args:
+                return result
             turn, context = harness.active_turn, harness.context
             if turn is None or context is None or context.tool_authorizer is None:
                 return result
@@ -379,9 +388,60 @@ class PreflightGate:
                 return result
             record.authorized = await self.check(harness, record)
             result["allowed"] = record.authorized
+            if product and record.authorized:
+                ticket = "pt_" + secrets.token_hex(32)
+                self.tickets[ticket] = record
+                result["ticket"] = ticket
             return result
         except (TypeError, ValueError, KeyError, OverflowError):
             return result
+
+    def consume_product(self, harness, tool_name, arguments):
+        """Consume a transport-only ticket, never infer identity from arguments."""
+        if not isinstance(arguments, dict):
+            return None
+        ticket = arguments.get(PRODUCT_TICKET_FIELD)
+        if not isinstance(ticket, str) or not _TICKET.fullmatch(ticket):
+            return None
+        record = self.tickets.pop(ticket, None)
+        if (
+            record is None
+            or not record.product
+            or record.product_consumed
+            or not record.authorized
+            or not record.permission_allowed
+            or not record.consumed
+            or not self.current(harness, record)
+            or not isinstance(tool_name, str)
+            or tool_name not in self.endpoint.product_tool_names
+            or record.request.tool_name != _PRODUCT_SERVER + "_" + tool_name
+        ):
+            return None
+        try:
+            clean = _product_arguments({key: value for key, value in arguments.items() if key != PRODUCT_TICKET_FIELD})
+            if json.dumps(clean, sort_keys=True, allow_nan=False) != json.dumps(
+                to_json_safe(record.request.arguments), sort_keys=True, allow_nan=False
+            ):
+                return None
+        except (TypeError, ValueError, OverflowError):
+            return None
+        record.product_consumed = True
+        return record.request
+
+    def product_current(self, harness, operation):
+        if not isinstance(operation, BeforeToolContext):
+            return False
+        record = self.records.get(operation.call_id)
+        return (
+            record is not None
+            and record.request is operation
+            and record.product
+            and record.product_consumed
+            and record.consumed
+            and record.permission_allowed
+            and record.authorized
+            and self.current(harness, record)
+        )
 
     def claim(self, harness, call_id, props):
         record = self.records.get(call_id)
@@ -444,7 +504,19 @@ export const Preflight = async () => ({
       }
       Object.freeze(value)
     }
-    if (product) freezeJson(args)
+    if (product) {
+      if (Object.hasOwn(args, cfg.ticket_field)) fail()
+      // Freeze the original input while reserving one transport-only slot.
+      for (const key of Reflect.ownKeys(args)) {
+        if (typeof key !== "string" || ["__proto__", "prototype", "constructor"].includes(key)) fail()
+        const d = Object.getOwnPropertyDescriptor(args, key)
+        if (!d || !Object.hasOwn(d, "value") || !d.enumerable) fail()
+        freezeJson(d.value, 1)
+        Object.defineProperty(args, key, {writable:false, configurable:false})
+      }
+      Object.defineProperty(args, cfg.ticket_field, {value:undefined, writable:true, enumerable:true})
+      Object.preventExtensions(args)
+    }
     const keys = Reflect.ownKeys(args)
     if (!product && (keys.some(k => typeof k !== "string" || !spec[1].includes(k)) ||
         spec[0].some(k => !Object.hasOwn(args, k)))) fail()
@@ -461,7 +533,7 @@ export const Preflight = async () => ({
           (!value.startsWith("/") || value.startsWith("//") ||
            value.split("/").some((v, i) => i > 0 && (v === ".." || v === "." || v === "")))) fail()
     }
-    Object.freeze(args)
+    if (!product) Object.freeze(args)
     Object.freeze(output)
     Object.freeze(input)
     const nonce = crypto.randomUUID()
@@ -478,8 +550,14 @@ export const Preflight = async () => ({
       const raw = await response.text()
       if (raw.length > 1024) fail()
       const answer = JSON.parse(raw)
-      if (!answer || Object.keys(answer).sort().join(",") !== "allowed,nonce" ||
+      const fields = product ? "allowed,nonce,ticket" : "allowed,nonce"
+      if (!answer || Object.keys(answer).sort().join(",") !== fields ||
           answer.allowed !== true || answer.nonce !== nonce) fail()
+      if (product) {
+        if (typeof answer.ticket !== "string" || !/^pt_[a-f0-9]{64}$/.test(answer.ticket)) fail()
+        Object.defineProperty(args, cfg.ticket_field, {value:answer.ticket, writable:false})
+        Object.freeze(args)
+      }
     } catch { fail() } finally { clearTimeout(timeout) }
   },
 })
@@ -509,6 +587,7 @@ def gate_source(endpoint, timeout):
                 "generation": endpoint.generation,
                 "timeout": int(timeout * 1000),
                 "product_tools": [_PRODUCT_SERVER + "_" + name for name in endpoint.product_tool_names],
+                "ticket_field": PRODUCT_TICKET_FIELD,
             }
         ),
     )
