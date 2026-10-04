@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_24_owned-task-stop-confirmation.md` |
+| 关联 feature | `F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md` |
 
 ## 范围 / 边界
 
@@ -73,6 +73,10 @@
     停止以内部五秒预算等待，不持调度锁跨 join；超时/调用方取消保留原引用，确认前拒绝 start。
     并发 stop 不重复取消清理中的任务；owned task 内部自停被拒，后续外部停止仍可取消它。
     已退出任务的异常须报告，但报告后不永久持有已完成引用；允许后续 stop 结清其余控制器清理。
+12. Scheduler 原 owned execution 记录按 task_id 固定 wrapper Task 至 done，包含从 running
+    摘除后的终态事件尾部。私有 `_capture_owned_execution` 不取消/等待任务，expected Task
+    或 running 映射不一致必须拒绝；ID 复用不能替换尚未退出的 wrapper，晚到 done 回调
+    只能清理同一对象。原调用者持 Task 检查退出，不以业务 terminal 状态替代实际 done。
     不全局扫描 asyncio tasks，不创建另一任务队列或调度状态机。
 
 ## 接口契约
