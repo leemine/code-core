@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md |
+| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
 
 ## 范围 / 边界
 
@@ -426,3 +426,24 @@ Turn/root/context/transport/config；原生 GET 消息的唯一 user root 必须
 SDK retry 都重新捕获并授权，在凭据 await 后、发送前和流式交付前重验；该接口不授予凭据权限。
 宿主还负责完整请求 bytes 固定、固定上游 URL、拒绝缺头/用途不支持、禁 redirects/env proxy、
 私有客户端和原退出确认。证明对象不包含上游凭据；不新增公共协议字段或导出，详见 F_31。
+
+## Native 原 Turn 退出端口
+
+base 私有同步 `_make_pending_turn` 默认构造原 PendingTurn，Native 仅在显式
+`NativeHostHooks.capture_execution_origin(content)` 配置时构造私有子类。该 hook
+是 keyword-only、同步且 live-only：必须返回 ExecutionOrigin，None/异步值/异常
+不能降级 legacy。入队前在原 command lock 中捕获；resume/steer 保留原 root。
+
+`_abort_owned_turn(expected, mode=FORCE)` 只处理原 active/queued 对象，不改协议。
+queued 原对象仅设置原 abort 标志；active 原对象在首次 await 前关闭来源并保留
+实际 attach/dispatch/steer Task、原 interaction entry 和退出 handle。取消 ACK 之外，
+必须等原 handler.handle 的 finally；不等待共享 Native supervisor 自己退出。
+
+外部调用使用原 5 秒预算且 shield 原 cleanup Task。超时/调用方取消/未知资源不会
+resolve 原 confirmed Future；execute 出口继续阻塞，重试仍使用原 handle。错误明确
+向调用方传播，不把失败伪装成成功取消。正常 EOF 同样等待原生产者退出。Native stop 也先确认原托管 active Turn，
+然后才执行原 agent.stop/session.post_run 并释放绑定，unknown 保留同对象重试。无 hook
+保持原 legacy 路径；该路径并未被本切片证明支持按凭据精确退出。
+
+子 Agent 活动来源与宿主实际绑定分别需要后续验收；本切片的未知退出限制见 S_02。
+

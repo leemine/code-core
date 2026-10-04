@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_30_owned-round-admission-fence.md`、`F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
+| 关联 feature | `F_32_native-exact-turn-exit.md`、`F_30_owned-round-admission-fence.md`、`F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
 
 ## 范围 / 边界
 
@@ -213,3 +213,21 @@ def loop_coordinator(self) -> Optional[LoopCoordinator]
 submission/wrapper。正常结果与后继入队均须原 wrapper 的尾部实际退出；未知退出保留
 原 owner slot，不以 facade 失败或 Task 业务终态代替终态证据。该内部基础不自动启用
 Native 凭据退出；未绑定 checker 的 legacy 保留旧入口行为。细节见 F30 与 S03。
+
+## 托管 Native 的原来源退出
+
+`_capture_origin_exit(origin, expected_session=...)` 仅捕获原 EventManager 中同 `is`
+来源的 queued/dequeued work 与原 ActiveInteractionRound。`_cancel_owned_origin(handle)`
+不调用 Session-wide abort，不取消共享 supervisor/forwarder，不清理外来来源 work。
+先关闭原宿主/Turn admission，再 join 原 facade、submission 和 scheduler wrapper；
+无 wrapper 的证明仍使用 S_03 原 receipt/CAS，不以 None 证明退出。
+
+受管 Round 的原 forwarded Event 与 forwarder Task 固定在原 active record；facade
+在原 marker 确认前不清 owner、不结束，原 forwarder 已退出或 marker 写入失败为 unknown。
+未启动 forwarder 的内部无流组件调用保留既有无输出路径；已启动 producer 不允许该降级。
+原 `_interaction_emit_tasks` 仍是唯一 emit Task 集合，Task 创建时保留 live origin；
+来源 fence 后等待同原来源的实际尾部，不把 EOF/业务结果当作全部生产者退出。
+
+原子 Agent 的 UserInputOp/ActivityEmitter 尚未提供原 Turn 来源证明；存在 queued、
+claimed、current 子任务或未证明的 activity drain 时，本精确端口拒绝确认退出。不会
+为确认成功而释放整个 Session 的子 Agent，也不因此宣称 B4 完整出口通过。

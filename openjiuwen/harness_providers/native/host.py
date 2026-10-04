@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from weakref import WeakKeyDictionary
 
 if TYPE_CHECKING:
+    from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin
     from openjiuwen.harness.deep_agent import DeepAgent
     from openjiuwen.harness.schema.interaction import SendInputRequest
     from openjiuwen.harness_protocol import HarnessContext, HarnessInput
@@ -22,7 +23,12 @@ class NativeHostHooks:
 
     ``create_session`` supplies a fresh session, without calling pre_run/start.
     The harness owns pre_run, agent start/stop and session post_run, including
-    startup rollback. ``before_start`` installs the host's input guard after
+    startup rollback. The optional keyword-only ``capture_execution_origin``
+    synchronously supplies the original live host source before Turn admission.
+    A configured hook must return an ExecutionOrigin; None is rejected rather
+    than downgraded. Only an absent hook selects the legacy lifecycle. The
+    captured root is retained for this Turn, including resume and steer.
+    ``before_start`` installs the host's input guard after
     pre_run and before agent start.
 
     ``dispatch_input`` runs after the sole output lease is acquired. It may
@@ -34,6 +40,9 @@ class NativeHostHooks:
     dispatch. Hooks must not start another event consumer or call harness stop.
     """
 
+    capture_execution_origin: Callable[[HarnessInput], ExecutionOrigin | None] | None = field(
+        default=None, repr=False, kw_only=True,
+    )
     create_session: Callable[[HarnessContext, DeepAgent], Awaitable[Any]] | None = field(default=None, repr=False)
     before_start: Callable[[DeepAgent, Any], Awaitable[None]] | None = field(default=None, repr=False)
     dispatch_input: Callable[[DeepAgent, SendInputRequest, HarnessInput, bool], Awaitable[bool]] | None = field(

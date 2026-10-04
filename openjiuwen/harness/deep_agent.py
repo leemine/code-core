@@ -251,6 +251,15 @@ class _OwnedRoundExitUnconfirmed(RuntimeError):
     """Internal ownership uncertainty; never a completed provider Turn."""
 
 
+@dataclasses.dataclass(frozen=True, slots=True, eq=False, repr=False)
+class _OwnedOriginExit:
+    agent: object
+    session: object
+    origin: ExecutionOrigin
+    work: tuple
+    active: ActiveInteractionRound | None
+
+
 FreshInputContextFactory = Callable[[], AbstractAsyncContextManager[None]]
 
 
@@ -4028,11 +4037,15 @@ class DeepAgent(BaseAgent):
         # an old event into a replacement request's output stream.
         # Fire-and-forget is required (cannot await here); track the task so
         # stop() can cancel outstanding emits instead of leaking them.
+        source = current_execution_origin()
+        if source is not None:
+            source._check_current()
         token = self._interaction_output.current_token()
         if token is not None:
             task = asyncio.create_task(
                 self._interaction_output.emit(event.to_output_schema(), expected_token=token)
             )
+            task._jiuwen_execution_origin = source
             self._interaction_emit_tasks.add(task)
             task.add_done_callback(self._interaction_emit_tasks.discard)
 
@@ -4381,6 +4394,123 @@ class DeepAgent(BaseAgent):
         self._check_owned_round(owned)
         return owned
 
+    def _capture_origin_exit(self, expected_origin, *, expected_session):
+        if (not isinstance(expected_origin, ExecutionOrigin) or expected_origin._checker is None
+                or expected_session is not self._interaction_session):
+            raise _OwnedRoundExitUnconfirmed("original source/Session is unavailable")
+        active = self._capture_owned_round(expected_origin)
+        return _OwnedOriginExit(self, expected_session, expected_origin,
+                                self._event_manager._capture_origin_work(expected_origin), active)
+
+    def _check_origin_exit(self, handle):
+        if (not isinstance(handle, _OwnedOriginExit) or handle.agent is not self
+                or handle.session is not self._interaction_session):
+            raise _OwnedRoundExitUnconfirmed("original exit handle Session changed")
+        active = self._capture_owned_round(handle.origin)
+        if active is not None and active is not handle.active:
+            raise _OwnedRoundExitUnconfirmed("a different original-source Round appeared during exit")
+
+    def _check_unattributed_subagent_exit(self, session):
+        # Existing controls are Session-owned, not Turn-owned. Do not allocate a
+        # control or cancel somebody else's child to turn missing provenance green.
+        controls = getattr(self, "_subagent_controls", None) or {}
+        control = controls.get(session.get_session_id())
+        if control is None:
+            return
+        emitter = control._activity_emitter
+        if (control._pending_activities or (emitter is not None and (
+                not emitter._queue.empty()
+                or (emitter._drain_task is not None and not emitter._drain_task.done())))):
+            raise _OwnedRoundExitUnconfirmed("subagent activity source/exit is unconfirmed")
+        manager = control._manager
+        for subagent_id in tuple(manager.list_ids()):
+            instance = manager.find(subagent_id)
+            if instance is None or instance.has_active_turn() or instance.has_pending_work():
+                raise _OwnedRoundExitUnconfirmed("subagent root/exit is unconfirmed")
+
+    async def _cancel_owned_origin(self, handle):
+        self._check_origin_exit(handle)
+        self._event_manager._discard_captured_work(handle.work)
+        controller = self.loop_controller
+        queues = controller._get_interaction_queues() if controller is not None else None
+        if queues is not None:
+            queues._discard_origin(handle.origin)
+        active = handle.active
+        if active is not None:
+            facade = active._facade_task
+            current = asyncio.current_task()
+            from openjiuwen.core.controller.modules.task_manager import _current_task_execution
+            capture = active._task_capture
+            owns_execution = (capture is not None and _current_task_execution(
+                capture.manager, capture.snapshot.task_id, handle.session) is not None)
+            if current in (facade, active._submission_task, active._scheduler_wrapper) or owns_execution:
+                raise _OwnedRoundExitUnconfirmed("original producer cannot join itself")
+            if facade is not None and not facade.done() and not facade.cancelling():
+                facade.cancel()
+            if facade is not None and not facade.done():
+                await asyncio.wait({facade})
+            self._check_origin_exit(handle)
+            # A facade canceled before entering its coroutine has not executed
+            # its finally; original producer records still need explicit proof.
+            await self._drain_owned_round(active, cancel=True, _cleanup=True)
+            if active._forwarded is not None:
+                await self._await_owned_forwarded(active)
+            self._check_origin_exit(handle)
+            if facade is not None and facade.done() and not facade.cancelled():
+                facade.exception()
+            if self._active_interaction_round is active:
+                self._event_manager.mark_finished(active.work)
+                self._active_interaction_round = None
+        # The original source admission fence has closed; its producers above
+        # have exited. Only already-created emits from this source remain.
+        emits = tuple(task for task in self._interaction_emit_tasks
+                      if getattr(task, "_jiuwen_execution_origin", None) is handle.origin)
+        if asyncio.current_task() in emits:
+            raise _OwnedRoundExitUnconfirmed("original emitter cannot join itself")
+        if emits:
+            await asyncio.wait(emits)
+            for task in emits:
+                if not task.cancelled():
+                    task.exception()
+        self._check_origin_exit(handle)
+        if self._event_manager._capture_origin_work(handle.origin):
+            raise _OwnedRoundExitUnconfirmed("original work remains queued after its fence")
+        self._check_unattributed_subagent_exit(handle.session)
+        if self._active_interaction_round is None:
+            self._try_transition_interaction_phase(InteractionPhase.IDLE)
+
+    async def _await_owned_forwarded(self, owned):
+        forwarded = owned._forwarded
+        if forwarded is None or forwarded.is_set():
+            return
+        producer = owned._forwarder_task
+        if producer is None:
+            raise _OwnedRoundExitUnconfirmed("original output forwarder is unavailable")
+        waiter = asyncio.create_task(forwarded.wait())
+        try:
+            while not forwarded.is_set():
+                if producer.done():
+                    raise _OwnedRoundExitUnconfirmed("original output marker was not confirmed")
+                try:
+                    await asyncio.wait({waiter, producer}, return_when=asyncio.FIRST_COMPLETED)
+                except asyncio.CancelledError:
+                    # Do not cancel the shared forwarder or turn an unfinished
+                    # original stream into a facade terminal on caller timeout.
+                    continue
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+                with suppress(asyncio.CancelledError):
+                    await waiter
+
+    async def _detach_owned_output(self, token, *, expected_origin, expected_session):
+        if (not isinstance(expected_origin, ExecutionOrigin) or expected_origin._checker is None
+                or expected_session is not self._interaction_session):
+            raise _OwnedRoundExitUnconfirmed("original output owner changed")
+        # Token is from the originally captured stream, never current_lease().
+        # This path does not cancel current work or discard another source queue.
+        await self._interaction_output.detach(token)
+
     async def _drain_owned_round(self, owned, *, cancel=False, _cleanup=False):
         """Join original producers before a managed facade can become terminal.
 
@@ -4455,6 +4585,8 @@ class DeepAgent(BaseAgent):
             task_id = owned.task_id
             forwarded = asyncio.Event()
             self._interaction_round_forwarded = forwarded
+            owned._forwarded = forwarded
+            owned._forwarder_task = self._interaction_forwarder_task
             interrupted = False
             try:
                 if work.execution_origin is not None:
@@ -4517,7 +4649,12 @@ class DeepAgent(BaseAgent):
                 if session is not None:
                     emitted = await self._emit_round_boundary(session)
                     if not emitted:
+                        if (work.execution_origin is not None and work.execution_origin._checker is not None
+                                and owned._forwarder_task is not None):
+                            raise _OwnedRoundExitUnconfirmed("original output marker could not be written")
                         forwarded.set()
+                if work.execution_origin is not None and work.execution_origin._checker is not None:
+                    await self._await_owned_forwarded(owned)
                 if not interrupted and self._active_interaction_round is owned:
                     self._active_interaction_round = None
                 self._try_transition_interaction_phase(InteractionPhase.IDLE)

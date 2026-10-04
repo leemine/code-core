@@ -147,6 +147,8 @@ class ActiveInteractionRound:
     _scheduler_wrapper: asyncio.Task | None = field(default=None, repr=False, compare=False)
     _task_capture: Any = field(default=None, repr=False, compare=False)
     _resuming_goal: bool = field(default=False, repr=False, compare=False)
+    _forwarded: asyncio.Event | None = field(default=None, repr=False, compare=False)
+    _forwarder_task: asyncio.Task | None = field(default=None, repr=False, compare=False)
 
     @property
     def run_kind(self) -> Literal["user", "goal"]:
