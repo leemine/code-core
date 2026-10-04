@@ -21,6 +21,7 @@ REQUIRED_PATHS = (
     "tests/unit_tests/harness_providers/test_native_host.py",
     "tests/unit_tests/harness_providers/test_opencode.py",
     "tests/unit_tests/harness_providers/test_opencode_preflight.py",
+    "tests/unit_tests/harness_providers/test_opencode_model_gateway.py",
     "tests/unit_tests/harness_protocol",
     "tests/unit_tests/harness/goal",
     "tests/unit_tests/harness/test_task_completion_extensions.py",
