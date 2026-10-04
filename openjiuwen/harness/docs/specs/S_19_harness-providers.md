@@ -375,3 +375,27 @@ ToolGateway.invoke 的最终执行边界，不通过 native mapper 推断。仅�
 
 该接缝不是 OS 沙箱，也不证明符号链接竞争、所有 CLI 内部读取或完整 Provider/Team 验收。
 宿主仍须实现当前文件 read/write 资源映射、可信路径政策及最终产品工具授权。
+
+
+#### Product MCP 原 Turn ticket（Provider 私有传输接缝）
+
+固定 CLI 的 MCP `callTool` 仅发送 name/arguments，不携带 native call ID。
+不能按参数相等、到达时间或新建随机 call ID 归属到当前 Turn。对于 endpoint 精确登记的产品工具，
+preflight 在原生 GET root/input 证明成功后返回随机一次性 ticket；内置 hook 将其原位写入
+`PRODUCT_TICKET_FIELD`（`__openjiuwen_product_ticket`），模型预先提供该字段即拒绝。
+该字段仅用于认证宿主的 MCP wire 参数，不能进入宿主工具输入、历史或日志。
+
+宿主在解析认证 MCP 调用后使用
+`harness.consume_product_preflight(local_tool_name, wire_arguments)`，成功时返回**原始**
+`BeforeToolContext` 对象；失败返回 None。此调用先销毁 ticket，再验证完整原参数、精确产品名、
+原 session/Turn/root/context/transport、原生审批已允许和当前生命周期。参数不符也不能重试 ticket。
+宿主仅使用返回对象的 arguments、turn_id 和 call_id，丢弃 wire arguments，不能自行复制对象冒充证明。
+
+该 ticket 只证明来源和生命周期，不授予最终工具或资源权限。宿主仍在现有 ToolGateway 完成当前权限、
+资源和撤权检查，并在异步授权后及获得执行锁后调用
+`harness.is_product_preflight_current(operation)`；仅同一已消费对象且原 scope 仍有效时为 True。
+Turn 结束、abort、stop、gate clear/close、context/session/transport/root 改变均使证明失效。
+不新增事件消费者、harness 协议字段或 Runtime 状态机。旧模式无 preflight 时这两个 API 均拒绝。
+
+源码路径与合成测试确认固定 CLI before-hook 后直接将相同参数对象交给 MCP callTool；
+CLI 原生持久化历史不含传输 ticket 仍需普通真实产品 MCP 验证，不以此确定性测试代替端到端验收。
