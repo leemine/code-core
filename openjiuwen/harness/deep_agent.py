@@ -327,6 +327,8 @@ class DeepAgent(BaseAgent):
         self._interaction_supervisor_task: Optional[asyncio.Task[None]] = None
         self._interaction_forwarder_task: Optional[asyncio.Task[None]] = None
         self._interaction_round_task: Optional[asyncio.Task[None]] = None
+        # Only original round facades awaiting stop confirmation, not a queue.
+        self._stopping_interaction_round_tasks: set[asyncio.Task[None]] = set()
         self._interaction_emit_tasks: set[asyncio.Task[Any]] = set()
         self._interaction_round_forwarded: Optional[asyncio.Event] = None
         self._interaction_start_lock = asyncio.Lock()
@@ -3650,18 +3652,31 @@ class DeepAgent(BaseAgent):
 
     async def stop(self) -> None:
         """Serialize teardown with start and terminate this interaction runtime."""
+        current = asyncio.current_task()
+        if current is self._interaction_round_task or current in self._stopping_interaction_round_tasks:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="an interaction round cannot confirm its own stop")
         async with self._interaction_start_lock:
             await self._stop_interaction_locked()
 
     async def _stop_interaction_locked(self) -> None:
         """Teardown helper; awaited callbacks must not re-enter start or stop."""
+        # Capture before the first await: supervisor cancellation or completion
+        # may clear its facade pointer while this Task still drains finally IO.
+        round_task = self._interaction_round_task
+        if asyncio.current_task() is round_task or asyncio.current_task() in self._stopping_interaction_round_tasks:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="an interaction round cannot confirm its own stop")
+        if round_task is not None:
+            self._stopping_interaction_round_tasks.add(round_task)
         self._fresh_input_context_factory = None
         self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
-        if not self._interaction_started:
+        if not self._interaction_started and not self._stopping_interaction_round_tasks:
             return
         self._event_manager.discard_all_work()
         await self._interaction_output.shutdown()
         await self._cancel_active_round(reason="stop")
+        await self._drain_stopping_interaction_rounds()
 
         for task in (self._interaction_supervisor_task, self._interaction_forwarder_task):
             if task is not None and not task.done():
@@ -3696,6 +3711,35 @@ class DeepAgent(BaseAgent):
         self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
         self._active_interaction_round = None
         self._interaction_round_task = None
+
+    async def _drain_stopping_interaction_rounds(self) -> None:
+        """Confirm original round exit before releasing its Session resources."""
+        from openjiuwen.core.controller.modules.task_scheduler import _STOP_TIMEOUT_SECONDS
+
+        owned = set(self._stopping_interaction_round_tasks)
+        if asyncio.current_task() in owned:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="an interaction round cannot confirm its own stop")
+        for task in owned:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        pending = {task for task in owned if not task.done()}
+        if pending:
+            # asyncio.wait does not propagate caller cancellation into a task
+            # that is already draining. Retain the same set on timeout/cancel.
+            _, pending = await asyncio.wait(pending, timeout=_STOP_TIMEOUT_SECONDS)
+        if pending:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="interaction stop timed out; owned round exit is unconfirmed")
+        errors = [task.exception() for task in owned if not task.cancelled() and task.exception() is not None]
+        self._stopping_interaction_round_tasks.difference_update(owned)
+        if self._interaction_round_task in owned:
+            self._interaction_round_task = None
+        if errors:
+            # These Tasks really exited. Report once without making a historical
+            # round/cleanup error a permanent resource ownership lock.
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, cause=errors[0],
+                              error_msg="owned interaction round failed during stop")
 
     async def attach_output(self) -> Optional[InteractionOutputStream]:
         """Claim the sole output reader for this interaction.
@@ -3968,6 +4012,7 @@ class DeepAgent(BaseAgent):
             round_task is not None
             and round_task is not asyncio.current_task()
             and not round_task.done()
+            and not round_task.cancelling()
         ):
             round_task.cancel()
 
@@ -4048,6 +4093,10 @@ class DeepAgent(BaseAgent):
                     await self._interaction_wakeup.wait()
                     continue
 
+                # A stop may have fenced admission while follow-up promotion
+                # awaited. Never publish a new owned round after that fence.
+                if not self._is_interaction_running():
+                    return
                 self._interaction_round_task = asyncio.create_task(self._execute_round(work))
                 await asyncio.wait({self._interaction_round_task})
                 if self._interaction_round_forwarded is not None:
