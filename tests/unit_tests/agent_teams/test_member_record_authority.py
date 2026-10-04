@@ -101,6 +101,8 @@ async def test_authorized_mutations_keep_record_identity_and_advance_revision(ca
     with execution_origin_scope(c.origin):
         changed = await mutate(c, kind)
     assert type(changed) is MemberWriteReceipt
+    with execution_origin_scope(c.origin):
+        changed.check_current()
     assert changed.stamp.nonce == first.stamp.nonce
     assert changed.stamp.revision == 2
     assert changed._transaction is not first._transaction
@@ -439,3 +441,113 @@ async def test_repeated_fallback_promotion_preserves_false_noop(case):
         c.receipts["member"] = promoted
         assert await mutate(c, "fallback") is False
     assert member_record_stamp(await c.db.member.get_member("member", "same-team")) == promoted.stamp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["database", "database_sessions", "dao_sessions"])
+@pytest.mark.parametrize("phase", ["source", "authorizer"])
+async def test_first_source_checker_cannot_redirect_original_database(case, tmp_path, drift, phase):
+    c = case
+    await c.create()
+    other = TeamDatabase(DatabaseConfig(connection_string=str(tmp_path / "other.sqlite")))
+    await other.initialize()
+    await other.team.create_team("same-team", "Different database", "member")
+    row = await c.db.member.get_member("member", "same-team")
+    async with other._sessions.write() as tx:
+        tx.add(TeamMember(**row.model_dump()))
+        await tx.commit()
+    original_guard = c.db._member_record_writes
+    original_sessions = c.db._sessions
+    original_other_guard = other._member_record_writes
+
+    def switch():
+        if drift == "database":
+            original_guard.database = other
+            other._member_record_writes = original_guard
+        elif drift == "database_sessions":
+            c.db._sessions = other._sessions
+        c.db.member._sessions = other._sessions
+
+    original_bind = c.authorizer.bind_for_write
+    if phase == "source":
+        object.__setattr__(c.origin, "_checker", switch)
+    else:
+
+        def bind_then_switch(op, origin):
+            permit = original_bind(op, origin)
+            switch()
+            return permit
+
+        object.__setattr__(c.authorizer, "bind_for_write", bind_then_switch)
+    try:
+        with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+            await mutate(c, "status")
+    finally:
+        object.__setattr__(c.origin, "_checker", None)
+        object.__setattr__(c.authorizer, "bind_for_write", original_bind)
+        c.db._sessions = original_sessions
+        c.db.member._sessions = original_sessions
+        original_guard.database = c.db
+        other._member_record_writes = original_other_guard
+        try:
+            for db in (c.db, other):
+                unchanged = await db.member.get_member("member", "same-team")
+                assert unchanged.status == "ready" and unchanged.record_revision == 1
+        finally:
+            await other.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update", "delete"])
+@pytest.mark.parametrize("return_receipt", [False, True])
+async def test_commit_return_after_source_change_is_not_current_success(case, monkeypatch, operation, return_receipt):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from openjiuwen.agent_teams.tools.database import MemberWriteCommittedButUnconfirmed
+
+    c = case
+    if operation != "create":
+        old = await c.create()
+    actual_commit = AsyncSession.commit
+
+    async def commit_then_revoke(session):
+        await actual_commit(session)
+        c.enabled = False
+
+    monkeypatch.setattr(AsyncSession, "commit", commit_then_revoke)
+    with execution_origin_scope(c.origin), pytest.raises(MemberWriteCommittedButUnconfirmed) as caught:
+        if operation == "create":
+            await c.db.member.create_member(
+                "member", "same-team", "Alice", "{}", "ready", return_receipt=return_receipt
+            )
+        elif operation == "update":
+            await mutate(c, "status", receipt=return_receipt)
+        else:
+            await c.db.team.delete_team("same-team")
+    receipt = caught.value.receipt
+    with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+        receipt.check_current()
+    assert type(receipt) is MemberWriteReceipt
+    assert receipt.operation.database is c.db
+    assert receipt.operation._dao in (c.db.member, c.db.team)
+    assert receipt.operation._sessions is c.db._sessions
+    row = await c.db.member.get_member("member", "same-team")
+    if operation == "delete":
+        assert row is None and receipt.stamp == old.stamp
+        assert receipt.operation.kind == "delete_team"
+    else:
+        assert member_record_stamp(row) == receipt.stamp
+        assert receipt.stamp.revision == (1 if operation == "create" else 2)
+    with pytest.raises(TypeError):
+        pickle.dumps(receipt)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["stamp", "_transaction", "_source_check"])
+async def test_committed_receipt_checks_issuance_facts_not_modified_fields(case, field):
+    c = case
+    receipt = await c.create()
+    value = replace(receipt.stamp, revision=900) if field == "stamp" else (lambda: None)
+    object.__setattr__(receipt, field, value)
+    with execution_origin_scope(c.origin), pytest.raises(MemberRecordDenied):
+        receipt.check_current()
