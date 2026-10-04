@@ -44,6 +44,7 @@ class _IdleGoalReadmission:
         m, a = self.manager, self.agent
         if (
             m._store is not self.store
+            or self.store._session is not self.session
             or m._execution is not self.execution
             or m._control_lock is not self.lock
             or a.goal_manager is not m
@@ -307,6 +308,7 @@ async def attach_existing(agent, origin):
                         manager is not None
                         and (
                             manager._store is not store
+                            or store._session is not session
                             or manager._execution_origin is not slot
                             or _facts(store.load()) != facts
                         )
