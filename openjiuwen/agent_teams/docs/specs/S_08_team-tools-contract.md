@@ -19,7 +19,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-10-04 |
+| 最近一次修订日期 | 2026-10-05 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md |
 
 ## 范围 / 边界
@@ -633,3 +633,11 @@ all_tools = {
   `qualify_team_tool_ids` 在 inprocess 下扩展 ID 命名是为了不冲突，
   不要在 runtime 层另立解析规则——所有 `team.` 前缀的认知都在这条
   spec 里定义。
+
+## 可选成员记录写 authority
+
+`TeamDatabase` 可注入 live `MemberRecordAuthorizer`。它只约束原成员七写入口、原 team delete
+级联及无来源 bulk reset；不自动授予 Backend/tool/Runtime 权限。受管成员每次更新必须由
+实际原 ExecutionOrigin 的宿主 permit 证明 actor/entity/operation，并 CAS 原 nonce/revision。
+调用者保存原提交 receipt；旧 nullable 行仍 legacy，不读时认领。此接口不新增状态机、
+数据库或锁。详见 `F_121_member-record-authority.md`。
