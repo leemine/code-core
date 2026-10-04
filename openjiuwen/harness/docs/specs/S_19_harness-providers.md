@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md |
+| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md |
 
 ## 范围 / 边界
 
@@ -407,3 +407,22 @@ Turn 结束、abort、stop、gate clear/close、context/session/transport/root �
 
 源码路径与合成测试确认固定 CLI before-hook 后直接将相同参数对象交给 MCP callTool；
 CLI 原生持久化历史不含传输 ticket 仍需普通真实产品 MCP 验证，不以此确定性测试代替端到端验收。
+
+#### OpenCode 私有模型网关来源
+
+`OpenCodePreflightEndpoint` 可通过 keyword-only `model_gateway` 接收 Provider 私有
+`OpenCodeModelGateway`，只由原宿主 listener 装配，与原 endpoint 同 origin/generation。
+`destination` 是固定上游 API base，model 必须匹配原 `OpenCodeModelConfig`，api_key 必须为空；
+生成的 CLI config 只含网关 URL/local token。legacy 未绑定时保持静态模型配置。
+
+managed `chat.headers` 复用原 snapshot/loader，并对 primary build 的 user root 输出精确
+session/root/generation/agent/model/provider 保留头；原生提交显式 build。宿主认证 HTTP 后，仅将
+`SOURCE_HEADERS` 字段传给 `_capture_model_source(headers, method=..., path=..., model=...)`。
+本片只认实际 POST、网关 base 下 `/chat/completions` 和实际 body.model。首次 await 前固定原
+Turn/root/context/transport/config；原生 GET 消息的唯一 user root 必须匹配原 Session/build/model。
+返回只读原对象或 None，不以最新 Turn 补来源。原 gate clear/close、Turn abort/stop、对象替换失效。
+
+`_is_model_source_current(source)` 仅复核同一捕获对象，复制对象不成立。宿主在每次实际 HTTP/
+SDK retry 都重新捕获并授权，在凭据 await 后、发送前和流式交付前重验；该接口不授予凭据权限。
+宿主还负责完整请求 bytes 固定、固定上游 URL、拒绝缺头/用途不支持、禁 redirects/env proxy、
+私有客户端和原退出确认。证明对象不包含上游凭据；不新增公共协议字段或导出，详见 F_31。
