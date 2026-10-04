@@ -276,7 +276,7 @@ class TaskScheduler:
         self._scheduler_task: Optional[asyncio.Task] = None
         # Business bookkeeping is removed before terminal UI publication. Keep
         # the same owned Tasks until their final IO actually finishes.
-        self._owned_execution_tasks: set[asyncio.Task] = set()
+        self._owned_execution_tasks: Dict[str, asyncio.Task] = {}
         self._stopping_tasks: set[asyncio.Task] = set()
 
         # Running tasks: task_id -> (TaskExecutor, asyncio.Task)
@@ -287,6 +287,35 @@ class TaskScheduler:
 
         # Event-driven wakeup for new SUBMITTED tasks
         self._submit_event = asyncio.Event()
+
+    def _capture_owned_execution(
+        self, task_id: str, *, expected_task: Optional[asyncio.Task] = None
+    ) -> Optional[asyncio.Task]:
+        """Return the original live wrapper, including its terminal event tail.
+
+        This private lookup is synchronous on the scheduler's event loop. It
+        neither cancels nor joins work. Callers retain the returned Task and
+        pass it as expected_task when checking that the ID was not reused.
+        A Task's terminal business status is not proof of wrapper exit.
+        """
+        if not isinstance(task_id, str) or not task_id:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="owned execution requires a non-empty task id")
+        task = self._owned_execution_tasks.get(task_id)
+        running = self._running_tasks.get(task_id)
+        expected_changed = (expected_task is not None and task is not expected_task
+                            and (task is not None or not expected_task.done()))
+        if expected_changed or (running is not None and running[1] is not task):
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="owned execution task identity changed")
+        if task is None or task.done():
+            return None
+        return task
+
+    def _forget_owned_execution(self, task_id: str, task: asyncio.Task) -> None:
+        """Release only this exited wrapper, never a later reuse of its ID."""
+        if task.done() and self._owned_execution_tasks.get(task_id) is task:
+            self._owned_execution_tasks.pop(task_id)
 
     @property
     def config(self) -> ControllerConfig:
@@ -854,7 +883,8 @@ class TaskScheduler:
                             break
 
                         # Check whether it is already running
-                        if task.task_id in self._running_tasks:
+                        if (task.task_id in self._running_tasks
+                                or self._capture_owned_execution(task.task_id) is not None):
                             continue
 
                         # Start non-blockingly using create_task
@@ -862,8 +892,10 @@ class TaskScheduler:
                             self._execute_task_wrapper(task.task_id, session)
                         )
 
-                        self._owned_execution_tasks.add(exec_task)
-                        exec_task.add_done_callback(self._owned_execution_tasks.discard)
+                        self._owned_execution_tasks[task.task_id] = exec_task
+                        exec_task.add_done_callback(
+                            lambda done, task_id=task.task_id: self._forget_owned_execution(task_id, done)
+                        )
                         # Record in running tasks
                         self._running_tasks[task.task_id] = (None, exec_task)
 
@@ -960,7 +992,7 @@ class TaskScheduler:
         # This snapshot and cancellation are synchronous on the scheduler's
         # event loop. schedule() rechecks _running under its existing lock
         # before creating work, so no new execution can slip past this point.
-        owned = set(self._owned_execution_tasks)
+        owned = set(self._owned_execution_tasks.values())
         owned.update(task for _, task in self._running_tasks.values() if task is not None)
         if self._scheduler_task is not None:
             owned.add(self._scheduler_task)
@@ -983,7 +1015,9 @@ class TaskScheduler:
         # Another waiter may already have completed this same close. Remove
         # only its original objects, never a subsequent scheduler generation.
         self._stopping_tasks.difference_update(owned)
-        self._owned_execution_tasks.difference_update(owned)
+        for task_id, task in tuple(self._owned_execution_tasks.items()):
+            if task in owned:
+                self._forget_owned_execution(task_id, task)
         for task_id, (_, task) in tuple(self._running_tasks.items()):
             if task in owned:
                 self._running_tasks.pop(task_id, None)
