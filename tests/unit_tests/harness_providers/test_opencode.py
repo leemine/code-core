@@ -1393,7 +1393,16 @@ async def test_governed_permission_rechecks_after_approval_without_native_rememb
         allowed = "error" if revoked == "error" else not revoked
         return ToolApprovalResponse(request.request_id, ToolApprovalDecision.ALLOW_FOR_SESSION)
 
+    from openjiuwen.harness_providers.opencode import OpenCodePreflightEndpoint
+
     harness = InteractiveHarness("approval")
+    harness.bind_preflight_endpoint(
+        OpenCodePreflightEndpoint(
+            "http://127.0.0.1:1/native-preflight",
+            "synthetic-" + "x" * 32,
+            "generation",
+        )
+    )
     await harness.start(
         context(
             host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
@@ -1401,10 +1410,46 @@ async def test_governed_permission_rechecks_after_approval_without_native_rememb
             tool_authorizer=authorize,
         )
     )
+    native_request = harness._transport.request
+
+    async def request(method, path, body=None):
+        if method == "GET" and path.endswith("/message"):
+            root = harness._preflight.root_message
+            return [
+                {"info": {"id": root, "role": "user", "sessionID": "ses_s"}, "parts": []},
+                {
+                    "info": info(parentID=root),
+                    "parts": [
+                        textpart(
+                            type="tool",
+                            tool="bash",
+                            callID="call_1",
+                            state={"status": "running", "input": {"command": "echo ok", "description": "synthetic"}},
+                        )
+                    ],
+                },
+            ]
+        if path.endswith("/prompt_async"):
+            result = await harness.authorize_preflight(
+                {
+                    "version": 1,
+                    "generation": "generation",
+                    "nonce": "a" * 32,
+                    "session_id": harness.provider_session_id,
+                    "call_id": "call_1",
+                    "tool": "bash",
+                    "args": {"command": "echo ok", "description": "synthetic"},
+                }
+            )
+            assert result["allowed"]
+        return await native_request(method, path, body)
+
+    harness._transport.request = request
     try:
         receipt = await harness.send(HarnessInput("governed"))
         events = await collect_turn(harness, receipt.turn_id)
-        assert len(calls) == 2
+        assert len(calls) == 3
+        assert calls[0] is calls[1] is calls[2]
         assert calls[0].tool_name == "bash"
         assert calls[0].call_id == "call_1"
         assert harness._transport.native_replies[-1][1] == {"response": "reject" if revoked else "once"}
