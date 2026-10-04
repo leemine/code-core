@@ -80,6 +80,7 @@ from .record_authority import MemberRecordAuthorizer as MemberRecordAuthorizer
 from .record_authority import MemberRecordDenied as MemberRecordDenied
 from .record_authority import MemberRecordStamp as MemberRecordStamp
 from .record_authority import MemberRecordWrites
+from .record_authority import MemberWriteCommittedButUnconfirmed as MemberWriteCommittedButUnconfirmed
 from .record_authority import MemberWriteOperation as MemberWriteOperation
 from .record_authority import MemberWritePermit as MemberWritePermit
 from .record_authority import MemberWriteReceipt as MemberWriteReceipt

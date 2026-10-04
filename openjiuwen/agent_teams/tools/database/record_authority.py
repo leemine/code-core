@@ -23,6 +23,18 @@ class MemberRecordDenied(RuntimeError):
     """The original member write/source could not be verified."""
 
 
+class MemberWriteCommittedButUnconfirmed(MemberRecordDenied):
+    """The transaction committed, but its source cannot authorize a current ACK.
+
+    Retain the original receipt for reconciliation; never replay the mutation
+    automatically or treat this receipt as permission under a replacement owner.
+    """
+
+    def __init__(self, receipt):
+        super().__init__("member transaction committed; current acknowledgement unconfirmed")
+        self.receipt = receipt
+
+
 class _LiveOnly:
     def __copy__(self):
         return self
@@ -122,6 +134,8 @@ class MemberWriteOperation(_LiveOnly):
     team_name: str
     member_name: str
     changes: tuple[tuple[str, object], ...]
+    _dao: object = field(repr=False)
+    _sessions: object = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
@@ -155,21 +169,46 @@ class MemberWriteReceipt(_LiveOnly):
     stamp: MemberRecordStamp
     _permit: MemberWritePermit
     _transaction: object
+    _source_check: Callable[[], None]
+    _issued_facts: tuple
 
     def __init__(self):
         raise TypeError("receipts originate only from a committed member transaction")
 
     @classmethod
-    def _committed(cls, operation, stamp, permit, transaction):
+    def _committed(cls, operation, stamp, permit, transaction, source_check):
         result = object.__new__(cls)
         for key, value in (
             ("operation", operation),
             ("stamp", stamp),
             ("_permit", permit),
             ("_transaction", transaction),
+            ("_source_check", source_check),
         ):
             object.__setattr__(result, key, value)
+        object.__setattr__(result, "_issued_facts", result._facts())
         return result
+
+    def _facts(self):
+        return (
+            id(self.operation),
+            _stamp_facts(self.stamp),
+            id(self._permit),
+            id(self._transaction),
+            id(self._source_check),
+        )
+
+    def check_current(self) -> None:
+        """Recheck original live source before host retention/current delivery.
+
+        A committed-but-unconfirmed receipt still fails this check after its
+        source expires; its transaction fact alone is never new authorization.
+        """
+        if self._facts() != self._issued_facts:
+            raise MemberRecordDenied("original committed receipt changed")
+        _sync(self._source_check)
+        if self._facts() != self._issued_facts:
+            raise MemberRecordDenied("original committed receipt changed")
 
 
 class _BoundWrite:
@@ -182,6 +221,9 @@ class _BoundWrite:
     def _snapshot(self):
         p, op = self.permit, self.operation
         return (
+            self.guard.references(op._dao),
+            id(op._dao),
+            id(op._sessions),
             id(self.guard.authorizer),
             id(self.guard.authorizer.bind_for_write),
             id(self.guard.database),
@@ -214,7 +256,13 @@ class _BoundWrite:
                 or _stamp_facts(before) != before_facts
                 or current_execution_origin() is not self.origin
                 or getattr(self.guard.database, "_member_record_writes", self.guard) is not self.guard
-                or (session is not None and session.get_transaction() is not transaction)
+                or (
+                    session is not None
+                    and (
+                        session.get_transaction() is not transaction
+                        or session.bind is not self.operation.database.engine
+                    )
+                )
             ):
                 raise MemberRecordDenied("original member write changed")
 
@@ -252,6 +300,17 @@ class _BoundWrite:
         member.record_digest = _digest(record_values(member), nonce, self.permit.source_id, revision)
         return member_record_stamp(member)
 
+    def committed(self, stamp, transaction, before, proposed):
+        """Keep the confirmed transaction fact even if source changes during commit."""
+        receipt = MemberWriteReceipt._committed(
+            self.operation, stamp, self.permit, transaction, lambda: self.check(before, proposed)
+        )
+        try:
+            receipt.check_current()
+        except BaseException as exc:
+            raise MemberWriteCommittedButUnconfirmed(receipt) from exc
+        return receipt
+
 
 class MemberRecordWrites:
     """A per-DB helper; no registry, queue or independent lock."""
@@ -261,21 +320,59 @@ class MemberRecordWrites:
             raise TypeError("member authorizer must be a live MemberRecordAuthorizer")
         self.database, self.authorizer = database, authorizer
 
-    def bind(self, kind, team_name, member_name, changes=()):
+    def references(self, dao):
+        """Pure checks of the actual DAO and DB before any host callback."""
+        database = self.database
+        sessions = getattr(database, "_sessions", None)
+        if (
+            sessions is None
+            or dao._sessions is not sessions
+            or dao._record_writes is not self
+            or getattr(database, "_member_record_writes", None) is not self
+            or sessions._write_session_local is not database.session_local
+            or sessions._write_session_local.kw.get("bind") is not database.engine
+        ):
+            raise MemberRecordDenied("original member DAO/database mismatch")
+        return (
+            id(self),
+            id(database),
+            id(sessions),
+            id(dao),
+            id(self.authorizer),
+            id(self.authorizer.bind_for_write),
+            id(database.engine),
+            id(database.session_local),
+            id(sessions._write_session_local),
+            id(sessions._write_lock),
+        )
+
+    def bind(self, dao, kind, team_name, member_name, changes=()):
         if self.authorizer is None:
             return None
+        references = self.references(dao)
         origin = current_execution_origin()
         if not isinstance(origin, ExecutionOrigin):
             raise MemberRecordDenied("member write requires original execution source")
         if any(type(key) is not str or (value is not None and type(value) not in (str, int)) for key, value in changes):
             raise MemberRecordDenied("member operation must contain immutable scalar fields")
-        operation = MemberWriteOperation(self.database, kind, _text(team_name), _text(member_name), tuple(changes))
-        facts = (id(operation.database), operation.kind, operation.team_name, operation.member_name, operation.changes)
+        operation = MemberWriteOperation(
+            self.database, kind, _text(team_name), _text(member_name), tuple(changes), dao, dao._sessions
+        )
+        facts = (
+            id(operation.database),
+            operation.kind,
+            operation.team_name,
+            operation.member_name,
+            operation.changes,
+            id(operation._dao),
+            id(operation._sessions),
+        )
         authorizer, callback = self.authorizer, self.authorizer.bind_for_write
         source_facts = (id(origin.host_value), id(origin._checker))
         origin._check_current()
         if (
-            source_facts != (id(origin.host_value), id(origin._checker))
+            references != self.references(dao)
+            or source_facts != (id(origin.host_value), id(origin._checker))
             or current_execution_origin() is not origin
             or self.authorizer is not authorizer
             or authorizer.bind_for_write is not callback
@@ -285,7 +382,8 @@ class MemberRecordWrites:
         if inspect.iscoroutine(permit):
             permit.close()
         if (
-            type(permit) is not MemberWritePermit
+            references != self.references(dao)
+            or type(permit) is not MemberWritePermit
             or source_facts != (id(origin.host_value), id(origin._checker))
             or current_execution_origin() is not origin
             or permit.operation is not operation
@@ -295,7 +393,15 @@ class MemberRecordWrites:
             or self.authorizer is not authorizer
             or authorizer.bind_for_write is not callback
             or facts
-            != (id(operation.database), operation.kind, operation.team_name, operation.member_name, operation.changes)
+            != (
+                id(operation.database),
+                operation.kind,
+                operation.team_name,
+                operation.member_name,
+                operation.changes,
+                id(operation._dao),
+                id(operation._sessions),
+            )
         ):
             raise MemberRecordDenied("invalid member write permit")
         _text(permit.source_id)

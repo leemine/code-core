@@ -65,7 +65,8 @@ class MemberDao:
     async def _write_guarded(self, bound, changes, *, valid_from=None, return_receipt=False):
         async with self._sessions.write() as session:
             op = bound.operation
-            bound.check(bound.permit.expected_stamp, op.changes)
+            bound.check(bound.permit.expected_stamp, op.changes,
+                        session=session, transaction=session.get_transaction())
             row = (await session.execute(select(TeamMember).where(
                 TeamMember.member_name == op.member_name,
                 TeamMember.team_name == op.team_name,
@@ -99,7 +100,7 @@ class MemberDao:
             await session.flush()
             bound.check(before, proposed, session=session, transaction=transaction)
             await session.commit()
-            receipt = MemberWriteReceipt._committed(op, stamp, bound.permit, transaction)
+            receipt = bound.committed(stamp, transaction, before, proposed)
             return receipt if return_receipt else True
 
     async def create_member(
@@ -140,7 +141,7 @@ class MemberDao:
         changes = (("display_name", display_name), ("agent_card", agent_card), ("status", status),
                    ("role", role), ("desc", desc), ("execution_status", execution_status),
                    ("mode", mode), ("prompt", prompt), ("options", options))
-        bound = self._record_writes.bind("create", team_name, member_name, changes)
+        bound = self._record_writes.bind(self, "create", team_name, member_name, changes)
         async with self._sessions.write() as session:
             try:
                 member = TeamMember(
@@ -158,7 +159,7 @@ class MemberDao:
                     updated_at=get_current_time(),
                 )
                 if bound is not None:
-                    bound.check(None, record_values(member))
+                    bound.check(None, record_values(member), session=session, transaction=session.get_transaction())
                     existing = (await session.execute(select(TeamMember).where(
                         TeamMember.member_name == member_name, TeamMember.team_name == team_name,
                     ))).scalar_one_or_none()
@@ -171,8 +172,10 @@ class MemberDao:
                 if bound is not None:
                     bound.check(None, record_values(member), session=session, transaction=transaction)
                 await session.commit()
-                if bound is not None and return_receipt:
-                    return MemberWriteReceipt._committed(bound.operation, stamp, bound.permit, transaction)
+                if bound is not None:
+                    receipt = bound.committed(stamp, transaction, None, record_values(member))
+                    if return_receipt:
+                        return receipt
                 team_logger.info("Member %s created", member_name)
                 return True
             except IntegrityError:
@@ -419,7 +422,7 @@ class MemberDao:
         """
         valid_from = _valid_predecessor_values(MemberStatus(status), MEMBER_TRANSITIONS)
         self._record_writes.receipt_flag(return_receipt)
-        bound = self._record_writes.bind("status", team_name, member_name, (("status", status),))
+        bound = self._record_writes.bind(self, "status", team_name, member_name, (("status", status),))
         if bound is not None:
             return await self._write_guarded(bound, {"status": status},
                                              valid_from=("status", valid_from), return_receipt=return_receipt)
@@ -511,7 +514,7 @@ class MemberDao:
             True if the transition succeeded, False otherwise.
         """
         self._record_writes.receipt_flag(return_receipt)
-        bound = self._record_writes.bind("transition_status", team_name, member_name,
+        bound = self._record_writes.bind(self, "transition_status", team_name, member_name,
                                         (("from_status", from_status.value), ("status", to_status.value)))
         if bound is not None:
             return await self._write_guarded(bound, {"status": to_status.value},
@@ -555,7 +558,7 @@ class MemberDao:
         """
         valid_from = _valid_predecessor_values(ExecutionStatus(execution_status), EXECUTION_TRANSITIONS)
         self._record_writes.receipt_flag(return_receipt)
-        bound = self._record_writes.bind(
+        bound = self._record_writes.bind(self,
             "execution_status", team_name, member_name, (("execution_status", execution_status),))
         if bound is not None:
             return await self._write_guarded(bound, {"execution_status": execution_status},
@@ -598,7 +601,7 @@ class MemberDao:
         ``RUNNING -> STARTING`` on restart (issue #4318).
         """
         self._record_writes.receipt_flag(return_receipt)
-        bound = self._record_writes.bind(
+        bound = self._record_writes.bind(self,
             "reset_execution_status", team_name, member_name, (("execution_status", execution_status),))
         if bound is not None:
             return await self._write_guarded(bound, {"execution_status": execution_status},
@@ -640,7 +643,7 @@ class MemberDao:
         """Update worktree isolation metadata for a member."""
         self._record_writes.receipt_flag(return_receipt)
         frozen_worktree = worktree.model_dump_json() if worktree is not None else None
-        bound = self._record_writes.bind("worktree", team_name, member_name,
+        bound = self._record_writes.bind(self, "worktree", team_name, member_name,
             (("worktree", frozen_worktree), ("isolation", isolation), ("worktree_path", worktree_path)))
         if bound is not None:
             def changes(row):
@@ -677,7 +680,7 @@ class MemberDao:
     ) -> bool | MemberWriteReceipt:
         """Promote the persisted fallback model to the active model reference."""
         self._record_writes.receipt_flag(return_receipt)
-        bound = self._record_writes.bind("promote_fallback", team_name, member_name)
+        bound = self._record_writes.bind(self, "promote_fallback", team_name, member_name)
         if bound is not None:
             def changes(row):
                 promoted = promote_member_fallback_model(row.options)

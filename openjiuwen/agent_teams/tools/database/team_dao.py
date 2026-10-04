@@ -95,13 +95,18 @@ class TeamDao:
         record_writes = self._record_writes
         authorizer = record_writes.authorizer
         original_origin = current_execution_origin()
+        references = record_writes.references(self) if authorizer is not None else None
 
         def check_admission():
             if (self._record_writes is not record_writes or record_writes.authorizer is not authorizer
-                    or (authorizer is not None and current_execution_origin() is not original_origin)):
+                    or (authorizer is not None and (current_execution_origin() is not original_origin
+                        or record_writes.references(self) != references))):
                 raise MemberRecordDenied("original team delete source changed")
 
         async with self._sessions.write() as session:
+            check_admission()
+            if authorizer is not None and session.bind is not record_writes.database.engine:
+                raise MemberRecordDenied("original team delete transaction database changed")
             result = await session.execute(select(Team).where(Team.team_name == team_name))
             team = result.scalar_one_or_none()
             if not team:
@@ -116,7 +121,7 @@ class TeamDao:
             bounds = []
             for member in members:
                 check_admission()
-                bound = record_writes.bind("delete_team", team_name, member.member_name)
+                bound = record_writes.bind(self, "delete_team", team_name, member.member_name)
                 if bound is None:
                     self._record_writes.require_legacy(member)
                 else:
@@ -152,6 +157,8 @@ class TeamDao:
             for bound, before, proposed in bounds:
                 bound.check(before, proposed, session=session, transaction=transaction)
             await session.commit()
+            for bound, before, proposed in bounds:
+                bound.committed(before, transaction, before, proposed)
             team_logger.info("Team %s deleted", team_name)
             return True
 
