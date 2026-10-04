@@ -196,6 +196,8 @@ class MemberCommittedFacts(_LiveOnly):
     source_id: str
     stamp: MemberRecordStamp
     record: tuple
+    _database_references: tuple = field(default=(), repr=False)
+    _database_objects: tuple = field(default=(), repr=False)
 
     def _facts(self):
         return (
@@ -209,6 +211,8 @@ class MemberCommittedFacts(_LiveOnly):
             id(self.entity),
             _immutable_value(_stamp_facts(self.stamp)),
             _immutable_value(self.record),
+            _immutable_value(self._database_references),
+            tuple(id(value) for value in self._database_objects),
         )
 
 
@@ -228,7 +232,7 @@ class MemberWriteReceipt(_LiveOnly):
         raise TypeError("receipts originate only from a committed member transaction")
 
     @classmethod
-    def _committed(cls, operation, stamp, permit, transaction, source_check, record):
+    def _committed(cls, operation, stamp, permit, transaction, source_check, record, database_references, database_objects):
         result = object.__new__(cls)
         for key, value in (
             ("operation", operation),
@@ -251,6 +255,8 @@ class MemberWriteReceipt(_LiveOnly):
             permit.source_id,
             MemberRecordStamp(*_stamp_facts(stamp)),
             tuple(record),
+            database_references,
+            database_objects,
         )
         object.__setattr__(result, "_committed_record", committed)
         object.__setattr__(result, "_issued_facts", result._facts())
@@ -317,6 +323,9 @@ class _BoundWrite:
     def __init__(self, guard, operation, origin, permit):
         self.guard, self.operation, self.origin, self.permit = guard, operation, origin, permit
         self._facts = self._snapshot()
+        self._database_objects = (guard, operation.database.engine, operation.database.session_local,
+                                  operation._sessions._write_lock, guard.authorizer,
+                                  guard.authorizer.bind_for_write)
         self._checking = False
         self._invalid = False
 
@@ -405,7 +414,8 @@ class _BoundWrite:
     def committed(self, stamp, transaction, before, proposed):
         """Keep the confirmed transaction fact even if source changes during commit."""
         receipt = MemberWriteReceipt._committed(
-            self.operation, stamp, self.permit, transaction, lambda: self.check(before, proposed), proposed
+            self.operation, stamp, self.permit, transaction, lambda: self.check(before, proposed), proposed,
+            self._facts[0], self._database_objects,
         )
         try:
             receipt.check_current()

@@ -30,7 +30,10 @@ from openjiuwen.agent_teams.tools.member_options import (
 from openjiuwen.agent_teams.tools.models import TeamMember
 from openjiuwen.core.common.logging import team_logger
 
-from .record_authority import MemberRecordWrites, MemberWriteReceipt, record_values
+from .record_authority import (
+    MemberCommittedFacts, MemberRecordDenied, MemberRecordWrites, MemberWriteReceipt,
+    member_record_stamp, record_values,
+)
 
 _DEPARTED_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_DEPARTED_STATUSES)
 _UNREACHABLE_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_UNREACHABLE_STATUSES)
@@ -341,6 +344,47 @@ class MemberDao:
                 )
             )
             return bool((await session.execute(stmt)).scalar())
+
+    async def read_committed_member(self, receipt: MemberWriteReceipt) -> MemberCommittedFacts:
+        """Compare an original transaction receipt with its current writer row.
+
+        This is a pure fact query, never current read permission. The caller
+        must separately authorize its parent/entity and final delivery. It
+        neither restores the old ExecutionOrigin nor calls its authorizer.
+        The returned original immutable facts may contain private content and
+        must not be emitted wholesale. No fence extends beyond this query.
+        """
+        if type(receipt) is not MemberWriteReceipt:
+            raise MemberRecordDenied("original member receipt required")
+        facts = receipt.committed_facts()
+        guard, sessions = self._record_writes, self._sessions
+        references = facts._database_references
+        database = facts.database
+
+        def check(session=None):
+            receipt.check_integrity()
+            if (self._record_writes is not guard or self._sessions is not sessions
+                    or guard.database is not database or database.member is not self
+                    or facts.dao is not self or facts.sessions is not sessions
+                    or not references or facts.kind == "delete" or guard.references(self) != references
+                    or (session is not None and not guard.transaction_matches(session))):
+                raise MemberRecordDenied("original member database changed")
+
+        check()
+        # The original writer session is intentional: a read replica or a
+        # replaceable read factory cannot attest to this committed database.
+        async with sessions.write() as session:
+            check(session)
+            row = (await session.execute(select(TeamMember).where(
+                TeamMember.member_name == facts.member_name,
+                TeamMember.team_name == facts.team_name,
+            ))).scalar_one_or_none()
+            check(session)
+            if (row is None or member_record_stamp(row) != facts.stamp
+                    or record_values(row) != facts.record):
+                raise MemberRecordDenied("member receipt does not match current record")
+        check()
+        return facts
 
     async def get_member(self, member_name: str, team_name: str) -> Optional[TeamMember]:
         """Get member information by ID."""
