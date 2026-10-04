@@ -6,27 +6,17 @@
     {
       "id": "code-core.python.test-dependencies",
       "workdir": ".",
-      "command": [
-        "{uv}",
-        "sync",
-        "--locked",
-        "--group",
-        "test"
-      ],
+      "command": ["{uv}", "sync", "--locked", "--group", "test"],
       "timeout_seconds": 1200
     }
   ],
   "profiles": {
     "mvp": {
-      "suites": [
-        "code-core.python.agent-builder"
-      ],
+      "suites": ["code-core.python.agent-builder"],
       "retention_days": 30
     },
     "pr-smoke": {
-      "suites": [
-        "code-core.python.agent-builder"
-      ],
+      "suites": ["code-core.python.agent-builder"],
       "retention_days": 30
     },
     "pr-stable": {
@@ -104,41 +94,15 @@
       "runner": "pytest",
       "workdir": ".",
       "writable_workdir": true,
-      "capabilities": [
-        "filesystem"
-      ],
+      "capabilities": ["filesystem"],
       "required": true,
       "shard_timeout_seconds": 120,
       "discover": {
-        "command": [
-          "{python}",
-          "-m",
-          "pytest",
-          "tests/unit_tests/agent_builder",
-          "--collect-only",
-          "-q",
-          "-o",
-          "addopts=",
-          "-p",
-          "no:cacheprovider"
-        ],
+        "command": ["{python}", "-m", "pytest", "tests/unit_tests/agent_builder", "--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider"],
         "parser": "pytest",
         "timeout_seconds": 60
       },
-      "command": [
-        "{python}",
-        "-m",
-        "pytest",
-        "tests/unit_tests/agent_builder",
-        "-q",
-        "-o",
-        "addopts=",
-        "-p",
-        "no:cacheprovider",
-        "--timeout=30",
-        "--timeout-method=signal",
-        "--junitxml={junit}"
-      ]
+      "command": ["{python}", "-m", "pytest", "tests/unit_tests/agent_builder", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--timeout=30", "--timeout-method=signal", "--junitxml={junit}"]
     },
     {
       "id": "code-core.python.dev-tools",
@@ -147,41 +111,11 @@
       "runner": "pytest",
       "workdir": ".",
       "writable_workdir": true,
-      "capabilities": [
-        "filesystem"
-      ],
+      "capabilities": ["filesystem"],
       "required": true,
       "shard_timeout_seconds": 1200,
-      "discover": {
-        "command": [
-          "{python}",
-          "-m",
-          "pytest",
-          "tests/unit_tests/dev_tools",
-          "--collect-only",
-          "-q",
-          "-o",
-          "addopts=",
-          "-p",
-          "no:cacheprovider"
-        ],
-        "parser": "pytest",
-        "timeout_seconds": 240
-      },
-      "command": [
-        "{python}",
-        "-m",
-        "pytest",
-        "tests/unit_tests/dev_tools",
-        "-q",
-        "-o",
-        "addopts=",
-        "-p",
-        "no:cacheprovider",
-        "--timeout=30",
-        "--timeout-method=signal",
-        "--junitxml={junit}"
-      ]
+      "discover": {"command": ["{python}", "-m", "pytest", "tests/unit_tests/dev_tools", "--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider"], "parser": "pytest", "timeout_seconds": 240},
+      "command": ["{python}", "-m", "pytest", "tests/unit_tests/dev_tools", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--timeout=30", "--timeout-method=signal", "--junitxml={junit}"]
     },
     {
       "id": "code-core.python.harness-protocol",
@@ -190,41 +124,11 @@
       "runner": "pytest",
       "workdir": ".",
       "writable_workdir": true,
-      "capabilities": [
-        "filesystem"
-      ],
+      "capabilities": ["filesystem"],
       "required": true,
       "shard_timeout_seconds": 300,
-      "discover": {
-        "command": [
-          "{python}",
-          "-m",
-          "pytest",
-          "tests/unit_tests/harness_protocol",
-          "--collect-only",
-          "-q",
-          "-o",
-          "addopts=",
-          "-p",
-          "no:cacheprovider"
-        ],
-        "parser": "pytest",
-        "timeout_seconds": 120
-      },
-      "command": [
-        "{python}",
-        "-m",
-        "pytest",
-        "tests/unit_tests/harness_protocol",
-        "-q",
-        "-o",
-        "addopts=",
-        "-p",
-        "no:cacheprovider",
-        "--timeout=30",
-        "--timeout-method=signal",
-        "--junitxml={junit}"
-      ]
+      "discover": {"command": ["{python}", "-m", "pytest", "tests/unit_tests/harness_protocol", "--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider"], "parser": "pytest", "timeout_seconds": 120},
+      "command": ["{python}", "-m", "pytest", "tests/unit_tests/harness_protocol", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--timeout=30", "--timeout-method=signal", "--junitxml={junit}"]
     },
     {
       "id": "code-core.python.cli-unit",
@@ -233,41 +137,11 @@
       "runner": "pytest",
       "workdir": ".",
       "writable_workdir": true,
-      "capabilities": [
-        "filesystem"
-      ],
+      "capabilities": ["filesystem"],
       "required": true,
       "shard_timeout_seconds": 600,
-      "discover": {
-        "command": [
-          "{python}",
-          "-m",
-          "pytest",
-          "tests/cli/unit",
-          "--collect-only",
-          "-q",
-          "-o",
-          "addopts=",
-          "-p",
-          "no:cacheprovider"
-        ],
-        "parser": "pytest",
-        "timeout_seconds": 120
-      },
-      "command": [
-        "{python}",
-        "-m",
-        "pytest",
-        "tests/cli/unit",
-        "-q",
-        "-o",
-        "addopts=",
-        "-p",
-        "no:cacheprovider",
-        "--timeout=30",
-        "--timeout-method=signal",
-        "--junitxml={junit}"
-      ]
+      "discover": {"command": ["{python}", "-m", "pytest", "tests/cli/unit", "--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider"], "parser": "pytest", "timeout_seconds": 120},
+      "command": ["{python}", "-m", "pytest", "tests/cli/unit", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--timeout=30", "--timeout-method=signal", "--junitxml={junit}"]
     },
     {
       "id": "code-core.python.execution-construction",
@@ -356,9 +230,9 @@
         "pytest",
         "tests/unit_tests/harness_providers/test_native_host.py",
         "tests/unit_tests/harness/security/test_mandatory_authorization.py",
-        "tests/unit_tests/core/foundation/tool/test_final_authority.py",
-        "tests/unit_tests/core/foundation/llm/test_model_request_authority.py",
-        "tests/unit_tests/harness/tools/test_builtin_final_authority.py",
+          "tests/unit_tests/core/foundation/tool/test_final_authority.py",
+          "tests/unit_tests/core/foundation/llm/test_model_request_authority.py",
+          "tests/unit_tests/harness/tools/test_builtin_final_authority.py",
         "tests/unit_tests/harness_providers/test_native_output_preservation.py",
         "tests/unit_tests/harness_providers/test_native_rendered_result.py",
         "tests/unit_tests/harness_providers/test_io_adapter.py",
