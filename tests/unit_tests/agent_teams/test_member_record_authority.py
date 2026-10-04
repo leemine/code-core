@@ -428,3 +428,14 @@ async def test_bulk_cleanup_rejects_before_any_mixed_or_dynamic_deletion(case, p
         assert await c.db.team.team_exists("same-team")
     finally:
         await legacy.close()
+
+
+@pytest.mark.asyncio
+async def test_repeated_fallback_promotion_preserves_false_noop(case):
+    c = case
+    await c.create()
+    with execution_origin_scope(c.origin):
+        promoted = await mutate(c, "fallback")
+        c.receipts["member"] = promoted
+        assert await mutate(c, "fallback") is False
+    assert member_record_stamp(await c.db.member.get_member("member", "same-team")) == promoted.stamp
