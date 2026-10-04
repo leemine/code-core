@@ -44,7 +44,14 @@ call identity, runtime kwargs, original host predicate, and cancellation state.
 The certificate is unavailable during input, started, finished, error and output
 callbacks. A nested Tool's callbacks cannot borrow the parent certificate. The
 existing four-layer Tool unwrap chain still resolves the same original bound
-method, and existing callback execution is retained.
+method, and existing callback execution is retained. MCPTool also masks its
+internal TOOL_PARSE_STARTED and TOOL_PARSE_FINISHED dispatch: neither the
+getter nor a previously captured certificate can validate inside those callback
+contexts. Parsing and callback argument transforms still run. The original
+method regains its certificate only after dispatch returns, for its actual
+private-client call; actual post-parse resource checks remain the host consumer's
+responsibility. An exception or cancellation during parsing cannot leave a
+usable certificate for later work.
 
 An already captured `execution.is_current_origin()` may be checked in an
 inherited SDK child task while the original method remains live. This checks
