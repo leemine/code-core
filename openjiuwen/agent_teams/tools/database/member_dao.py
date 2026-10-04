@@ -31,8 +31,12 @@ from openjiuwen.agent_teams.tools.models import TeamMember
 from openjiuwen.core.common.logging import team_logger
 
 from .record_authority import (
-    MemberCommittedFacts, MemberRecordDenied, MemberRecordWrites, MemberWriteReceipt,
-    member_record_stamp, record_values,
+    MemberCommittedFacts,
+    MemberRecordDenied,
+    MemberRecordWrites,
+    MemberWriteReceipt,
+    member_record_stamp,
+    record_values,
 )
 
 _DEPARTED_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_DEPARTED_STATUSES)

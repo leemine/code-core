@@ -232,7 +232,9 @@ class MemberWriteReceipt(_LiveOnly):
         raise TypeError("receipts originate only from a committed member transaction")
 
     @classmethod
-    def _committed(cls, operation, stamp, permit, transaction, source_check, record, database_references, database_objects):
+    def _committed(
+        cls, operation, stamp, permit, transaction, source_check, record, database_references, database_objects
+    ):
         result = object.__new__(cls)
         for key, value in (
             ("operation", operation),
