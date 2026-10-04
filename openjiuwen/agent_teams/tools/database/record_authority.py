@@ -367,7 +367,7 @@ class MemberRecordWrites:
             id(sessions),
             id(dao),
             id(self.authorizer),
-            id(self.authorizer.bind_for_write),
+            id(getattr(self.authorizer, "bind_for_write", None)),
             id(database.engine),
             id(database.session_local),
             id(sessions._write_session_local),

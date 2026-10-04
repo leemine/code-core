@@ -187,13 +187,24 @@ async def require_legacy_team(database, team_name):
     guard, sessions = database._member_record_writes, database._sessions
     if guard.authorizer is not None:
         raise MemberRecordDenied("governed Team side effect requires explicit host support")
-    async with sessions.read() as session:
-        members = (await session.execute(select(TeamMember).where(TeamMember.team_name == team_name))).scalars().all()
+    references = guard.references(database.member)
+
+    def fixed(session):
         if (
             database._member_record_writes is not guard
             or database._sessions is not sessions
             or guard.authorizer is not None
+            or guard.references(database.member) != references
+            or not guard.transaction_matches(session)
         ):
             raise MemberRecordDenied("original Team storage changed")
+
+    # Decisions preceding filesystem effects must read the original writer.
+    # A replica or retargeted read factory cannot attest absence of protected
+    # rows in the database that the later DAO mutation actually addresses.
+    async with sessions.write() as session:
+        fixed(session)
+        members = (await session.execute(select(TeamMember).where(TeamMember.team_name == team_name))).scalars().all()
+        fixed(session)
         for member in members:
             guard.require_legacy(member)
