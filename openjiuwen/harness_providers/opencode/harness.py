@@ -35,6 +35,7 @@ from openjiuwen.harness_providers.skills import install_skills, isolated_skill_s
 from .config import CLI_VERSION, OpenCodeHarnessConfig
 from .errors import OpenCodeError
 from .mapping import Accumulator, native_id
+from .model_gateway import capture_model_source, model_source_current
 from .native_plugins import validate_native_plugin_packages
 from .options import native_config, validate_readback
 from .preflight import OpenCodePreflightEndpoint, PreflightGate, preflight_fingerprint
@@ -101,6 +102,16 @@ class OpenCodeHarness(SerializedTurnHarness):
         """Whether this exact consumed operation still belongs to its active Turn."""
         return self._preflight is not None and self._preflight.product_current(self, operation)
 
+    async def _capture_model_source(self, headers, *, method, path, model):
+        """Capture an authenticated request's original root before host credential awaits."""
+        if self._preflight is None:
+            return None
+        return await capture_model_source(self._preflight, self, headers, method=method, path=path, model=model)
+
+    def _is_model_source_current(self, source) -> bool:
+        """Recheck the same captured object; never infer the latest model request."""
+        return self._preflight is not None and model_source_current(self._preflight, self, source)
+
     supports_tool_authorizer = True
 
     def _validate_context(self, context: HarnessContext) -> None:
@@ -144,6 +155,7 @@ class OpenCodeHarness(SerializedTurnHarness):
                 context.mcp_servers,
                 runtime_policy=context.runtime_policy,
                 governed=context.tool_authorizer is not None,
+                model_gateway=self._preflight.endpoint.model_gateway if self._preflight else None,
             )
 
     async def _open_session(self, context: HarnessContext) -> str:
@@ -338,6 +350,7 @@ class OpenCodeHarness(SerializedTurnHarness):
                     f"/session/{self._session_id}/prompt_async",
                     {
                         "messageID": user_id,
+                        **({"agent": "build"} if self._preflight and self._preflight.endpoint.model_gateway else {}),
                         "model": {"providerID": model.provider, "modelID": model.model},
                         "system": self.context.system_prompt,
                         "parts": [{"type": "text", "text": harness_input_text(turn.content)}],
