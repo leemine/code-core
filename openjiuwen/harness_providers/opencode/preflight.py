@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from openjiuwen.harness_protocol import BeforeToolContext, McpTransport
 
 from ..jsonsafe import to_json_safe
+from .model_gateway import OpenCodeModelGateway
 from .native_plugins import (
     OpenCodeNativePluginConfig,
     opencode_plugin_content_digest,
@@ -52,6 +53,7 @@ class OpenCodePreflightEndpoint:
     token: str = field(repr=False)
     generation: str
     product_tool_names: tuple[str, ...] = ()
+    model_gateway: OpenCodeModelGateway | None = field(default=None, kw_only=True, repr=False)
 
     def __post_init__(self):
         if not isinstance(self.url, str):
@@ -91,6 +93,14 @@ class OpenCodePreflightEndpoint:
         ):
             raise ValueError("invalid OpenCode preflight product inventory")
         object.__setattr__(self, "product_tool_names", tuple(names))
+
+        gateway = self.model_gateway
+        if gateway is not None and (
+            not isinstance(gateway, OpenCodeModelGateway)
+            or urlsplit(gateway.url).netloc != url.netloc
+            or gateway.generation != self.generation
+        ):
+            raise ValueError("model gateway must belong to the original host transport")
 
     def product_name(self, name):
         return name in {_PRODUCT_SERVER + "_" + tool for tool in self.product_tool_names}
@@ -195,6 +205,7 @@ class PreflightGate:
         self.endpoint = endpoint
         self.turn = None
         self.root_message = None
+        self.model_origin = None
         self.records = {}
         self.tickets = {}
         self.nonces = set()
@@ -205,10 +216,12 @@ class PreflightGate:
         self.clear()
         self.turn = turn
         self.root_message = root_message
+        self.model_origin = object()
 
     def clear(self):
         self.turn = None
         self.root_message = None
+        self.model_origin = None
         self.records.clear()
         self.tickets.clear()
 
@@ -469,6 +482,32 @@ class PreflightGate:
 # is frozen: assigning output.args would not replace the CLI's actual argument.
 _GATE_JS = r"""
 export const Preflight = async () => ({
+  "chat.headers": async (input, output) => {
+    const cfg = __ENDPOINT__
+    if (!cfg.model) return
+    const fail = () => { throw new Error("mandatory model source denied") }
+    const message = input.message
+    if (!message || message.role !== "user" || message.sessionID !== input.sessionID ||
+        input.agent !== "build" || !/^[A-Za-z0-9_-]{1,128}$/.test(input.sessionID) ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(message.id) ||
+        input.model?.id !== cfg.model || input.model?.providerID !== cfg.provider ||
+        message.model?.modelID !== cfg.model || message.model?.providerID !== cfg.provider ||
+        message.agent !== "build" || !output.headers ||
+        Object.getPrototypeOf(output.headers) !== Object.prototype) fail()
+    for (const key of Reflect.ownKeys(output.headers)) {
+      if (typeof key !== "string" || key.toLowerCase().startsWith("x-openjiuwen-")) fail()
+    }
+    const source = {
+      "x-openjiuwen-session": input.sessionID, "x-openjiuwen-root": message.id,
+      "x-openjiuwen-generation": cfg.generation, "x-openjiuwen-agent": input.agent,
+      "x-openjiuwen-model": cfg.model, "x-openjiuwen-provider": cfg.provider,
+    }
+    for (const [key, value] of Object.entries(source)) {
+      Object.defineProperty(output.headers, key, {value, enumerable:true, writable:false, configurable:false})
+    }
+    Object.freeze(output.headers)
+    Object.freeze(output)
+  },
   "tool.execute.before": async (input, output) => {
     const fail = () => { throw new Error("mandatory native preflight denied") }
     const cfg = __ENDPOINT__
@@ -571,13 +610,16 @@ def preflight_fingerprint(endpoint):
             {
                 "gate": GATE_FINGERPRINT,
                 "product_tools": sorted(endpoint.product_tool_names),
+                **({"model_gateway": {"model": endpoint.model_gateway.model,
+                                      "destination": endpoint.model_gateway.destination}}
+                   if endpoint.model_gateway else {}),
             },
             sort_keys=True,
         ).encode()
     ).hexdigest()
 
 
-def gate_source(endpoint, timeout):
+def gate_source(endpoint, timeout, *, provider="openjiuwen"):
     return _GATE_JS.replace(
         "__ENDPOINT__",
         json.dumps(
@@ -588,16 +630,18 @@ def gate_source(endpoint, timeout):
                 "timeout": int(timeout * 1000),
                 "product_tools": [_PRODUCT_SERVER + "_" + name for name in endpoint.product_tool_names],
                 "ticket_field": PRODUCT_TICKET_FIELD,
+                "model": endpoint.model_gateway.model if endpoint.model_gateway else None,
+                "provider": provider,
             }
         ),
     )
 
 
-def stage_preflight(root: Path, endpoint, timeout):
+def stage_preflight(root: Path, endpoint, timeout, *, provider="openjiuwen"):
     source = root / "preflight-source"
     source.mkdir(mode=0o700)
     entry = source / "gate.js"
-    entry.write_text(gate_source(endpoint, timeout), encoding="utf-8")
+    entry.write_text(gate_source(endpoint, timeout, provider=provider), encoding="utf-8")
     entry.chmod(0o400)
     source.chmod(0o500)
     plugin = OpenCodeNativePluginConfig(
@@ -608,6 +652,6 @@ def stage_preflight(root: Path, endpoint, timeout):
         opencode_plugin_content_digest(source),
         "gate.js",
         "Preflight",
-        ("tool.execute.before",),
+        ("tool.execute.before", "chat.headers"),
     )
     return stage_native_plugins(root, (plugin,), fingerprint=validate_native_plugin_packages((plugin,)))

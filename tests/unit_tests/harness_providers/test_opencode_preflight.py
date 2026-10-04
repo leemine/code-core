@@ -312,7 +312,7 @@ def test_stage_uses_existing_inventory_and_detects_gate_tampering(tmp_path):
     assert not stage.inventory_ready()
     stage.verify_files()
     inventory, expected = stage.inventories[0]
-    assert expected["hooks"] == ["tool.execute.before"] and expected["tools"] == []
+    assert expected["hooks"] == ["chat.headers", "tool.execute.before"] and expected["tools"] == []
     inventory.write_text(json.dumps(expected))
     stage.verify_inventory()
     path = stage.packages[0][0] / "gate.js"
