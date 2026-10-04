@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/manifest/`（9 文件） |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-10-04 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -135,7 +135,17 @@ def ensure_builtin_elements_registered() -> None
 | `language` / `member_name` / `role` | 装配参数 |
 | `workspace` / `member_card_id` / `project_dir` | 环境绑定 |
 | `extras` | 自由键 |
-| `factory` | 重建 live context 的注册 factory（跨序列化重建，`S_13` 消费） |
+| `model_factory` | 仅 live 的 `(ModelSpec, BuildContext) -> Model` 宿主构造入口，不进入 JSON/seed |
+| `subagent_name` | 子 Agent 标识，与 enclosing `member_name` / `role` 分开 |
+
+`register_build_context_factory` 是模块级的 context 重建函数注册入口，不是 context 字段。
+`TeamModelConfig.build(context=None)` 在存在 live model factory 时只经该回调构造；
+返回非 Model、缺少模型 spec 或回调拒绝均直接失败，不回退到旧 Model。
+`DeepAgentSpec` 先派生成员 context，再构造模型。标准 `SubAgentSpec` 派生独立
+child context，并从自身或父原始 spec 重新构造；不能继承已构造的父 Model。
+在此模式下，任意 `factory_name` provider 和自动 general-purpose 注入尚不支持，明确拒绝。
+没有 factory 的既有调用保持原行为。此接缝本身不授予 HTTP 调用权限；宿主 Model
+仍须持有每调用权限 SPI，子 Agent 授权不得从 Team 成员身份隐含继承。
 
 ## 与其它 spec 的关系
 
