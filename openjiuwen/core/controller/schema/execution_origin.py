@@ -113,3 +113,17 @@ def consume_origin_input(value, expected_origin=ORIGIN_UNSET):
     if source is not origin:
         raise ValueError("mixed execution origins in input queue")
     return value.content if isinstance(value, _SourcedInput) else value
+
+
+def _unwrap_origin_inputs(values):
+    """Recover one exact source from an already captured live queue batch."""
+    source = None
+    messages = []
+    for index, value in enumerate(values):
+        origin = value.origin if isinstance(value, _SourcedInput) else None
+        if index == 0:
+            source = origin
+        elif origin is not source:
+            raise ValueError("mixed execution origins in input batch")
+        messages.append(value.content if isinstance(value, _SourcedInput) else value)
+    return source, messages

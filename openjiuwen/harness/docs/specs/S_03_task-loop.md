@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md`、`F_29_scheduler-submitted-admission.md` |
+| 关联 feature | `F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md`、`F_28_round-execution-origin.md`、`F_29_scheduler-submitted-admission.md` |
 
 ## 范围 / 边界
 
@@ -193,3 +193,19 @@ class TaskLoopController(Controller):
 ## Live execution origin
 
 `TaskLoopController.submit_round(..., origin=...)` 将原宿主 `ExecutionOrigin` 放入 InputEvent 私有来源；省略时捕获当前词法 scope，None 明确遮蔽。原 Task.inputs 保存对象身份，TaskLoopEventExecutor 据此安装 scope，TaskScheduler 的完成/失败/交互事件沿原任务来源返回。混合来源拒绝，恢复任务没有来源，不从当前调用者补齐。原 LoopQueues 允许同来源 live envelope，drain 在返回文本前比较原来源；AgentCallbackContext 使用同一队列与相同比较，不新增队列。来源不进入 JSON，不代表权限；授权仍由宿主负责。词法 scope 不跨 async-generator yield。见 F_23_live-execution-origin。
+
+## 已捕获 follow-up 批次来源
+
+`LoopQueues.drain_sourced_follow_up()` 只排空原队列当前批次并返回 `(origin, messages)`；
+全部来源须对象身份一致，包含 None。混合批次拒绝，不能借当前 Round/supervisor 的来源。
+`TaskLoopController` 提供同名窄转发口；原 expected-origin drain 继续保留。
+
+交互 supervisor 从该批次创建带原来源的 work，`submit_round` 显式传入来源。受管路径
+不把 follow-up 转为 `state.pending_follow_ups` 字符串；正常继续时剩余消息留在原内存队列，
+无新队列或调度器。原已停止/中断/Goal/aborted 分支不自动执行待续消息；该批次明确拒绝，
+向原输出发送 execution.error 并结束输出，不误清其他 EventManager work。混合来源同样
+可见失败，不能进入 IDLE 后让消费者挂起。
+
+旧 `_run_task_loop` 的受管路径遵守同样的 live-only 边界，停止后仍有待续批次时明确报错并
+执行原 cleanup；generator yield 不持有新的词法 scope。source-less legacy 保留原字符串
+持久化语义，不能在恢复时借用新来源。

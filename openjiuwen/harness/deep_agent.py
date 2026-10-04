@@ -40,6 +40,11 @@ from openjiuwen.core.controller.schema.event import (
     FollowUpEvent,
     TaskInteractionEvent,
 )
+from openjiuwen.core.controller.schema.execution_origin import (
+    ExecutionOrigin,
+    current_execution_origin,
+    execution_origin_scope,
+)
 from openjiuwen.core.controller.schema.task import TaskStatus
 from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.core.foundation.tool import Tool, ToolCard
@@ -2697,6 +2702,7 @@ class DeepAgent(BaseAgent):
         Yields:
             Result dict from each iteration.
         """
+        origin = current_execution_origin()
         modified = ctx.inputs
         if not isinstance(modified, InvokeInputs):
             raise build_error(
@@ -2735,21 +2741,23 @@ class DeepAgent(BaseAgent):
                     }
                     break
                 # Drain new follow-ups, merge into state buffer
-                new_follow_ups = controller.drain_follow_up()
                 _state = self.load_state(session)
-                if new_follow_ups:
-                    _state.pending_follow_ups.extend(
-                        new_follow_ups
-                    )
-                # Pop first buffered follow-up as query
-                is_follow_up = bool(
-                    _state.pending_follow_ups
-                )
-                if _state.pending_follow_ups:
-                    current_query = (
-                        _state.pending_follow_ups.pop(0)
-                    )
-                    self.save_state(session, _state)
+                if origin is None:
+                    _state.pending_follow_ups.extend(controller.drain_follow_up(expected_origin=None))
+                    is_follow_up = bool(_state.pending_follow_ups)
+                    if is_follow_up:
+                        current_query = _state.pending_follow_ups.pop(0)
+                        self.save_state(session, _state)
+                else:
+                    batch_origin, follow_ups = controller.drain_sourced_follow_up()
+                    if _state.pending_follow_ups or (follow_ups and batch_origin is not origin):
+                        raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                          error_msg="follow-up execution origin is unavailable or mixed")
+                    is_follow_up = bool(follow_ups)
+                    if is_follow_up:
+                        current_query = follow_ups[0]
+                        for remaining in follow_ups[1:]:
+                            controller.enqueue_follow_up(remaining, origin=origin)
                 round_run_context = self._run_context_for_task_loop_round(
                     modified.run_context,
                     current_query,
@@ -2767,6 +2775,7 @@ class DeepAgent(BaseAgent):
                     is_follow_up=is_follow_up,
                     run_kind=modified.run_kind,
                     run_context=round_run_context,
+                    origin=origin,
                 )
                 result = await controller.wait_round_completion(timeout=timeout)
 
@@ -2822,6 +2831,18 @@ class DeepAgent(BaseAgent):
                 # Note: MaxOuterRounds yields its own error result inside the loop,
                 # so no additional yield is needed here.
         finally:
+            primary_error = sys.exc_info()[1]
+            follow_up_error = None
+            if origin is not None and controller.has_follow_up():
+                try:
+                    _batch_origin, remaining = controller.drain_sourced_follow_up()
+                    if remaining:
+                        follow_up_error = build_error(
+                            StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                            error_msg="sourced follow-up recovery is not supported after task-loop stop",
+                        )
+                except Exception as exc:
+                    follow_up_error = exc
             # Clear stop_condition_state so the next invoke starts fresh.
             _state = self.load_state(session)
             _state.stop_condition_state = None
@@ -2837,6 +2858,8 @@ class DeepAgent(BaseAgent):
                 self._loop_session = None
                 self._bound_session_id = None
                 self._log_loop("all tasks completed, controller cleaned up")
+            if follow_up_error is not None and primary_error is None:
+                raise follow_up_error
 
     async def _run_task_loop_invoke(
         self,
@@ -3411,105 +3434,107 @@ class DeepAgent(BaseAgent):
         session: Session,
     ) -> RoundOutcome:
         """Execute one interaction work item and optionally propose follow-up work."""
-        self._invoke_active = True
-        try:
-            coordinator, controller = await self.prepare_interaction_task_loop(session)
-            if work.reset_loop:
-                coordinator.reset()
-                state = self.load_state(session)
-                state.stop_condition_state = None
-                self.save_state(session, state)
+        with execution_origin_scope(work.execution_origin):
+            self._invoke_active = True
+            try:
+                coordinator, controller = await self.prepare_interaction_task_loop(session)
+                if work.reset_loop:
+                    coordinator.reset()
+                    state = self.load_state(session)
+                    state.stop_condition_state = None
+                    self.save_state(session, state)
 
-            inputs = copy.deepcopy(work.inputs)
-            if work.kind == "goal":
-                inputs["run"] = {
-                    "kind": "goal",
-                    "context": copy.deepcopy(work.context),
-                }
-            invoke_inputs = self._normalize_inputs(inputs)
-            is_resume_input = self._is_resume_input(invoke_inputs)
-            ctx = AgentCallbackContext(
-                agent=self, inputs=invoke_inputs, session=session
-            )
-            async with ctx.lifecycle(
-                AgentCallbackEvent.BEFORE_INVOKE,
-                AgentCallbackEvent.AFTER_INVOKE,
-            ):
-                await self._sync_expert_role_attachment(invoke_inputs, session)
-                if is_resume_input:
-                    if work.kind == "goal":
-                        iteration_inputs = TaskIterationInputs(
-                            iteration=coordinator.current_iteration + 1,
-                            loop_event=None,
-                            conversation_id=session.get_session_id(),
-                            query=invoke_inputs.query,
-                            run_kind="goal",
-                            run_context=work.context,
-                        )
-                        iteration_ctx = AgentCallbackContext(
-                            agent=self, inputs=iteration_inputs, session=session,
-                        )
-                        async with iteration_ctx.lifecycle(
-                            AgentCallbackEvent.BEFORE_TASK_ITERATION,
-                            AgentCallbackEvent.AFTER_TASK_ITERATION,
-                        ):
-                            try:
-                                result = await self._run_single_round_invoke(
-                                    ctx, session, streaming=True,
-                                )
-                            except asyncio.CancelledError:
-                                # The generic lifecycle still fires its after
-                                # callbacks on cancellation; this is not a
-                                # completed attempt and must not consume a report.
-                                iteration_inputs.result = {"result_type": "interrupt"}
-                                raise
-                            iteration_inputs.result = result
-                    else:
-                        result = await self._run_single_round_invoke(
-                            ctx, session, streaming=True,
-                        )
-                else:
-                    await controller.submit_round(
-                        session,
-                        str(work.query),
-                        is_follow_up=work.is_follow_up,
-                        run_kind=invoke_inputs.run_kind,
-                        run_context=invoke_inputs.run_context,
-                        task_id=task_id,
-                    )
-                    timeout = (
-                        self._deep_config.completion_timeout
-                        if self._deep_config
-                        else 600.0
-                    )
-                    result = await controller.wait_round_completion(timeout=timeout)
-                await self._write_round_result_to_stream(result, session)
-                invoke_inputs.result = result
-                next_work = (
-                    None
-                    if is_resume_input
-                    else self._build_interaction_next_work(
-                        work=work,
-                        result=result,
-                        session=session,
-                        coordinator=coordinator,
-                        controller=controller,
-                    )
+                inputs = copy.deepcopy(work.inputs)
+                if work.kind == "goal":
+                    inputs["run"] = {
+                        "kind": "goal",
+                        "context": copy.deepcopy(work.context),
+                    }
+                invoke_inputs = self._normalize_inputs(inputs)
+                is_resume_input = self._is_resume_input(invoke_inputs)
+                ctx = AgentCallbackContext(
+                    agent=self, inputs=invoke_inputs, session=session
                 )
+                async with ctx.lifecycle(
+                    AgentCallbackEvent.BEFORE_INVOKE,
+                    AgentCallbackEvent.AFTER_INVOKE,
+                ):
+                    await self._sync_expert_role_attachment(invoke_inputs, session)
+                    if is_resume_input:
+                        if work.kind == "goal":
+                            iteration_inputs = TaskIterationInputs(
+                                iteration=coordinator.current_iteration + 1,
+                                loop_event=None,
+                                conversation_id=session.get_session_id(),
+                                query=invoke_inputs.query,
+                                run_kind="goal",
+                                run_context=work.context,
+                            )
+                            iteration_ctx = AgentCallbackContext(
+                                agent=self, inputs=iteration_inputs, session=session,
+                            )
+                            async with iteration_ctx.lifecycle(
+                                AgentCallbackEvent.BEFORE_TASK_ITERATION,
+                                AgentCallbackEvent.AFTER_TASK_ITERATION,
+                            ):
+                                try:
+                                    result = await self._run_single_round_invoke(
+                                        ctx, session, streaming=True,
+                                    )
+                                except asyncio.CancelledError:
+                                    # The generic lifecycle still fires its after
+                                    # callbacks on cancellation; this is not a
+                                    # completed attempt and must not consume a report.
+                                    iteration_inputs.result = {"result_type": "interrupt"}
+                                    raise
+                                iteration_inputs.result = result
+                        else:
+                            result = await self._run_single_round_invoke(
+                                ctx, session, streaming=True,
+                            )
+                    else:
+                        await controller.submit_round(
+                            session,
+                            str(work.query),
+                            is_follow_up=work.is_follow_up,
+                            run_kind=invoke_inputs.run_kind,
+                            run_context=invoke_inputs.run_context,
+                            task_id=task_id,
+                            origin=work.execution_origin,
+                        )
+                        timeout = (
+                            self._deep_config.completion_timeout
+                            if self._deep_config
+                            else 600.0
+                        )
+                        result = await controller.wait_round_completion(timeout=timeout)
+                    await self._write_round_result_to_stream(result, session)
+                    invoke_inputs.result = result
+                    next_work = (
+                        None
+                        if is_resume_input
+                        else self._build_interaction_next_work(
+                            work=work,
+                            result=result,
+                            session=session,
+                            coordinator=coordinator,
+                            controller=controller,
+                        )
+                    )
 
-            self.save_state(session)
-            self.clear_state(session)
-            return RoundOutcome(
-                next_work=next_work, interrupted=result.get("result_type") == "interrupt",
-            )
-        except Exception:
-            logger.exception("[DeepAgent] interaction round execution failed")
-            return RoundOutcome(
-                error_code="round_execution_error",
-                error_message="interaction round execution failed",
-            )
-        finally:
-            self._invoke_active = False
+                self.save_state(session)
+                self.clear_state(session)
+                return RoundOutcome(
+                    next_work=next_work, interrupted=result.get("result_type") == "interrupt",
+                )
+            except Exception:
+                logger.exception("[DeepAgent] interaction round execution failed")
+                return RoundOutcome(
+                    error_code="round_execution_error",
+                    error_message="interaction round execution failed",
+                )
+            finally:
+                self._invoke_active = False
 
     def _build_interaction_next_work(
         self,
@@ -3525,18 +3550,39 @@ class DeepAgent(BaseAgent):
         coordinator.set_last_result(result)
         state = self.load_state(session)
         state.stop_condition_state = coordinator.get_state()
-        state.pending_follow_ups.extend(controller.drain_follow_up())
-        self.save_state(session, state)
-
-        if result.get("result_type") == "interrupt" or coordinator.is_aborted:
-            return None
-        if not coordinator.should_continue() or work.kind == "goal":
-            return None
-
-        state = self.load_state(session)
-        if state.pending_follow_ups:
-            query = state.pending_follow_ups.pop(0)
+        origin = work.execution_origin
+        if origin is None:
+            state.pending_follow_ups.extend(controller.drain_follow_up(expected_origin=None))
             self.save_state(session, state)
+            if result.get("result_type") == "interrupt" or coordinator.is_aborted:
+                return None
+            if not coordinator.should_continue() or work.kind == "goal":
+                return None
+            state = self.load_state(session)
+            query = state.pending_follow_ups.pop(0) if state.pending_follow_ups else None
+            if query is not None:
+                self.save_state(session, state)
+        else:
+            batch_origin, messages = controller.drain_sourced_follow_up()
+            if state.pending_follow_ups or (messages and batch_origin is not origin):
+                raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                  error_msg="follow-up execution origin is unavailable or mixed")
+            self.save_state(session, state)
+            # Evaluators can observe saved state; preserve the original
+            # drain/save-before-evaluation ordering on this live-only path.
+            may_continue = (result.get("result_type") != "interrupt" and not coordinator.is_aborted
+                            and coordinator.should_continue() and work.kind != "goal")
+            if not may_continue:
+                if messages:
+                    # This captured batch is rejected, not stored without its
+                    # source or promoted past an interruption/stop condition.
+                    raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                      error_msg="sourced follow-up recovery is not supported after round stop")
+                return None
+            query = messages[0] if messages else None
+            for remaining in messages[1:]:
+                controller.enqueue_follow_up(remaining, origin=origin)
+        if query is not None:
             inputs = copy.deepcopy(work.inputs)
             inputs["query"] = query
             return RoundWorkItem.user(
@@ -3544,13 +3590,13 @@ class DeepAgent(BaseAgent):
                 inputs=inputs,
                 is_follow_up=True,
                 reset_loop=False,
-            )
+            ).with_execution_origin(origin)
         if self._has_remaining_tasks(session):
             return RoundWorkItem.user(
                 request_id=work.request_id,
                 inputs=work.inputs,
                 reset_loop=False,
-            )
+            ).with_execution_origin(origin)
         return None
 
     @property
@@ -3773,11 +3819,12 @@ class DeepAgent(BaseAgent):
         attach and let the existing consumer receive output.  Dispatch modes
         do not apply to ``InteractiveInput`` recovery requests.
         """
+        origin = current_execution_origin()
         self._ensure_interaction_running()
 
         async with self._interaction_send_lock:
             self._ensure_interaction_running()
-            await self._send_user(request)
+            await self._send_user(request, origin=origin)
 
     def _ensure_interaction_running(self) -> None:
         if not self._is_interaction_running():
@@ -3797,7 +3844,7 @@ class DeepAgent(BaseAgent):
         self._interaction_phase = target
         return True
 
-    async def _send_user(self, request: SendInputRequest) -> None:
+    async def _send_user(self, request: SendInputRequest, *, origin: ExecutionOrigin | None) -> None:
         inputs = request.inputs
         if not isinstance(inputs, dict):
             raise ValueError(
@@ -3822,7 +3869,7 @@ class DeepAgent(BaseAgent):
                         request_id=request.request_id,
                         inputs=inputs,
                         reset_loop=False,
-                    )
+                    ).with_execution_origin(origin)
                 )
                 self._notify_work()
                 return
@@ -3841,7 +3888,10 @@ class DeepAgent(BaseAgent):
                     and not self._active_interaction_round.waiting_for_input):
                 if loop is None:
                     raise RuntimeError("active interaction round cannot accept steer without loop_controller")
-                loop.enqueue_steer(str(inputs["query"]))
+                if self._active_interaction_round.work.execution_origin is not origin:
+                    raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                      error_msg="steer execution origin does not match active round")
+                loop.enqueue_steer(str(inputs["query"]), origin=origin)
                 self._notify_work()
                 return
 
@@ -3853,7 +3903,7 @@ class DeepAgent(BaseAgent):
                         inputs=inputs,
                         is_follow_up=True,
                         reset_loop=False,
-                    )
+                    ).with_execution_origin(origin)
                 )
                 self._notify_work()
                 return
@@ -3863,7 +3913,7 @@ class DeepAgent(BaseAgent):
             context_factory = self._fresh_input_context_factory
             if context_factory is None:
                 self._event_manager.push_user(
-                    RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
+                    RoundWorkItem.user(request_id=request.request_id, inputs=inputs).with_execution_origin(origin)
                 )
                 self._notify_work()
             else:
@@ -3871,6 +3921,7 @@ class DeepAgent(BaseAgent):
                     context_factory,
                     request_id=request.request_id,
                     inputs=inputs,
+                    origin=origin,
                 )
 
     async def _enqueue_fresh_input_in_context(
@@ -3879,6 +3930,7 @@ class DeepAgent(BaseAgent):
         *,
         request_id: Optional[str],
         inputs: Dict[str, Any],
+        origin: ExecutionOrigin | None,
     ) -> None:
         """Enter host readiness without allowing exit to hide dispatch failure."""
         context = context_factory()
@@ -3886,7 +3938,7 @@ class DeepAgent(BaseAgent):
         try:
             self._ensure_interaction_running()
             self._event_manager.push_user(
-                RoundWorkItem.user(request_id=request_id, inputs=inputs)
+                RoundWorkItem.user(request_id=request_id, inputs=inputs).with_execution_origin(origin)
             )
             self._notify_work()
         except BaseException as primary_error:
@@ -4114,14 +4166,22 @@ class DeepAgent(BaseAgent):
         controller = self.loop_controller
         if controller is None or not controller.has_follow_up():
             return
-        for query in controller.drain_follow_up():
+        try:
+            origin, messages = controller.drain_sourced_follow_up()
+        except ValueError:
+            await self._interaction_output.emit(InteractionEvent.execution_error(
+                code="execution_origin_conflict", message="follow-up batch has mixed execution origins",
+            ).to_output_schema())
+            await self._interaction_output.finish_current()
+            raise
+        for query in messages:
             self._event_manager.push_user(
                 RoundWorkItem.user(
                     request_id=None,
                     inputs={"query": query},
                     is_follow_up=True,
                     reset_loop=False,
-                )
+                ).with_execution_origin(origin)
             )
 
     async def _close_idle_output_if_finished(self) -> None:
@@ -4206,64 +4266,67 @@ class DeepAgent(BaseAgent):
             work = RoundWorkItem(
                 kind="goal", request_id=work.request_id, inputs=work.inputs,
                 context={**suspended.work.context, "reset_loop": False},
-            )
-        session = self._interaction_session
-        task_id = uuid.uuid4().hex
-        forwarded = asyncio.Event()
-        self._interaction_round_forwarded = forwarded
-        self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
-        self._event_manager.mark_started(work)
-        interrupted = False
-        try:
-            if session is None or not self._interaction_output.has_consumer():
-                return
-            if work.kind == "goal" and not resuming_goal:
-                if self.goal_manager is None:
+            ).with_execution_origin(suspended.work.execution_origin)
+        with execution_origin_scope(work.execution_origin):
+            session = self._interaction_session
+            task_id = uuid.uuid4().hex
+            forwarded = asyncio.Event()
+            self._interaction_round_forwarded = forwarded
+            self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
+            self._event_manager.mark_started(work)
+            interrupted = False
+            try:
+                if session is None or not self._interaction_output.has_consumer():
                     return
-                started = await self.goal_manager.begin_attempt(
-                    goal_id=str(work.context["goal_id"]),
-                    revision=int(work.context["revision"]),
-                )
-                if started is None:
-                    return
+                if work.kind == "goal" and not resuming_goal:
+                    if self.goal_manager is None:
+                        return
+                    started = await self.goal_manager.begin_attempt(
+                        goal_id=str(work.context["goal_id"]),
+                        revision=int(work.context["revision"]),
+                    )
+                    if started is None:
+                        return
 
-            outcome: RoundOutcome = await self.run_one_round(
-                work, task_id, session
-            )
-            interrupted = work.kind == "goal" and outcome.interrupted
-            self._active_interaction_round.waiting_for_input = interrupted
-            if not self._is_interaction_running():
-                return
-            if outcome.next_work is not None:
-                self._event_manager.push_user(outcome.next_work)
-                self._notify_work()
-            if outcome.error_code is not None:
+                outcome: RoundOutcome = await self.run_one_round(
+                    work, task_id, session
+                )
+                interrupted = work.kind == "goal" and outcome.interrupted
+                self._active_interaction_round.waiting_for_input = interrupted
+                if not self._is_interaction_running():
+                    return
+                if outcome.next_work is not None:
+                    self._event_manager.push_user(outcome.next_work)
+                    self._notify_work()
+                if outcome.error_code is not None:
+                    error = InteractionEvent.execution_error(
+                        code=outcome.error_code, message=outcome.error_message or "",
+                    )
+                    if work.execution_origin is not None:
+                        await self._interaction_output.emit(error.to_output_schema())
+                        await self._interaction_output.finish_current()
+                    else:
+                        self._emit_interaction_event(error)
+            except asyncio.CancelledError:
+                logger.info("[DeepAgent] round cancelled")
+            except Exception:
+                logger.exception("[DeepAgent] round execution failed")
                 self._emit_interaction_event(
                     InteractionEvent.execution_error(
-                        code=outcome.error_code,
-                        message=outcome.error_message or "",
+                        code="round_execution_error",
+                        message="round execution failed",
                     )
                 )
-        except asyncio.CancelledError:
-            logger.info("[DeepAgent] round cancelled")
-        except Exception:
-            logger.exception("[DeepAgent] round execution failed")
-            self._emit_interaction_event(
-                InteractionEvent.execution_error(
-                    code="round_execution_error",
-                    message="round execution failed",
-                )
-            )
-        finally:
-            if not interrupted:
-                self._event_manager.mark_finished(work)
-            if session is not None:
-                emitted = await self._emit_round_boundary(session)
-                if not emitted:
-                    forwarded.set()
-            if not interrupted:
-                self._active_interaction_round = None
-            self._try_transition_interaction_phase(InteractionPhase.IDLE)
+            finally:
+                if not interrupted:
+                    self._event_manager.mark_finished(work)
+                if session is not None:
+                    emitted = await self._emit_round_boundary(session)
+                    if not emitted:
+                        forwarded.set()
+                if not interrupted:
+                    self._active_interaction_round = None
+                self._try_transition_interaction_phase(InteractionPhase.IDLE)
 
     def _load_goal_record_locked(self) -> Optional[GoalRecord]:
         if self.goal_manager is None:

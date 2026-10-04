@@ -134,6 +134,11 @@ class TaskLoopController(Controller):
             return queues.drain_follow_up(expected_origin=expected_origin)
         return []
 
+    def drain_sourced_follow_up(self):
+        """Return the original source and messages of one existing queue batch."""
+        queues = self._get_interaction_queues()
+        return queues.drain_sourced_follow_up() if queues is not None else (None, [])
+
     def enqueue_follow_up(self, msg: str, *, origin=ORIGIN_UNSET) -> None:
         """Enqueue a follow-up message for the next outer round.
 
