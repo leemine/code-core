@@ -13,6 +13,7 @@ from openjiuwen.core.foundation.tool import (
     ToolCard,
     bind_tool_authorizer,
     current_tool_invocation,
+    invoke_tool_with_authority,
 )
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import ToolCallEvents
@@ -356,3 +357,220 @@ async def test_cancelled_authorizer_expires_proof_and_inherited_child(execution)
     assert not execution.effects
     await execution.invoke()
     assert execution.effects == [{"path": "original"}]
+
+
+@pytest.fixture
+def host_execution(execution):
+    from openjiuwen.harness_protocol import BeforeToolContext
+
+    source = BeforeToolContext(
+        "host", "provider-session", "original-turn", "original-call", "product_probe", {"path": "original"}
+    )
+    values = {"session": execution.session}
+    state = SimpleNamespace(current=True, executor=execution.tool, source=source, kwargs=values)
+
+    async def allow(_):
+        return True
+
+    async def invoke(authorizer=allow, inputs=None):
+        return await invoke_tool_with_authority(
+            execution.tool,
+            {"path": "original"} if inputs is None else inputs,
+            operation=source,
+            authorizer=authorizer,
+            runtime_kwargs=values,
+            is_current=lambda: state.current,
+            resolve_executor=lambda: state.executor,
+        )
+
+    state.invoke = invoke
+    return state
+
+
+async def test_host_entry_preserves_source_and_authorizes_actual_transformed_inputs(execution, host_execution):
+    seen = []
+
+    async def transform(*args, **kwargs):
+        return (), {**kwargs, "inputs": {"path": "transformed"}}
+
+    async def authority(operation):
+        proof = current_tool_invocation()
+        assert proof.source_operation is host_execution.source
+        assert proof.operation is operation and operation is not proof.source_operation
+        assert operation.turn_id == "original-turn" and operation.call_id == "original-call"
+        assert operation.tool_name == "product_probe" and operation.provider_session_id == "provider-session"
+        assert proof.executor is execution.tool and proof.original_invoke.__self__ is execution.tool
+        assert proof.is_current()
+        seen.append(proof)
+        return operation.arguments["path"] == "transformed"
+
+    framework = Runner.callback_framework
+    await framework.register(ToolCallEvents.TOOL_INVOKE_INPUT, transform, callback_type="transform")
+    try:
+        assert await host_execution.invoke(authority) == {"path": "transformed"}
+    finally:
+        await framework.unregister(ToolCallEvents.TOOL_INVOKE_INPUT, transform)
+    assert execution.effects == [{"path": "transformed"}]
+    assert len(seen) == 1 and not seen[0].is_current()
+    assert current_tool_invocation() is None
+
+
+@pytest.mark.parametrize("change", ["source_dead", "executor", "invoke", "kwargs", "card", "args"])
+async def test_host_final_proof_detects_mutation_during_authority(execution, host_execution, change):
+    final = {"path": "original"}
+
+    async def transform(*args, **kwargs):
+        return (), {**kwargs, "inputs": final}
+
+    async def authority(_):
+        await asyncio.sleep(0)
+        if change == "source_dead":
+            host_execution.current = False
+        elif change == "executor":
+            host_execution.executor = object()
+        elif change == "invoke":
+            execution.tool.invoke = lambda *_: None
+        elif change == "kwargs":
+            host_execution.kwargs["session"] = object()
+        elif change == "card":
+            execution.tool.card.name = "changed"
+        else:
+            final["path"] = "changed"
+        return True
+
+    framework = Runner.callback_framework
+    await framework.register(ToolCallEvents.TOOL_INVOKE_INPUT, transform, callback_type="transform")
+    try:
+        with pytest.raises(PermissionError):
+            await host_execution.invoke(authority)
+    finally:
+        await framework.unregister(ToolCallEvents.TOOL_INVOKE_INPUT, transform)
+    assert not execution.effects
+
+
+@pytest.mark.parametrize("decision", [False, None, 1, "true", "error"])
+async def test_host_required_authority_fails_closed(execution, host_execution, decision):
+    async def authority(_):
+        if decision == "error":
+            raise ValueError("synthetic policy failure")
+        return decision
+
+    with pytest.raises(PermissionError):
+        await host_execution.invoke(authority)
+    assert not execution.effects
+
+
+async def test_host_transform_denied_after_legitimate_callbacks(execution, host_execution):
+    async def transform(*args, **kwargs):
+        return (), {**kwargs, "inputs": {"path": "unauthorized"}}
+
+    async def authority(operation):
+        return operation.arguments["path"] == "original"
+
+    framework = Runner.callback_framework
+    await framework.register(ToolCallEvents.TOOL_INVOKE_INPUT, transform, callback_type="transform")
+    try:
+        with pytest.raises(PermissionError):
+            await host_execution.invoke(authority)
+    finally:
+        await framework.unregister(ToolCallEvents.TOOL_INVOKE_INPUT, transform)
+    assert not execution.effects
+
+
+async def test_host_rejects_stream_reentry_and_cross_task_inheritance(execution, host_execution):
+    saved = []
+
+    async def authority(_):
+        proof = current_tool_invocation()
+        saved.append((copy_context(), proof))
+        with pytest.raises(PermissionError):
+            async for _ in execution.tool.stream({"path": "stream"}):
+                pass
+        with pytest.raises(PermissionError):
+            await host_execution.invoke()
+        with pytest.raises(PermissionError):
+            await asyncio.create_task(host_execution.invoke())
+        # AbilityManager cannot open a fresh call to drop the host ownership.
+        assert "PERMISSION_DENIED" in str(await asyncio.create_task(execution.invoke()))
+        return True
+
+    await host_execution.invoke(authority)
+    context, proof = saved[0]
+    assert not context.run(proof.is_current)
+    with pytest.raises(PermissionError):
+        await context.run(asyncio.create_task, host_execution.invoke())
+    assert execution.effects == [{"path": "original"}]
+
+
+async def test_host_cancel_closes_inherited_proof_and_restores_legacy(execution, host_execution):
+    entered = asyncio.Event()
+    saved = []
+
+    async def authority(_):
+        saved.append((copy_context(), current_tool_invocation()))
+        entered.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(host_execution.invoke(authority))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not saved[0][0].run(saved[0][1].is_current)
+    assert not execution.effects
+    await execution.tool.invoke({"path": "legacy"})
+    assert execution.effects == [{"path": "legacy"}]
+
+
+async def test_host_parallel_calls_have_independent_proofs(execution, host_execution):
+    seen = []
+
+    async def authority(_):
+        proof = current_tool_invocation()
+        await asyncio.sleep(0)
+        assert current_tool_invocation() is proof
+        seen.append(proof)
+        return True
+
+    await asyncio.gather(host_execution.invoke(authority), host_execution.invoke(authority))
+    assert len(seen) == 2 and seen[0] is not seen[1] and len(execution.effects) == 2
+
+
+async def test_host_unknown_wrappers_and_unproven_inputs_rejected_before_callbacks(execution, host_execution):
+    execution.tool.invoke = lambda *_: None
+    with pytest.raises(PermissionError):
+        await host_execution.invoke()
+    assert not execution.effects
+
+
+async def test_host_source_args_and_runtime_reserved_input_cannot_be_replaced(execution, host_execution):
+    with pytest.raises(PermissionError):
+        await host_execution.invoke(inputs={"path": "other"})
+    host_execution.kwargs["inputs"] = {}
+    with pytest.raises(PermissionError):
+        await host_execution.invoke()
+    assert not execution.effects
+
+
+async def test_host_final_entry_cannot_be_reused_by_direct_recursive_tool(execution, host_execution):
+    async def authority(_):
+        with pytest.raises(PermissionError):
+            await execution.tool.invoke(inputs={"path": "recursive"}, session=execution.session)
+        return True
+
+    await host_execution.invoke(authority)
+    assert execution.effects == [{"path": "original"}]
+
+
+async def test_host_transform_runtime_kwargs_change_is_denied(execution, host_execution):
+    async def transform(*args, **kwargs):
+        return (), {**kwargs, "session": object()}
+
+    framework = Runner.callback_framework
+    await framework.register(ToolCallEvents.TOOL_INVOKE_INPUT, transform, callback_type="transform")
+    try:
+        with pytest.raises(PermissionError):
+            await host_execution.invoke()
+    finally:
+        await framework.unregister(ToolCallEvents.TOOL_INVOKE_INPUT, transform)
+    assert not execution.effects

@@ -12,6 +12,7 @@ REQUIRED_PATHS = (
     "tests/unit_tests/harness/security/test_mandatory_authorization.py",
     "tests/unit_tests/core/foundation/tool/test_final_authority.py",
     "tests/unit_tests/core/foundation/llm/test_model_request_authority.py",
+    "tests/unit_tests/harness/test_model_materializer.py",
     "tests/unit_tests/harness/tools/test_builtin_final_authority.py",
     "tests/unit_tests/harness_providers/test_tool_authorizer.py",
     "tests/unit_tests/harness_providers/test_native_host.py",

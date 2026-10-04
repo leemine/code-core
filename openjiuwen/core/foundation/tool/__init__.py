@@ -5,6 +5,7 @@ from openjiuwen.core.foundation.tool.authority import (
     ToolInvocation,
     bind_tool_authorizer,
     current_tool_invocation,
+    invoke_tool_with_authority,
 )
 from openjiuwen.core.foundation.tool.base import Input, Output, Tool, ToolCard
 from openjiuwen.core.foundation.tool.exposure import ToolExposure
@@ -34,6 +35,7 @@ __all__ = [
     "ToolInvocation",
     "bind_tool_authorizer",
     "current_tool_invocation",
+    "invoke_tool_with_authority",
     # all tools
     "Tool",
     "LocalFunction",

@@ -11,10 +11,10 @@ from typing import (
     Callable,
     Optional,
 )
+
 from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import (
     Model,
     ModelClientConfig,
@@ -23,21 +23,20 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool import (
     McpServerConfig,
     ToolCard,
-    ToolExposure,
 )
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.config import (
     LocalWorkConfig,
     SandboxGatewayConfig,
 )
-from openjiuwen.core.sys_operation.sys_operation import SysOperationCard, SysOperation
+from openjiuwen.core.sys_operation.sys_operation import SysOperation, SysOperationCard
 from openjiuwen.harness.schema.build_context import (
-    BuildContext,
     PARENT_SYS_OPERATION_EXTRAS_KEY,
+    BuildContext,
 )
 from openjiuwen.harness.schema.config import (
-    AudioModelConfig,
     DEFAULT_ACR_BASE_URL,
     DEFAULT_AUDIO_HTTP_TIMEOUT,
     DEFAULT_MAX_AUDIO_BYTES,
@@ -45,6 +44,7 @@ from openjiuwen.harness.schema.config import (
     DEFAULT_OPENAI_AUDIO_TRANSCRIPTION_MODEL,
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_VISION_MODEL,
+    AudioModelConfig,
     SubAgentConfig,
     VisionModelConfig,
 )
@@ -124,8 +124,13 @@ class TeamModelConfig(BaseModel):
     model_client_config: ModelClientConfig
     model_request_config: Optional[ModelRequestConfig] = None
 
-    def build(self) -> "Model":
-        """Create a Model instance from this config."""
+    def build(self, context: "BuildContext | None" = None) -> "Model":
+        """Create a Model through the live host factory when supplied."""
+        if context is not None and context.model_factory is not None:
+            result = context.model_factory(self, context)
+            if not isinstance(result, Model):
+                raise TypeError("model_factory must return a Model")
+            return result
         return Model(
             model_client_config=self.model_client_config,
             model_config=self.model_request_config,
@@ -379,10 +384,24 @@ class SubAgentSpec(BaseModel):
         """
         from openjiuwen.harness.manifest import ensure_builtin_elements_registered
 
-        ensure_builtin_elements_registered()
-        if self.factory_name and self.factory_name in _SUBAGENT_PROVIDER_REGISTRY:
-            return _SUBAGENT_PROVIDER_REGISTRY[self.factory_name](dict(self.factory_kwargs), context)
-        resolved_model = self.model.build() if self.model else None
+        if context is not None and context.model_factory is not None:
+            # Arbitrary providers can construct or inherit models themselves.
+            # They need a separate explicit factory contract before opt-in.
+            if self.factory_name:
+                raise ValueError("model_factory does not support subagent providers")
+            context = context.derive(subagent_name=self.agent_card.id or self.agent_card.name)
+            context.extras = dict(context.extras)
+            model_spec = self.model or context.extras.get("_parent_model_spec")
+            if not isinstance(model_spec, TeamModelConfig):
+                raise ValueError("model_factory requires a subagent model spec")
+            resolved_model = model_spec.build(context=context)
+            context.extras["_parent_model"] = resolved_model
+            context.extras["_parent_model_spec"] = model_spec
+        else:
+            ensure_builtin_elements_registered()
+            if self.factory_name and self.factory_name in _SUBAGENT_PROVIDER_REGISTRY:
+                return _SUBAGENT_PROVIDER_REGISTRY[self.factory_name](dict(self.factory_kwargs), context)
+            resolved_model = self.model.build() if self.model else None
         resolved_workspace = self.workspace.build() if self.workspace else None
         resolved_rails = None
         if self.rails:
@@ -539,7 +558,11 @@ class DeepAgentSpec(BaseModel):
         from openjiuwen.harness.factory import resolve_deep_agent_parts
         from openjiuwen.harness.prompts import resolve_language
 
-        llm_model = self.model.build() if self.model else None
+        if context is not None and context.model_factory is not None:
+            if self.model is None:
+                raise ValueError("model_factory requires an explicit model spec")
+            if self.add_general_purpose_agent:
+                raise ValueError("model_factory requires explicit subagent specs")
         language = resolve_language(self.language)
 
         vision_config = self.vision_model.build() if self.vision_model else None
@@ -562,6 +585,12 @@ class DeepAgentSpec(BaseModel):
                 workspace=workspace,
                 member_card_id=member_card_id,
             )
+
+        llm_model = None
+        if self.model is not None:
+            llm_model = (self.model.build(context=build_ctx) if build_ctx.model_factory is not None
+                         else self.model.build())
+        build_ctx.extras["_parent_model_spec"] = self.model
 
         # Always publish the parent model (maybe None when Spec has no model)
         # so core.subagent.* / progressive_tool factories can read extras.
