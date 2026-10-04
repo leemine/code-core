@@ -134,6 +134,13 @@ class GoalManager:
         max_attempts: Optional[int] = None,
     ) -> GoalRecord:
         origin = _capture_live_execution_origin()
+        self._validate_set(objective, token_budget, max_attempts)
+        async with self._control_lock:
+            return await self._set_locked(objective.strip(), overwrite_confirmed=overwrite_confirmed,
+                                          token_budget=token_budget, max_attempts=max_attempts, origin=origin)
+
+    @staticmethod
+    def _validate_set(objective, token_budget, max_attempts):
         normalized = objective.strip()
         if not normalized:
             raise GoalOperationError(
@@ -154,130 +161,178 @@ class GoalManager:
                 message="max_attempts must be positive",
             )
 
-        async with self._control_lock:
-            if origin is not None:
-                origin._check_current()
-            existing = self._store.load()
-            if existing is not None and not overwrite_confirmed:
-                raise GoalOperationError(
-                    operation="set",
-                    code="already_exists",
-                    message="a goal already exists for this session",
-                    goal=existing,
-                )
+    async def _set_locked(self, normalized, *, overwrite_confirmed, token_budget, max_attempts,
+                          origin, control=None):
+        if origin is not None:
+            origin._check_current()
+        if control is not None:
+            control.check(live=True)
+        existing = self._store.load()
+        if existing is not None and not overwrite_confirmed:
+            raise GoalOperationError(
+                operation="set",
+                code="already_exists",
+                message="a goal already exists for this session",
+                goal=existing,
+            )
 
-            if existing is not None:
+        if existing is not None:
+            if control is None:
                 self._execution.discard_work(
                     session_id=existing.session_id,
                     goal_id=existing.goal_id,
                 )
+            else:
+                control.discard()
 
-            record = GoalRecord.create(
-                session_id=self._store.session_id,
-                objective=normalized,
-                token_budget=token_budget,
-                max_attempts=max_attempts,
-            )
-            self._execution_origin = (record.session_id, record.goal_id, record.revision, origin)
-            self._store.save(record)
-            await self._commit_store_locked()
+        record = GoalRecord.create(
+            session_id=self._store.session_id,
+            objective=normalized,
+            token_budget=token_budget,
+            max_attempts=max_attempts,
+        )
+        self._execution_origin = (record.session_id, record.goal_id, record.revision, origin)
+        self._store.save(record)
+        if control is not None:
+            control.saved(record)
+        await self._commit_control_locked(control)
+        if control is None:
             self._origin_for_record(record)
+        else:
+            control.check()
 
-            # An existing stream remains the one and only consumer.  Queue the
-            # replacement work before aborting the old goal round so the stream
-            # naturally continues into the replacement.
-            if self._execution.is_available():
-                self._ensure_goal_work_locked(record)
-                self._emit_goal_updated_locked(record)
+        # An existing stream remains the one and only consumer.  Queue the
+        # replacement work before aborting the old goal round so the stream
+        # naturally continues into the replacement.
+        if self._execution.is_available():
+            self._ensure_goal_work_locked(record, control=control)
+            self._emit_goal_updated_locked(record, control=control)
 
-            if existing is not None:
+        if existing is not None:
+            if control is None:
                 await self._execution.cancel_attempt(
                     goal_id=existing.goal_id,
                     reason="goal_overwrite",
                 )
+            else:
+                control.cancel()
 
+        if control is None:
             self._origin_for_record(record)
-            return record.copy_for_response()
+        else:
+            control.check()
+        return record.copy_for_response()
 
     async def pause(self) -> Optional[GoalRecord]:
         async with self._control_lock:
-            record = self._store.load()
-            if record is None:
-                return None
-            if record.status is GoalStatus.ACTIVE:
-                # Do not bump revision: the in-flight goal round is allowed to
-                # finish naturally (including assessment).  Bumping would make
-                # the finishing attempt look stale and drop last_assessment /
-                # COMPLETE.  Pending continuations are discarded below.
+            return await self._pause_locked()
+
+    async def _pause_locked(self, control=None):
+        record = self._store.load()
+        if record is None:
+            return None
+        if record.status is GoalStatus.ACTIVE:
+            # Do not bump revision: the in-flight goal round is allowed to
+            # finish naturally (including assessment).  Bumping would make
+            # the finishing attempt look stale and drop last_assessment /
+            # COMPLETE.  Pending continuations are discarded below.
+            if control is None:
                 self._execution.discard_work(
                     session_id=record.session_id,
                     goal_id=record.goal_id,
                 )
-                # Always settle first so hosts that only display time_used while
-                # paused (and ignore active_started_at) do not jump to 0.
-                record.settle_active_time(keep_active=False)
-                # If an attempt is still finishing, reopen the clock for
-                # backend accounting. Resume's start_timing is a no-op while
-                # this remains set; CONTINUE under PAUSED settles it closed.
-                if self._has_in_flight_goal_attempt(record):
-                    record.start_timing()
-                record.status = GoalStatus.PAUSED
-                record.touch(bump_revision=False)
-                self._store.save(record)
-                await self._commit_store_locked()
-                if self._execution.is_available():
-                    self._emit_goal_updated_locked(record)
-            return record.copy_for_response()
+            else:
+                control.discard()
+            # Always settle first so hosts that only display time_used while
+            # paused (and ignore active_started_at) do not jump to 0.
+            record.settle_active_time(keep_active=False)
+            # If an attempt is still finishing, reopen the clock for
+            # backend accounting. Resume's start_timing is a no-op while
+            # this remains set; CONTINUE under PAUSED settles it closed.
+            if self._has_in_flight_goal_attempt(record):
+                record.start_timing()
+            record.status = GoalStatus.PAUSED
+            record.touch(bump_revision=False)
+            self._store.save(record)
+            if control is not None:
+                control.saved(record)
+            await self._commit_control_locked(control)
+            if self._execution.is_available():
+                self._emit_goal_updated_locked(record, control=control)
+        return record.copy_for_response()
 
     async def resume(self) -> Optional[GoalRecord]:
         async with self._control_lock:
-            record = self._store.load()
-            if record is None:
-                return None
-            if record.status in (GoalStatus.PAUSED, GoalStatus.BLOCKED):
-                # While paused, hosts freeze on time_used_seconds. If an attempt
-                # kept running, active_started_at still tracks that segment—
-                # fold it into time_used here so becoming ACTIVE jumps the
-                # displayed total. Idle pause (no open clock) is a no-op.
-                in_flight = self._has_in_flight_goal_attempt(record)
-                if self._origin_for_record(record) is not None and not in_flight:
-                    raise RuntimeError("managed Goal resume requires an explicit new host admission")
-                record.settle_active_time(keep_active=False)
-                record.status = GoalStatus.ACTIVE
-                record.start_timing()
-                # Idle / BLOCKED resume bumps revision and may ensure a new
-                # attempt (generation token). If the same attempt is still
-                # running, keep the revision so its assessment can commit and
-                # do not queue a duplicate round.
-                record.touch(bump_revision=not in_flight)
-                self._store.save(record)
-                await self._commit_store_locked()
-                if self._execution.is_available():
-                    if not in_flight:
-                        self._ensure_goal_work_locked(record)
-                    self._emit_goal_updated_locked(record)
-            return record.copy_for_response()
+            return await self._resume_locked()
+
+    async def _resume_locked(self, control=None):
+        record = self._store.load()
+        if record is None:
+            return None
+        if record.status in (GoalStatus.PAUSED, GoalStatus.BLOCKED):
+            # While paused, hosts freeze on time_used_seconds. If an attempt
+            # kept running, active_started_at still tracks that segment—
+            # fold it into time_used here so becoming ACTIVE jumps the
+            # displayed total. Idle pause (no open clock) is a no-op.
+            in_flight = self._has_in_flight_goal_attempt(record)
+            origin = self._origin_for_record(record) if control is None else control.origin
+            if control is not None:
+                control.check(live=True)
+            if origin is not None and not in_flight:
+                raise RuntimeError("managed Goal resume requires an explicit new host admission")
+            record.settle_active_time(keep_active=False)
+            record.status = GoalStatus.ACTIVE
+            record.start_timing()
+            # Idle / BLOCKED resume bumps revision and may ensure a new
+            # attempt (generation token). If the same attempt is still
+            # running, keep the revision so its assessment can commit and
+            # do not queue a duplicate round.
+            record.touch(bump_revision=not in_flight)
+            self._store.save(record)
+            if control is not None:
+                control.saved(record)
+            await self._commit_control_locked(control)
+            if self._execution.is_available():
+                if not in_flight:
+                    self._ensure_goal_work_locked(record, control=control)
+                self._emit_goal_updated_locked(record, control=control)
+        return record.copy_for_response()
 
     async def clear(self) -> Optional[GoalRecord]:
         async with self._control_lock:
-            record = self._store.load()
-            if record is None:
-                return None
-            record.settle_active_time(keep_active=False)
-            self._store.clear()
-            await self._commit_store_locked()
+            return await self._clear_locked()
+
+    async def _clear_locked(self, control=None):
+        record = self._store.load()
+        if record is None:
+            return None
+        record.settle_active_time(keep_active=False)
+        self._store.clear()
+        if control is not None:
+            control.saved(None)
+        await self._commit_control_locked(control)
+        if control is None:
             self._execution.discard_work(
                 session_id=record.session_id,
                 goal_id=record.goal_id,
             )
+        else:
+            control.discard()
+        if control is None:
             await self._execution.cancel_attempt(
                 goal_id=record.goal_id,
                 reason="goal_clear",
             )
-            if self._execution.is_available():
+        else:
+            control.cancel()
+        if self._execution.is_available():
+            if control is None:
                 with execution_origin_scope(self._origin_for_record(record)):
                     self._execution.goal_updated(None)
-            return record.copy_for_response()
+            else:
+                control.check()
+                self._execution.goal_updated(None)
+        return record.copy_for_response()
 
     def ensure_active_goal_work_locked(self) -> bool:
         """Ensure the current ACTIVE record has one queued/dequeued/active work.
@@ -395,13 +450,19 @@ class GoalManager:
                 self._emit_goal_updated_locked(record)
             return record.copy_for_response()
 
-    def _ensure_goal_work_locked(self, record: GoalRecord) -> bool:
+    def _ensure_goal_work_locked(self, record: GoalRecord, *, control=None) -> bool:
         if record.status is not GoalStatus.ACTIVE or not self._execution.is_available():
             return False
+        if control is not None:
+            return self._execution._ensure_owned_control(record.copy_for_response(), control)
         with execution_origin_scope(self._origin_for_record(record)):
             return self._execution.ensure_work(record.copy_for_response())
 
-    def _emit_goal_updated_locked(self, record: GoalRecord) -> None:
+    def _emit_goal_updated_locked(self, record: GoalRecord, *, control=None) -> None:
+        if control is not None:
+            control.check()
+            self._execution.goal_updated(record.copy_for_response())
+            return
         with execution_origin_scope(self._origin_for_record(record)):
             self._execution.goal_updated(record.copy_for_response())
 
@@ -412,6 +473,21 @@ class GoalManager:
             and attempt_index == record.attempt_count
             and attempt_index > record.last_assessed_attempt
         )
+
+    def _capture_owned_control(self, *, expected_origin):
+        from openjiuwen.harness.goal.owned_control import capture
+        return capture(self, expected_origin)
+
+    async def _apply_owned_control(self, selector, **kwargs):
+        from openjiuwen.harness.goal.owned_control import apply
+        return await apply(self, selector, **kwargs)
+
+    async def _commit_control_locked(self, control):
+        if control is not None:
+            control.check()
+        await self._commit_store_locked()
+        if control is not None:
+            control.check()
 
     async def _commit_store_locked(self) -> None:
         commit = getattr(self._store, "commit", None)

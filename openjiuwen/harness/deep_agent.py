@@ -248,6 +248,10 @@ _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
 _ROUND_BOUNDARY = object()
 
 
+class _GoalWorkChangedError(PermissionError):
+    """An original managed Goal item was invalidated before dispatch."""
+
+
 class _OwnedRoundExitUnconfirmed(RuntimeError):
     """Internal ownership uncertainty; never a completed provider Turn."""
 
@@ -259,6 +263,21 @@ class _OwnedOriginExit:
     origin: ExecutionOrigin
     work: tuple
     active: ActiveInteractionRound | None
+
+
+@dataclasses.dataclass(frozen=True, slots=True, eq=False, repr=False)
+class _OwnedGoalAttempt:
+    agent: object
+    session: object
+    controller: object
+    events: object
+    origin: ExecutionOrigin
+    root: ActiveInteractionRound | None
+    work: RoundWorkItem
+    facade: object
+    attempt: ActiveInteractionRound | None
+    pending: tuple
+    work_facts: object
 
 
 FreshInputContextFactory = Callable[[], AbstractAsyncContextManager[None]]
@@ -3722,6 +3741,7 @@ class DeepAgent(BaseAgent):
                 emit_event=self._emit_interaction_event,
                 notify_work=self._notify_work,
             )
+            self.goal_manager._execution._owner = self
             self._interaction_started = True
             self._interaction_forwarder_task = asyncio.create_task(
                 self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
@@ -4260,7 +4280,11 @@ class DeepAgent(BaseAgent):
                 # awaited. Never publish a new owned round after that fence.
                 if not self._is_interaction_running():
                     return
-                owned_round = self._prepare_owned_round(work)
+                try:
+                    owned_round = self._prepare_owned_round(work)
+                except _GoalWorkChangedError:
+                    self._event_manager._discard_captured_work((work,))
+                    continue
                 if owned_round is None:
                     return
                 self._interaction_round_task = asyncio.create_task(
@@ -4382,6 +4406,7 @@ class DeepAgent(BaseAgent):
         """Publish the original work before its facade can first be awaited."""
         if not self._is_interaction_running():
             return
+        self._check_goal_work(work)
         if not self._try_transition_interaction_phase(InteractionPhase.RUNNING):
             return
         # A question parks the original Goal attempt in the existing owner
@@ -4433,6 +4458,7 @@ class DeepAgent(BaseAgent):
             raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                               error_msg="owned round has no original source")
         source._check_current()
+        self._check_goal_work(owned.work)
 
     def _capture_round_input(self, event, session):
         source = event.execution_origin
@@ -4445,6 +4471,99 @@ class DeepAgent(BaseAgent):
                               error_msg="input does not belong to original round")
         self._check_owned_round(owned)
         return owned
+
+    def _check_goal_work(self, work):
+        if work.kind != "goal" or work.execution_origin is None or work.execution_origin._checker is None:
+            return
+        manager = self.goal_manager
+        record = manager.peek() if manager is not None else None
+        if (record is None or record.session_id != work.context.get("session_id")
+                or record.goal_id != work.context.get("goal_id")
+                or record.revision != work.context.get("revision")
+                or manager._execution_origin is None
+                or manager._execution_origin[3] is not work.execution_origin):
+            raise _GoalWorkChangedError("original managed Goal work was cleared or replaced")
+
+    def _capture_goal_control(self, record, origin):
+        root = self._capture_owned_round(origin)
+        def matches(item):
+            return (record is not None and item.kind == "goal"
+                    and item.execution_origin is origin
+                    and item.context.get("session_id") == record.session_id
+                    and item.context.get("goal_id") == record.goal_id
+                    and item.context.get("revision") == record.revision)
+        pending = tuple(item for item in self._event_manager._capture_origin_work(origin) if matches(item))
+        if root is None:
+            if len(pending) != 1:
+                raise PermissionError("Goal control requires its original queued/dequeued work")
+            work, facade = pending[0], None
+        else:
+            work, facade = root.work, root._facade_task
+            if facade is None or facade.cancelling() or (facade.done() and not root.waiting_for_input):
+                raise PermissionError("original Goal control Round has ended")
+        target = _OwnedGoalAttempt(self, self._interaction_session, self.loop_controller,
+                                 self._event_manager, origin, root, work, facade,
+                                 root if root is not None and matches(work) else None, pending,
+                                 copy.deepcopy((work.kind, work.request_id, work.inputs, work.context)))
+        origin._check_current()
+        self._check_goal_control(target, live=True)
+        return target
+
+    def _check_goal_control(self, target, *, live=False):
+        if (type(target) is not _OwnedGoalAttempt or target.agent is not self
+                or target.session is not self._interaction_session
+                or target.controller is not self.loop_controller
+                or target.events is not self._event_manager
+                or target.work.execution_origin is not target.origin
+                or (target.work.kind, target.work.request_id, target.work.inputs,
+                    target.work.context) != target.work_facts):
+            raise PermissionError("original Goal attempt ownership changed")
+        if target.root is None:
+            if live and not any(work is target.work for work in
+                                self._event_manager._capture_origin_work(target.origin)):
+                raise PermissionError("original queued/dequeued Goal changed")
+            return
+        if (target.root.work is not target.work
+                or target.root._session is not target.session
+                or target.root._controller is not target.controller
+                or target.root._facade_task is not target.facade):
+            raise PermissionError("original Goal attempt references changed")
+        if live and (self._active_interaction_round is not target.root
+                     or target.facade.cancelling()
+                     or (target.facade.done() and not target.root.waiting_for_input)):
+            raise PermissionError("original Goal attempt is no longer live")
+
+    def _start_goal_control_exit(self, target):
+        self._check_goal_control(target)
+        owned = target.attempt
+        if owned is None:
+            return None
+        facade = target.facade
+        if asyncio.current_task() in (facade, owned._submission_task, owned._scheduler_wrapper):
+            raise _OwnedRoundExitUnconfirmed("Goal producer cannot confirm its own exit")
+        if not facade.done() and not facade.cancelling():
+            facade.cancel()
+        async def drain():
+            # No Goal/control lock is held here. The old wrapper's assessment
+            # may acquire it; only these original producers are cancelled/joined.
+            if not facade.done():
+                await asyncio.wait({facade})
+            self._check_goal_control(target)
+            await self._drain_owned_round(owned, cancel=True, _cleanup=True)
+            await self._await_owned_forwarded(owned)
+            self._check_goal_control(target)
+            if not facade.cancelled():
+                facade.exception()
+            if self._active_interaction_round is owned:
+                if owned.waiting_for_input:
+                    from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+
+                    target.session.update_state({INTERRUPTION_KEY: None})
+                self._event_manager.mark_finished(target.work)
+                self._active_interaction_round = None
+                if owned.waiting_for_input:
+                    self._notify_work()
+        return asyncio.create_task(drain())
 
     def _capture_origin_exit(self, expected_origin, *, expected_session):
         if (not isinstance(expected_origin, ExecutionOrigin) or expected_origin._checker is None

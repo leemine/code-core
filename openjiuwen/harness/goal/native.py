@@ -31,6 +31,30 @@ class NativeGoalExecutionAdapter:
         self._emit_event = emit_event
         self._notify_work = notify_work
         self._language = language
+        self._owner = None
+
+    def _capture_owned_control(self, record, origin):
+        if self._owner is None:
+            raise PermissionError("Native Goal control requires an original execution owner")
+        return self._owner._capture_goal_control(record, origin)
+
+    def _check_owned_control(self, target, *, live=False):
+        if self._owner is None or self._event_manager is not target.events:
+            raise PermissionError("Native Goal control owner unavailable")
+        self._owner._check_goal_control(target, live=live)
+
+    def _require_owned_attempt(self, target):
+        self._check_owned_control(target, live=True)
+        if target.attempt is None:
+            raise PermissionError("idle Goal resume requires a new host admission")
+
+    def _discard_owned_control(self, target):
+        self._check_owned_control(target)
+        self._event_manager._discard_captured_work(target.pending)
+
+    def _start_owned_control_exit(self, target):
+        self._check_owned_control(target)
+        return self._owner._start_goal_control_exit(target)
 
     def is_available(self) -> bool:
         """Keep Native's existing output-consumer admission requirement."""
@@ -49,6 +73,19 @@ class NativeGoalExecutionAdapter:
                 session_id=record.session_id,
             ).with_execution_origin(origin)
         )
+        if queued:
+            self._notify_work()
+        return queued
+
+    def _ensure_owned_control(self, record, control):
+        from openjiuwen.harness.prompts.sections.goal import build_goal_task_query
+
+        work = RoundWorkItem.goal(
+            inputs={"query": build_goal_task_query(record, self._language)},
+            goal_id=record.goal_id, revision=record.revision, session_id=record.session_id,
+        ).with_execution_origin(control.origin)
+        control.check()
+        queued = self._event_manager.push_goal(work)
         if queued:
             self._notify_work()
         return queued
