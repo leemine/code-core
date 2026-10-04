@@ -663,3 +663,10 @@ MemberRecordAuthorizer 的可选 bind_for_effect 仅为原 spawn 操作绑定 li
 外层决定 FS 副作用的 legacy 查询绑定原 writer 的实际 DB/DAO/factory 与 mapper/table 路由；
 不能用另一 read replica 的空结果放行。复用原 DbSessions 的查询写锁仅到查询完成，不跨文件
 副作用持锁；这仍不是跨进程并发创建受管成员与 FS 的资源事务。
+
+### 原提交事实与当前权限分离（F_123）
+
+MemberWriteReceipt.check_integrity / committed_facts 是原实例/字段的纯发行校验，不调用原
+写入来源，也不授予任何当前权限。返回完整不可变原 row/stamp/transaction 事实；当前读取
+必须另外证明原 parent/member registration 与原数据库来源，再逐字段对照，不从当前DB补签。
+原 check_current 继续要求原写入来源，后台不得通过重装旧 origin 绕过它。事实不可进普通 wire。
