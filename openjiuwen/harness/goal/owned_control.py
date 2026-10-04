@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 from dataclasses import dataclass, field
 
@@ -32,11 +33,13 @@ class _Progress:
     task: object = None
     signature: object = None
     checker: object = None
+    ack_checker: object = None
     expected: object = None
     slot: object = None
     cancellation: object = None
     applied: bool = False
     result: object = None
+    result_facts: object = None
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -79,6 +82,51 @@ class _OwnedGoalControl:
         self._check_static(initial=initial)
         self.execution._check_owned_control(self.target, live=live, mutation=mutation)
 
+    def check_result(self):
+        p = self._run
+        if p.task is None or not p.applied:
+            raise PermissionError("Goal control has no completed mutation")
+        exit_task = p.cancellation
+        ack = p.ack_checker
+        if exit_task is not None and (
+            not exit_task.done() or exit_task.cancelled() or exit_task.exception() is not None
+        ):
+            raise PermissionError("original Goal exit is unconfirmed")
+        if p.signature[0] != "clear" or ack is None or exit_task is None:
+            self.check()
+            return
+        # This is the Task returned by the original exact drain, not an EOF or
+        # arbitrary terminal Future. No execution source is revived for an ACK.
+        signature, expected, slot = p.signature, p.expected, p.slot
+        operation, applied, result, facts = p.task, p.applied, p.result, p.result_facts
+        frozen_facts = copy.deepcopy(facts)
+
+        def exact():
+            if (
+                p.cancellation is not exit_task
+                or p.ack_checker is not ack
+                or p.signature != signature
+                or p.expected != expected
+                or p.slot is not slot
+                or p.task is not operation
+                or p.applied is not applied
+                or p.result is not result
+                or p.result_facts is not facts
+                or facts != frozen_facts
+                or (None if result is None else result.to_dict()) != frozen_facts
+            ):
+                raise PermissionError("original Goal clear result changed")
+            self._check_static()
+            self.execution._check_owned_control(self.target)
+
+        exact()
+        acknowledgement = ack()
+        if inspect.iscoroutine(acknowledgement):
+            acknowledgement.close()
+        if acknowledgement is not None:
+            raise TypeError("Goal ACK checker must synchronously return None")
+        exact()
+
     def saved(self, record):
         self._run.expected = _identity(record)
         self._run.slot = self.manager._execution_origin
@@ -113,6 +161,7 @@ async def apply(
     *,
     action,
     check_current,
+    check_ack=None,
     objective=None,
     overwrite_confirmed=False,
     token_budget=None,
@@ -124,6 +173,7 @@ async def apply(
         type(action) is not str
         or action not in {"set", "pause", "clear", "resume"}
         or not callable(check_current)
+        or (check_ack is not None and not callable(check_ack))
         or type(overwrite_confirmed) is not bool
         or (objective is not None and type(objective) is not str)
         or any(v is not None and (type(v) is not int or v <= 0) for v in (token_budget, max_attempts))
@@ -141,16 +191,24 @@ async def apply(
             if p.cancellation is not None:
                 await asyncio.shield(p.cancellation)
             async with target.lock:
-                target.check()
+                target.check_result()
                 return p.result
 
     if p.task is not None:
-        if p.signature != signature or p.checker is not check_current:
+        if p.signature != signature or p.checker is not check_current or p.ack_checker is not check_ack:
             raise PermissionError("Goal control retry differs from original operation")
         if p.applied and p.task.done() and not p.task.cancelled() and p.task.exception() is not None:
             # Only retry the original exit/ack, never replay a durable mutation.
             # A failed exit task is retained until a caller explicitly retries.
-            target.check()
+            if (
+                p.cancellation is not None
+                and p.cancellation.done()
+                and not p.cancellation.cancelled()
+                and p.cancellation.exception() is None
+            ):
+                target.check_result()
+            else:
+                target.check()
             if (
                 p.cancellation is not None
                 and p.cancellation.done()
@@ -159,7 +217,7 @@ async def apply(
                 p.cancellation = target.execution._start_owned_control_exit(target.target)
             p.task = asyncio.create_task(finish())
     else:
-        p.signature, p.checker = signature, check_current
+        p.signature, p.checker, p.ack_checker = signature, check_current, check_ack
         p.expected, p.slot = target.original, target.slot
 
         async def run():
@@ -181,11 +239,12 @@ async def apply(
                             target.execution._require_owned_attempt(target.target)
                         result = await getattr(manager, "_" + action + "_locked")(control=target)
                 p.applied, p.result = True, result
+                p.result_facts = None if result is None else copy.deepcopy(result.to_dict())
                 return await finish()
 
         p.task = asyncio.create_task(run())
     # Caller timeout/cancellation is unknown, not permission to drop the same
     # operation or resend cancellation into an original finally block.
     result = await asyncio.shield(p.task)
-    target.check()  # A cached successful result is not a fresh authorization.
-    return result
+    target.check_result()  # A cached successful result is not a fresh authorization.
+    return None if result is None else result.copy_for_response()
