@@ -64,3 +64,26 @@ commit 成功返回后再次检查原来源。若真实写入已经提交但来�
 
 本次新增/累计 58 个确定性反例与正常行为用例，DB/concurrency/monitor 共 210 通过；
 58 例均在既有 stable discover/command 内。旧完整产品 Team 的挂载与外层副作用阻断未因此关闭。
+
+## ORM 路由与跨实例清库屏障补充
+
+仅固定 factory/default bind 仍不能证明实际 SQL 去向：SQLAlchemy mapper/table `binds`
+可指向另一引擎。受管分支现在要求原 TeamDatabase 创建的标准单引擎
+`async_sessionmaker` / `AsyncSession` 配置；拒绝额外 binds、自定义 Session class 或变更
+factory 参数。原事务每次权限检查同时核对 Team / TeamMember 的实际 mapper 和 table
+路由，包含 callback 返回后的检查。未受管旧 DAO 不增加此构造限制。
+
+SQLite storage-wide cleanup 在原数据库事务内、schema/受管行查询前取得 `BEGIN IMMEDIATE`
+写 reservation，防另一 TeamDatabase 在检查后创建受管行而被后续清库吞掉。并发者须等待
+原数据库事务完成；若父 team 已被清除，create 保持原 False 失败，不能返回失真的 receipt。
+未增加进程锁或持久化存储。PostgreSQL 使用原事务 table lock，但本次没有真实 PostgreSQL
+服务验证。MySQL 的 DROP 隐式提交无法保留同一事务屏障：只要原 member 表存在，storage-wide
+cleanup 明确拒绝，即使当前仅 legacy 行；单次 SELECT 无法证明稍后仍是纯 legacy。此项确实
+收窄 MySQL 全量清库兼容性，但不改变逐成员/逐 team DAO 操作。库内唯一生产入口是原
+`TeamDatabase.cleanup_all_runtime_state`，未发现其它自动生产调用，数据库类型仍支持 MySQL。
+不得把此拒绝或未运行的服务验证记为 MySQL / PostgreSQL 清库已验收。
+
+原两个实际 SQLite 红测在修复前均失败，现新增 13 例（路由 source/permit/事务内变化、
+status/cascade、原数据库并发屏障），本文件累计 71 例；受影响 DB/concurrency/monitor
+223 例通过。第一次扩大命令用了不存在的旧 monitor 路径而未运行测试，已单独保留并更正；
+结果只取更正后命令。来源均为候选 core overlay 与既有 6dce 锁环境，未称新锁配对验收。

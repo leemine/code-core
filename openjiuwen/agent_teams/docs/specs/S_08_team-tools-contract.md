@@ -641,3 +641,13 @@ all_tools = {
 实际原 ExecutionOrigin 的宿主 permit 证明 actor/entity/operation，并 CAS 原 nonce/revision。
 调用者保存原提交 receipt；旧 nullable 行仍 legacy，不读时认领。此接口不新增状态机、
 数据库或锁。详见 `F_121_member-record-authority.md`。
+
+### 受管成员实际 SQL 路由与全量清理
+
+受管成员事务只接受原 DB 的标准单引擎 writer factory；default bind 相同不够，
+Team / TeamMember mapper 和 table 的实际路由必须仍指向原 engine，并在原权限 callback
+之后重验。自定义 Session 路由属于尚未支持的受管组合，legacy DAO 构造行为保留。
+SQLite 全量清理在原事务内先取得数据库 write reservation，再检查任意非空 provenance；
+独立数据库实例不能在检查和清理之间插入已授权成员。PostgreSQL 对原 member 表取事务锁
+（未做真实服务验证）。无法跨 DDL 保持同一屏障的 MySQL 全量清理在 member 表存在时拒绝，
+包括当次只有 legacy 行的情况；逐成员原授权操作不因此开放或关闭。
