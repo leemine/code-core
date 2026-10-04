@@ -25,15 +25,12 @@ from typing import (
     Union,
 )
 
-from pydantic import (
-    BaseModel,
-    Field,
-)
+from pydantic import Field
 
 from openjiuwen.agent_teams.schema.events import EventMessage
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.controller.schema.execution_origin import execution_origin_scope
+from openjiuwen.core.controller.schema.execution_origin import OriginCarrier, execution_origin_scope
 
 # ------------------------------------------------------
 # Inner event types (local to the coordination layer)
@@ -61,8 +58,8 @@ class InnerEventType(str, Enum):
     SHUTDOWN = "shutdown"
 
 
-class InnerEventMessage(BaseModel):
-    """Internal event message, isolated from cross-process EventMessage."""
+class InnerEventMessage(OriginCarrier):
+    """Internal wake event with optional private, non-serialized provenance."""
 
     event_type: InnerEventType
     payload: Dict[str, Any] = Field(default_factory=dict)
