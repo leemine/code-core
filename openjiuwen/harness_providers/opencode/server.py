@@ -162,6 +162,11 @@ class ManagedServer:
         return owner
 
     async def start(self):
+        if (
+            isinstance(self.preflight_endpoint, OpenCodePreflightEndpoint)
+            and self.preflight_endpoint.model_gateway is not None
+        ):
+            self.preflight_endpoint.model_gateway.validate_model(self.config.model)
         if self.context.tool_authorizer is not None and self.preflight_endpoint is None:
             raise OpenCodeError("mandatory_preflight_endpoint_required", category="process_start_failed")
         if self.preflight_endpoint is not None and (
@@ -253,6 +258,7 @@ class ManagedServer:
                     self.root,
                     self.preflight_endpoint,
                     self.config.request_timeout_s,
+                    provider=self.config.model.provider,
                 )
             else:
                 self.plugin_stage = await asyncio.to_thread(
@@ -269,6 +275,7 @@ class ManagedServer:
                 plugin_specs=self.plugin_stage.specs,
                 runtime_policy=self.context.runtime_policy,
                 governed=self.context.tool_authorizer is not None,
+                model_gateway=self.preflight_endpoint.model_gateway if self.preflight_endpoint else None,
             )
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
