@@ -4413,14 +4413,38 @@ class DeepAgent(BaseAgent):
     def _check_unattributed_subagent_exit(self, session):
         # Existing controls are Session-owned, not Turn-owned. Do not allocate a
         # control or cancel somebody else's child to turn missing provenance green.
+        # The legacy session_spawn path has no UserInputOp origin and can
+        # publish completion before its wrapper/finalizer or delayed auto-invoke
+        # exits. Its in-memory toolkit rows are not exit receipts. Until that
+        # path has exact live ownership, do not infer quiescence from status.
+        toolkit = getattr(self, "_session_toolkit", None)
+        if toolkit is not None and toolkit.list_all():
+            raise _OwnedRoundExitUnconfirmed("legacy session_spawn source/exit is unconfirmed")
+        if getattr(self, "_auto_invoke_scheduled", False):
+            raise _OwnedRoundExitUnconfirmed("legacy session_spawn continuation is unconfirmed")
+        controller = self.loop_controller
+        scheduler = controller.task_scheduler if controller is not None else None
+        if scheduler is not None:
+            from openjiuwen.harness.tools import SESSION_SPAWN_TASK_TYPE
+            from openjiuwen.core.controller.schema.task import TaskStatus
+            terminal = {TaskStatus.COMPLETED, TaskStatus.CANCELED, TaskStatus.FAILED}
+            if any(task.task_type == SESSION_SPAWN_TASK_TYPE and task.session_id == session.get_session_id()
+                   and task.status not in terminal for task in tuple(scheduler._task_manager.tasks.values())):
+                raise _OwnedRoundExitUnconfirmed("legacy session_spawn task exit is unconfirmed")
+            for wrapper in tuple(scheduler._owned_execution_tasks.values()):
+                if wrapper.done():
+                    continue
+                captured = getattr(wrapper, "_jiuwen_execution_capture", None)
+                if captured is None or (captured[1] is session
+                                        and captured[0].snapshot.task_type == SESSION_SPAWN_TASK_TYPE):
+                    raise _OwnedRoundExitUnconfirmed("legacy session_spawn wrapper exit is unconfirmed")
         controls = getattr(self, "_subagent_controls", None) or {}
         control = controls.get(session.get_session_id())
         if control is None:
             return
         emitter = control._activity_emitter
         if (control._pending_activities or (emitter is not None and (
-                not emitter._queue.empty()
-                or (emitter._drain_task is not None and not emitter._drain_task.done())))):
+                not emitter._queue.empty() or emitter._current_item is not None))):
             raise _OwnedRoundExitUnconfirmed("subagent activity source/exit is unconfirmed")
         manager = control._manager
         for subagent_id in tuple(manager.list_ids()):

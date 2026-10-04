@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass, field
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
@@ -38,6 +39,13 @@ async def emit_subagent_activity(
     )
 
 
+@dataclass(eq=False)
+class _ActivityEmission:
+    activity: SubagentActivity
+    operation: Any
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 class ActivityEmitter:
     """Bounded queue + background drain for subagent activity events."""
 
@@ -49,10 +57,11 @@ class ActivityEmitter:
     ) -> None:
         self._session = session
         self._config = config
-        self._queue: asyncio.Queue[SubagentActivity] = asyncio.Queue(
+        self._queue: asyncio.Queue[SubagentActivity | _ActivityEmission] = asyncio.Queue(
             maxsize=config.activity_queue_size,
         )
         self._drain_task: asyncio.Task[None] | None = None
+        self._current_item: _ActivityEmission | SubagentActivity | None = None
         self._disabled = False
         self._consecutive_failures = 0
         self.dropped = 0
@@ -68,18 +77,48 @@ class ActivityEmitter:
     def offer(self, activity: SubagentActivity) -> None:
         if self._disabled:
             return
+        item = _ActivityEmission(activity, activity._operation) if activity._operation is not None else activity
         try:
-            self._queue.put_nowait(activity)
+            self._queue.put_nowait(item)
         except asyncio.QueueFull:
             try:
-                self._queue.get_nowait()
+                dropped = self._queue.get_nowait()
+                self._finish_item(dropped)
                 self.dropped += 1
             except asyncio.QueueEmpty:
                 pass
             try:
-                self._queue.put_nowait(activity)
+                self._queue.put_nowait(item)
             except asyncio.QueueFull:
                 self.dropped += 1
+
+    def _finish_item(self, item):
+        if isinstance(item, _ActivityEmission):
+            item.done.set()
+        self._queue.task_done()
+
+    def _capture_origin_items(self, origin):
+        values = tuple(self._queue._queue) + ((self._current_item,) if self._current_item is not None else ())
+        result = []
+        for item in values:
+            if not isinstance(item, _ActivityEmission):
+                raise RuntimeError("live activity has no proven operation origin")
+            if item.operation.origin is origin:
+                result.append(item)
+        return tuple(result)
+
+    async def _finish_original_items(self, expected, *, cancel):
+        if asyncio.current_task() is self._drain_task:
+            raise RuntimeError("activity producer cannot confirm its own exit")
+        if cancel:
+            for item in expected:
+                for index, queued in enumerate(self._queue._queue):
+                    if queued is item:
+                        del self._queue._queue[index]
+                        self._finish_item(item)
+                        break
+        for item in expected:
+            await item.done.wait()
 
     async def close(self) -> None:
         if self._drain_task is None:
@@ -91,7 +130,9 @@ class ActivityEmitter:
 
     async def _drain_loop(self) -> None:
         while True:
-            activity = await self._queue.get()
+            item = await self._queue.get()
+            self._current_item = item
+            activity = item.activity if isinstance(item, _ActivityEmission) else item
             try:
                 await emit_subagent_activity(
                     self._session,
@@ -108,6 +149,10 @@ class ActivityEmitter:
                         exc,
                     )
                     return
+            finally:
+                self._finish_item(item)
+                if self._current_item is item:
+                    self._current_item = None
 
 
 __all__ = [

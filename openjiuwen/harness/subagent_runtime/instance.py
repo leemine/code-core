@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
@@ -25,6 +26,7 @@ from openjiuwen.harness.subagent_runtime.ports import (
     SubagentTurnResult,
 )
 from openjiuwen.harness.subagent_runtime.status import StatusChannel, StatusReceiver
+from openjiuwen.harness.subagent_runtime.operation_origin import _operation_scope
 
 
 class SubagentInstance:
@@ -96,6 +98,7 @@ class SubagentInstance:
         self._worker_task: asyncio.Task[None] | None = None
         self._current_run: asyncio.Task[None] | None = None
         self._turn_claimed = False
+        self._claimed_op: UserInputOp | None = None
         self._running_semaphore = running_semaphore
         self._interrupt_requested = False
         self._closed = False
@@ -111,7 +114,96 @@ class SubagentInstance:
         return self.status.subscribe()
 
     async def enqueue(self, op: SubagentOp) -> None:
+        lifetime = op._lifetime if isinstance(op, UserInputOp) else None
+        if lifetime is not None:
+            lifetime.check_admission()
+            if lifetime.instance is not None:
+                raise RuntimeError("original subagent operation was already admitted")
+            lifetime.instance = self
+            lifetime.operation = op
         await self._ops.put(op)
+
+    def _capture_origin_ops(self, origin):
+        values = tuple(self._ops._queue) + ((self._claimed_op,) if self._claimed_op is not None else ())
+        result = []
+        for op in values:
+            if not isinstance(op, UserInputOp):
+                continue
+            if op.execution_origin is None:
+                raise RuntimeError("live subagent operation has no proven origin")
+            if op.execution_origin is origin and not any(value is op for value in result):
+                result.append(op)
+        return tuple(result)
+
+    def _validate_original_ops(self, expected):
+        current = asyncio.current_task()
+        for op in expected:
+            lifetime = op._lifetime
+            if lifetime is None or lifetime.instance is not self:
+                raise RuntimeError("original subagent operation owner changed")
+            if current in (self._worker_task, lifetime.acquire_task, lifetime.run_task):
+                raise RuntimeError("subagent producer cannot confirm its own exit")
+    async def _finish_original_ops(self, expected, *, cancel):
+        # Validate and fence all original operations before the first await.
+        self._validate_original_ops(expected)
+        if cancel:
+            for op in expected:
+                op._lifetime.cancel_requested = True
+            for op in expected:
+                lifetime = op._lifetime
+                queued = next((item for item in self._ops._queue if item is op), None)
+                if queued is not None:
+                    # Equality is not ownership. Remove the exact captured item.
+                    for index, item in enumerate(self._ops._queue):
+                        if item is op:
+                            del self._ops._queue[index]
+                            break
+                    self._ops.task_done()
+                    lifetime.done.set()
+                    continue
+                for task in (lifetime.acquire_task, lifetime.run_task):
+                    if task is not None and not task.done() and not task.cancelling():
+                        task.cancel()
+        for op in expected:
+            await op._lifetime.done.wait()
+            tasks = {task for task in (op._lifetime.acquire_task, op._lifetime.run_task) if task is not None}
+            if tasks:
+                # The original op's callback/worker tail is done; also prove
+                # its actual acquisition and execution Tasks have returned.
+                # Cancelling this waiter never cancels those owned handles.
+                await asyncio.wait(tasks)
+
+    @asynccontextmanager
+    async def _operation_slot(self, op):
+        lifetime = op._lifetime
+        if lifetime is None:
+            async with self._running_semaphore:
+                yield True
+            return
+        lifetime.check_admission()
+        acquire = asyncio.create_task(self._running_semaphore.acquire())
+        lifetime.acquire_task = acquire
+        acquired = False
+        try:
+            try:
+                await asyncio.shield(acquire)
+                acquired = True
+            except asyncio.CancelledError:
+                if not acquire.done() and not acquire.cancelling():
+                    acquire.cancel()
+                await asyncio.gather(acquire, return_exceptions=True)
+                acquired = acquire.done() and not acquire.cancelled() and acquire.exception() is None
+                if not lifetime.cancel_requested:
+                    raise
+            if lifetime.cancel_requested:
+                await self._set_status(SubagentStatus.interrupted())
+                yield False
+            else:
+                lifetime.check_admission()
+                yield True
+        finally:
+            if acquired:
+                self._running_semaphore.release()
 
     async def interrupt(self) -> bool:
         run = self._current_run
@@ -191,16 +283,34 @@ class SubagentInstance:
                 self._ops.task_done()
 
     async def _handle_user_input(self, op: UserInputOp) -> None:
+        self._claimed_op = op
+        try:
+            with _operation_scope(op._lifetime):
+                await self._handle_claimed_user_input(op)
+        finally:
+            if op._lifetime is not None:
+                op._lifetime.done.set()
+            if self._claimed_op is op:
+                self._claimed_op = None
+
+    async def _handle_claimed_user_input(self, op: UserInputOp) -> None:
         # Claim the turn before waiting for the shared concurrency slot. During
         # that wait the op is no longer queued and _current_run does not exist
         # yet, so both signals alone would incorrectly report the instance idle.
         self._turn_claimed = True
         self.current_task_id = op.task_id
         try:
-            async with self._running_semaphore:
+            async with self._operation_slot(op) as admitted:
+                if not admitted:
+                    return
                 self._interrupt_requested = False
                 await self._set_status(SubagentStatus.running())
+                if op._lifetime is not None and op._lifetime.cancel_requested:
+                    await self._set_status(SubagentStatus.interrupted())
+                    return
                 self._current_run = asyncio.create_task(self._run_one_turn(op))
+                if op._lifetime is not None:
+                    op._lifetime.run_task = self._current_run
                 try:
                     if self._turn_timeout_s and self._turn_timeout_s > 0:
                         await asyncio.wait_for(self._current_run, timeout=self._turn_timeout_s)
@@ -209,6 +319,8 @@ class SubagentInstance:
                 except asyncio.TimeoutError:
                     await self._on_turn_timeout()
                 except asyncio.CancelledError as exc:
+                    if op._lifetime is not None and op._lifetime.cancel_requested:
+                        self._interrupt_requested = True
                     await self._on_turn_cancelled(exc)
                 except Exception as exc:
                     logger.warning(
@@ -255,6 +367,7 @@ class SubagentInstance:
 
                     async def on_result(result: SubagentTurnResult) -> None:
                         nonlocal settled
+                        self._check_original_callback(op)
                         if settled:
                             message = "subagent execution settled a turn more than once"
                             await self._set_status(SubagentStatus.errored(message))
@@ -263,12 +376,18 @@ class SubagentInstance:
                         # the turn-end signal, so nothing may be emitted after it.
                         if self._on_turn_stream_end is not None:
                             await self._on_turn_stream_end(op, result)
+                        self._check_original_callback(op)
                         await self._settle_turn(op, result)
                         settled = True
 
+                    async def on_chunk(chunk):
+                        self._check_original_callback(op)
+                        with _operation_scope(op._lifetime):
+                            await self._on_chunk(chunk)
+
                     await self._execution.run_turn(
                         SubagentTurnRequest(task_id=op.task_id, query=op.query),
-                        on_chunk=self._on_chunk,
+                        on_chunk=on_chunk if self._on_chunk is not None else None,
                         on_result=on_result,
                     )
                     if not settled:
@@ -285,6 +404,12 @@ class SubagentInstance:
                     raise
         finally:
             self._unregister_observability_owner(owner_root)
+
+    def _check_original_callback(self, op):
+        lifetime = op._lifetime
+        if lifetime is not None and (self._claimed_op is not op or lifetime.instance is not self
+                or lifetime.operation is not op or lifetime.done.is_set() or lifetime.cancel_requested):
+            raise RuntimeError("subagent callback no longer belongs to its original operation")
 
     def _register_observability_owner(self) -> Any | None:
         """Alias the parent run root to this subagent's isolated session."""

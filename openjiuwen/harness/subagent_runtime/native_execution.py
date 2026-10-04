@@ -110,8 +110,17 @@ class NativeSubagentExecution:
                 succeeded = not result.is_error
             finally:
                 task = asyncio.create_task(self._finalize_turn(session, succeeded=succeeded))
-                with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(task)
+                cancelled_while_finalizing = False
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        cancelled_while_finalizing = True
+                # Consume and propagate a real finalizer error; a caller's
+                # cancellation cannot release ownership while it still runs.
+                task.result()
+                if cancelled_while_finalizing:
+                    raise asyncio.CancelledError
 
     async def close(self, reason: str) -> None:
         _ = reason
