@@ -670,3 +670,11 @@ MemberWriteReceipt.check_integrity / committed_facts 是原实例/字段的纯�
 写入来源，也不授予任何当前权限。返回完整不可变原 row/stamp/transaction 事实；当前读取
 必须另外证明原 parent/member registration 与原数据库来源，再逐字段对照，不从当前DB补签。
 原 check_current 继续要求原写入来源，后台不得通过重装旧 origin 绕过它。事实不可进普通 wire。
+
+### 原 receipt 关联的纯事实查询（F_124）
+
+`MemberDao.read_committed_member(receipt)` 在原 writer transaction 内核对发行时固定的
+DB/DAO/sessions/engine/factory 和实际 mapper 目的地，完整匹配 row/stamp 后返回原
+不可变 facts。它不调用原 writer checker、不恢复 ExecutionOrigin、不授予当前读取权。
+宿主仍需当前 parent/entity/credential 与最终发送检查；查询返回后不保持数据库 fence。
+旧 get_member/legacy 查询不改变。
