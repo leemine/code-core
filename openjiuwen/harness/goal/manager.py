@@ -330,8 +330,7 @@ class GoalManager:
                 with execution_origin_scope(self._origin_for_record(record)):
                     self._execution.goal_updated(None)
             else:
-                control.check(mutation=True)
-                self._execution.goal_updated(None)
+                self._emit_goal_updated_locked(None, control=control)
         return record.copy_for_response()
 
     def ensure_active_goal_work_locked(self) -> bool:
@@ -461,7 +460,11 @@ class GoalManager:
     def _emit_goal_updated_locked(self, record: GoalRecord, *, control=None) -> None:
         if control is not None:
             control.check(mutation=True)
-            self._execution.goal_updated(record.copy_for_response())
+            idle_emit = getattr(control, "_emit_updated", None)
+            if idle_emit is not None:
+                idle_emit(record)
+            else:
+                self._execution.goal_updated(record.copy_for_response() if record is not None else None)
             return
         with execution_origin_scope(self._origin_for_record(record)):
             self._execution.goal_updated(record.copy_for_response())
