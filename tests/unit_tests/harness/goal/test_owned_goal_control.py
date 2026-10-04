@@ -630,3 +630,180 @@ async def test_stop_during_commit_prevents_late_control_emission(case, action):
     with pytest.raises(PermissionError):
         await applying
     assert len(c.h.emitted) == before
+
+
+@pytest.mark.asyncio
+async def test_clear_ack_after_original_source_ends_requires_real_drain(case, monkeypatch):
+    c = case
+    original = c.agent._drain_owned_round
+
+    async def draining(owned, **kwargs):
+        await original(owned, **kwargs)
+        c.live[0] = False  # Original real drain finished before its ACK delivery.
+
+    monkeypatch.setattr(c.agent, "_drain_owned_round", draining)
+    target = c.h.manager._capture_owned_control(expected_origin=c.source)
+    checks = []
+
+    def ack():
+        checks.append(True)
+
+    result = await c.h.manager._apply_owned_control(target, action="clear", check_current=lambda: None, check_ack=ack)
+    assert result.goal_id == c.record.goal_id and checks
+    assert target._run.cancellation.done() and c.task.done()
+    target.check_result()
+    with pytest.raises(PermissionError):
+        target.check(live=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["pause", "set"])
+async def test_nonclear_controls_never_use_completion_ack(case, monkeypatch, action):
+    c = case
+    method = "_" + action + "_locked"
+    original = getattr(c.h.manager, method)
+
+    async def applied(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        c.live[0] = False
+        return result
+
+    monkeypatch.setattr(c.h.manager, method, applied)
+    target = c.h.manager._capture_owned_control(expected_origin=c.source)
+    checks = []
+    params = {"objective": "replacement", "overwrite_confirmed": True} if action == "set" else {}
+    with pytest.raises(PermissionError):
+        await c.h.manager._apply_owned_control(
+            target, action=action, check_current=lambda: None, check_ack=lambda: checks.append(True), **params
+        )
+    assert not checks
+
+
+@pytest.mark.asyncio
+async def test_queued_clear_has_no_exit_receipt_ack(case, monkeypatch):
+    from openjiuwen.harness.schema.interaction import RoundWorkItem
+
+    c = case
+    c.owned.work = RoundWorkItem.user(request_id="original", inputs={"query": "ordinary"}).with_execution_origin(
+        c.source
+    )
+    original = c.h.manager._clear_locked
+
+    async def clearing(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        c.live[0] = False
+        return result
+
+    monkeypatch.setattr(c.h.manager, "_clear_locked", clearing)
+    target = c.h.manager._capture_owned_control(expected_origin=c.source)
+    checks = []
+    with pytest.raises(PermissionError):
+        await c.h.manager._apply_owned_control(
+            target, action="clear", check_current=lambda: None, check_ack=lambda: checks.append(True)
+        )
+    assert target._run.cancellation is None and not checks and not c.task.done()
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_drain_never_exposes_clear_ack(case, monkeypatch):
+    c = case
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = c.agent._drain_owned_round
+
+    async def draining(owned, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(owned, **kwargs)
+
+    monkeypatch.setattr(c.agent, "_drain_owned_round", draining)
+    target = c.h.manager._capture_owned_control(expected_origin=c.source)
+    checks = []
+    task = asyncio.create_task(
+        c.h.manager._apply_owned_control(
+            target, action="clear", check_current=lambda: None, check_ack=lambda: checks.append(True)
+        )
+    )
+    try:
+        await entered.wait()
+        with pytest.raises(PermissionError, match="unconfirmed"):
+            target.check_result()
+        assert checks == []
+        release.set()
+        await task
+        assert checks
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["record", "slot", "work", "facade"])
+async def test_ack_callback_cannot_replace_original_clear_proof(case, change):
+    c = case
+    target = c.h.manager._capture_owned_control(expected_origin=c.source)
+
+    def ack():
+        if change == "record":
+            c.h.store.save(c.record)
+        elif change == "slot":
+            c.h.manager._execution_origin = tuple(list(c.h.manager._execution_origin))
+        elif change == "work":
+            from dataclasses import replace
+
+            c.owned.work = replace(c.work).with_execution_origin(c.source)
+        else:
+            c.owned._facade_task = asyncio.current_task()
+
+    with pytest.raises(PermissionError):
+        await c.h.manager._apply_owned_control(target, action="clear", check_current=lambda: None, check_ack=ack)
+
+
+@pytest.mark.asyncio
+async def test_clear_cached_reply_rechecks_same_ack_callback(case):
+    c = case
+    target = c.h.manager._capture_owned_control(expected_origin=c.source)
+    allowed = [True]
+
+    def current():
+        return None
+
+    def ack():
+        if not allowed[0]:
+            raise PermissionError("ACK owner expired")
+
+    await c.h.manager._apply_owned_control(target, action="clear", check_current=current, check_ack=ack)
+    with pytest.raises(PermissionError, match="retry differs"):
+        await c.h.manager._apply_owned_control(target, action="clear", check_current=current, check_ack=lambda: None)
+    allowed[0] = False
+    with pytest.raises(PermissionError, match="ACK owner expired"):
+        await c.h.manager._apply_owned_control(target, action="clear", check_current=current, check_ack=ack)
+
+
+@pytest.mark.asyncio
+async def test_result_check_before_apply_is_not_authority(case):
+    target = case.h.manager._capture_owned_control(expected_origin=case.source)
+    with pytest.raises(PermissionError, match="completed mutation"):
+        target.check_result()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["task", "applied", "result_object", "result_value", "result_facts"])
+async def test_ack_callback_cannot_change_original_operation_or_result(case, change):
+    c = case
+    target = c.h.manager._capture_owned_control(expected_origin=c.source)
+
+    def ack():
+        p = target._run
+        if change == "task":
+            p.task = c.task
+        elif change == "applied":
+            p.applied = False
+        elif change == "result_object":
+            p.result = p.result.copy_for_response()
+        elif change == "result_value":
+            p.result.objective = "replacement"
+        else:
+            p.result_facts["objective"] = "replacement"
+
+    with pytest.raises(PermissionError, match="result changed"):
+        await c.h.manager._apply_owned_control(target, action="clear", check_current=lambda: None, check_ack=ack)
