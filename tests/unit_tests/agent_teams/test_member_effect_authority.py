@@ -295,3 +295,51 @@ async def test_receipt_checker_cannot_replace_effect_callback(case, backend_fact
     assert not replacement
     assert len(delivered) == (0 if receipt_check_number == 2 else 1)
     assert (await c.db.member.get_member("new-member", "same-team")).record_revision == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["spawn", "delete"])
+@pytest.mark.parametrize("retarget", ["reader", "writer", "mapper"])
+async def test_legacy_fs_decision_uses_original_writer(case, backend_factory, tmp_path, action, retarget):
+    from openjiuwen.agent_teams.paths import team_member_workspace_dir
+    from openjiuwen.agent_teams.tools.database import DatabaseConfig, TeamDatabase
+    from openjiuwen.agent_teams.tools.models import TeamMember
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+    c = case
+    await c.create()
+    legacy = TeamDatabase(c.config)
+    other = TeamDatabase(DatabaseConfig(connection_string=str(tmp_path / "other-reader.sqlite")))
+    await legacy.initialize()
+    await other.initialize()
+    await other.team.create_team("same-team", "Other DB", "leader")
+    backend = backend_factory(legacy)
+    original_kw = dict(legacy.session_local.kw)
+    if retarget == "reader":
+        legacy._sessions._read_session_local = other.read_session_local
+    elif retarget == "writer":
+        legacy.session_local.configure(bind=other.engine)
+    else:
+        legacy.session_local.configure(binds={TeamMember: other.engine})
+    token = set_session_id("original-session")
+    marker = team_session_worktrees_dir("same-team", "original-session") / "original.txt"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("managed original preserved")
+    root = team_member_workspace_dir("same-team", "legacy-new")
+    try:
+        with pytest.raises(MemberRecordDenied):
+            if action == "delete":
+                await legacy.force_delete_team_session("same-team")
+            else:
+                await backend.spawn_member("legacy-new", "New", AgentCard(name="legacy-new"), desc="body")
+        assert marker.read_text() == "managed original preserved"
+        assert not root.exists()
+        assert (await c.db.member.get_member("member", "same-team")).record_revision == 1
+        assert await c.db.member.get_member("legacy-new", "same-team") is None
+        assert await other.member.get_member("legacy-new", "same-team") is None
+    finally:
+        legacy.session_local.kw.clear()
+        legacy.session_local.kw.update(original_kw)
+        reset_session_id(token)
+        await legacy.close()
+        await other.close()
