@@ -29,6 +29,8 @@ class EventManager:
     def push_user(self, work: RoundWorkItem) -> None:
         if work.kind != "user":
             raise ValueError("push_user requires a user RoundWorkItem")
+        if work.execution_origin is not None:
+            work.execution_origin._check_current()
         self._user_queue.append(work)
 
     def push_goal(self, work: RoundWorkItem) -> bool:
@@ -40,6 +42,8 @@ class EventManager:
         """
         if work.kind != "goal":
             raise ValueError("push_goal requires a goal RoundWorkItem")
+        if work.execution_origin is not None:
+            work.execution_origin._check_current()
         goal_id = work.context.get("goal_id")
         revision = work.context.get("revision")
         if self.has_goal_work(goal_id=goal_id, revision=revision):
@@ -67,12 +71,12 @@ class EventManager:
         return None
 
     def mark_started(self, work: RoundWorkItem) -> None:
-        if self._dequeued == work:
+        if self._dequeued is work:
             self._dequeued = None
         self._active = work
 
     def mark_finished(self, work: RoundWorkItem) -> None:
-        if self._active == work:
+        if self._active is work:
             self._active = None
 
     def has_pending_work(self) -> bool:

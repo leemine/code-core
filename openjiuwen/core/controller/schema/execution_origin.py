@@ -1,10 +1,11 @@
 """Opaque live execution provenance; never a persisted authorization grant."""
 from __future__ import annotations
 
+import inspect
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import Self
+from dataclasses import dataclass, field
+from typing import Callable, Self
 
 from pydantic import BaseModel, PrivateAttr
 
@@ -14,6 +15,21 @@ class ExecutionOrigin:
     """Host-owned source object, preserved by identity through in-memory copies."""
 
     host_value: object
+    _checker: Callable[[], None] | None = field(default=None, repr=False)
+
+    def __post_init__(self):
+        if self._checker is not None and not callable(self._checker):
+            raise TypeError("execution origin checker must be callable")
+
+    def _check_current(self) -> None:
+        """Revalidate this original live owner without choosing a replacement."""
+        if self._checker is None:
+            return
+        result = self._checker()
+        if inspect.iscoroutine(result):
+            result.close()
+        if result is not None:
+            raise TypeError("execution origin checker must synchronously return None")
 
     def __repr__(self):
         return "ExecutionOrigin(<host>)"
@@ -103,6 +119,8 @@ class _SourcedInput:
 def capture_origin_input(content, origin=ORIGIN_UNSET):
     """Keep live provenance in an existing in-memory input queue."""
     source = resolve_execution_origin(origin)
+    if source is not None:
+        source._check_current()
     return _SourcedInput(content, source) if source is not None else content
 
 

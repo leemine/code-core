@@ -140,6 +140,13 @@ class ActiveInteractionRound:
     work: RoundWorkItem
     task_id: Optional[str] = None
     waiting_for_input: bool = False
+    _session: Any = field(default=None, repr=False, compare=False)
+    _controller: Any = field(default=None, repr=False, compare=False)
+    _facade_task: asyncio.Task | None = field(default=None, repr=False, compare=False)
+    _submission_task: asyncio.Task | None = field(default=None, repr=False, compare=False)
+    _scheduler_wrapper: asyncio.Task | None = field(default=None, repr=False, compare=False)
+    _task_capture: Any = field(default=None, repr=False, compare=False)
+    _resuming_goal: bool = field(default=False, repr=False, compare=False)
 
     @property
     def run_kind(self) -> Literal["user", "goal"]:

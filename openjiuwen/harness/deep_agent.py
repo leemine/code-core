@@ -246,6 +246,11 @@ _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
 
 _ROUND_BOUNDARY = object()
 
+
+class _OwnedRoundExitUnconfirmed(RuntimeError):
+    """Internal ownership uncertainty; never a completed provider Turn."""
+
+
 FreshInputContextFactory = Callable[[], AbstractAsyncContextManager[None]]
 
 
@@ -3434,10 +3439,20 @@ class DeepAgent(BaseAgent):
         session: Session,
     ) -> RoundOutcome:
         """Execute one interaction work item and optionally propose follow-up work."""
-        with execution_origin_scope(work.execution_origin):
+        source = work.execution_origin
+        owned = (self._capture_owned_round(source, expected_work=work)
+                 if source is not None and source._checker is not None else None)
+        if source is not None and source._checker is not None and owned is None:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="managed round has no original owner record")
+        with execution_origin_scope(source):
             self._invoke_active = True
             try:
+                if source is not None:
+                    source._check_current()
                 coordinator, controller = await self.prepare_interaction_task_loop(session)
+                if owned is not None:
+                    self._check_owned_round(owned)
                 if work.reset_loop:
                     coordinator.reset()
                     state = self.load_state(session)
@@ -3459,7 +3474,11 @@ class DeepAgent(BaseAgent):
                     AgentCallbackEvent.BEFORE_INVOKE,
                     AgentCallbackEvent.AFTER_INVOKE,
                 ):
+                    if owned is not None:
+                        self._check_owned_round(owned)
                     await self._sync_expert_role_attachment(invoke_inputs, session)
+                    if owned is not None:
+                        self._check_owned_round(owned)
                     if is_resume_input:
                         if work.kind == "goal":
                             iteration_inputs = TaskIterationInputs(
@@ -3478,6 +3497,8 @@ class DeepAgent(BaseAgent):
                                 AgentCallbackEvent.AFTER_TASK_ITERATION,
                             ):
                                 try:
+                                    if owned is not None:
+                                        self._check_owned_round(owned)
                                     result = await self._run_single_round_invoke(
                                         ctx, session, streaming=True,
                                     )
@@ -3493,7 +3514,9 @@ class DeepAgent(BaseAgent):
                                 ctx, session, streaming=True,
                             )
                     else:
-                        await controller.submit_round(
+                        if owned is not None:
+                            self._check_owned_round(owned)
+                        submission = controller.submit_round(
                             session,
                             str(work.query),
                             is_follow_up=work.is_follow_up,
@@ -3502,12 +3525,21 @@ class DeepAgent(BaseAgent):
                             task_id=task_id,
                             origin=work.execution_origin,
                         )
+                        if owned is not None:
+                            owned._submission_task = asyncio.create_task(submission)
+                            await asyncio.shield(owned._submission_task)
+                            self._check_owned_round(owned)
+                        else:
+                            await submission
                         timeout = (
                             self._deep_config.completion_timeout
                             if self._deep_config
                             else 600.0
                         )
                         result = await controller.wait_round_completion(timeout=timeout)
+                    if owned is not None:
+                        await self._drain_owned_round(owned)
+                        self._check_owned_round(owned)
                     await self._write_round_result_to_stream(result, session)
                     invoke_inputs.result = result
                     next_work = (
@@ -3820,6 +3852,8 @@ class DeepAgent(BaseAgent):
         do not apply to ``InteractiveInput`` recovery requests.
         """
         origin = current_execution_origin()
+        if origin is not None:
+            origin._check_current()
         self._ensure_interaction_running()
 
         async with self._interaction_send_lock:
@@ -3845,6 +3879,8 @@ class DeepAgent(BaseAgent):
         return True
 
     async def _send_user(self, request: SendInputRequest, *, origin: ExecutionOrigin | None) -> None:
+        if origin is not None:
+            origin._check_current()
         inputs = request.inputs
         if not isinstance(inputs, dict):
             raise ValueError(
@@ -3936,6 +3972,8 @@ class DeepAgent(BaseAgent):
         context = context_factory()
         await context.__aenter__()
         try:
+            if origin is not None:
+                origin._check_current()
             self._ensure_interaction_running()
             self._event_manager.push_user(
                 RoundWorkItem.user(request_id=request_id, inputs=inputs).with_execution_origin(origin)
@@ -4099,6 +4137,8 @@ class DeepAgent(BaseAgent):
                         await cancel_wait
 
         if (round_task is None or round_task.done()) and self._active_interaction_round is active:
+            if active.work.execution_origin is not None and active.work.execution_origin._checker is not None:
+                await self._drain_owned_round(active, cancel=True, _cleanup=True)
             if active.waiting_for_input and self._interaction_session is not None:
                 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 
@@ -4125,6 +4165,12 @@ class DeepAgent(BaseAgent):
                     await self._interaction_wakeup.wait()
                     continue
 
+                active = self._active_interaction_round
+                if (active is not None and not active.waiting_for_input
+                        and active._facade_task is not None and active._facade_task.done()):
+                    # An unconfirmed producer keeps the original owner slot. A
+                    # later stop retries the same receipt; never start a successor.
+                    return
                 waiting = bool(self._active_interaction_round is not None
                                and self._active_interaction_round.waiting_for_input)
                 work = self._event_manager.next_work(resume_only=waiting)
@@ -4149,8 +4195,18 @@ class DeepAgent(BaseAgent):
                 # awaited. Never publish a new owned round after that fence.
                 if not self._is_interaction_running():
                     return
-                self._interaction_round_task = asyncio.create_task(self._execute_round(work))
+                owned_round = self._prepare_owned_round(work)
+                if owned_round is None:
+                    return
+                self._interaction_round_task = asyncio.create_task(
+                    self._execute_round(work, _owned_round=owned_round)
+                )
+                owned_round._facade_task = self._interaction_round_task
                 await asyncio.wait({self._interaction_round_task})
+                if not self._interaction_round_task.cancelled():
+                    self._interaction_round_task.exception()
+                if self._active_interaction_round is owned_round and not owned_round.waiting_for_input:
+                    return
                 if self._interaction_round_forwarded is not None:
                     with suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(self._interaction_round_forwarded.wait(), timeout=2.0)
@@ -4174,6 +4230,15 @@ class DeepAgent(BaseAgent):
             ).to_output_schema())
             await self._interaction_output.finish_current()
             raise
+        if origin is not None:
+            try:
+                origin._check_current()
+            except Exception:
+                await self._interaction_output.emit(InteractionEvent.execution_error(
+                    code="execution_origin_expired", message="follow-up source is no longer active",
+                ).to_output_schema())
+                await self._interaction_output.finish_current()
+                raise
         for query in messages:
             self._event_manager.push_user(
                 RoundWorkItem.user(
@@ -4248,7 +4313,8 @@ class DeepAgent(BaseAgent):
             logger.debug("[DeepAgent] unable to emit ordered round boundary", exc_info=True)
             return False
 
-    async def _execute_round(self, work: RoundWorkItem) -> None:
+    def _prepare_owned_round(self, work: RoundWorkItem) -> ActiveInteractionRound | None:
+        """Publish the original work before its facade can first be awaited."""
         if not self._is_interaction_running():
             return
         if not self._try_transition_interaction_phase(InteractionPhase.RUNNING):
@@ -4267,15 +4333,132 @@ class DeepAgent(BaseAgent):
                 kind="goal", request_id=work.request_id, inputs=work.inputs,
                 context={**suspended.work.context, "reset_loop": False},
             ).with_execution_origin(suspended.work.execution_origin)
+        owned = ActiveInteractionRound(
+            work=work, task_id=uuid.uuid4().hex, _session=self._interaction_session,
+            _controller=self.loop_controller, _resuming_goal=resuming_goal,
+        )
+        self._active_interaction_round = owned
+        self._event_manager.mark_started(work)
+        return owned
+
+    def _capture_owned_round(
+        self, expected_origin: ExecutionOrigin, *, expected_work: RoundWorkItem | None = None,
+    ) -> ActiveInteractionRound | None:
+        """Read an original live record; absence alone never proves exit."""
+        if not isinstance(expected_origin, ExecutionOrigin):
+            raise TypeError("owned round requires an explicit execution origin")
+        owned = self._active_interaction_round
+        if owned is None or owned.work.execution_origin is not expected_origin:
+            return None
+        if ((expected_work is not None and owned.work is not expected_work)
+                or owned._session is not self._interaction_session
+                or owned._controller is not self.loop_controller):
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="owned round identity changed")
+        return owned
+
+    def _check_owned_round(self, owned: ActiveInteractionRound) -> None:
+        if (not self._is_interaction_running() or self._active_interaction_round is not owned
+                or owned._session is not self._interaction_session
+                or owned._controller is not self.loop_controller):
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="original round ownership changed")
+        source = owned.work.execution_origin
+        if source is None:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="owned round has no original source")
+        source._check_current()
+
+    def _capture_round_input(self, event, session):
+        source = event.execution_origin
+        if source is None or source._checker is None:
+            return None
+        owned = self._capture_owned_round(source)
+        if (owned is None or owned._session is not session
+                or not event.metadata or event.metadata.get("task_id") != owned.task_id):
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="input does not belong to original round")
+        self._check_owned_round(owned)
+        return owned
+
+    async def _drain_owned_round(self, owned, *, cancel=False, _cleanup=False):
+        """Join original producers before a managed facade can become terminal.
+
+        The existing outer stop budget reports unknown while this facade stays
+        alive. Repeated caller cancellation cannot discard owned producer handles.
+        """
+        cancelled_while_joining = False
+
+        async def join(task):
+            nonlocal cancelled_while_joining, cancel
+            if task is asyncio.current_task():
+                raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                  error_msg="owned round cannot join itself")
+            while not task.done():
+                try:
+                    await asyncio.wait({task})
+                except asyncio.CancelledError:
+                    cancelled_while_joining = True
+                    cancel = True
+                    if task is owned._scheduler_wrapper and not task.done() and not task.cancelling():
+                        task.cancel()
+                    # The source fence is external; never resolve a late response
+                    # against another Round merely because our caller stopped.
+                    continue
+            if not task.cancelled():
+                task.exception()  # Consume, but do not turn an exited error into live ownership.
+
+        submission = owned._submission_task
+        if submission is not None:
+            await join(submission)
+        capture = owned._task_capture
+        wrapper = owned._scheduler_wrapper
+        if capture is not None and wrapper is None:
+            manager = capture.manager
+            scheduler = owned._controller.task_scheduler
+            # A missing scheduler handle alone proves nothing. Under the original
+            # manager lock, verify this exact storage record and prohibit any
+            # still-unstarted dispatch before inspecting its owned wrapper map.
+            try:
+                async with manager._lock:
+                    manager._check_task_execution(capture)
+                    if capture.stored.status is TaskStatus.SUBMITTED:
+                        capture.stored.status = TaskStatus.CANCELED
+                    wrapper = scheduler._capture_owned_dispatch(capture, owned._session)
+                    owned._scheduler_wrapper = wrapper
+                    if wrapper is None and capture.stored.status is TaskStatus.WORKING:
+                        raise _OwnedRoundExitUnconfirmed("original working task exit is unknown")
+            except Exception as exc:
+                raise _OwnedRoundExitUnconfirmed("original round producer exit is unconfirmed") from exc
+        if wrapper is not None:
+            if cancel and not wrapper.done() and not wrapper.cancelling():
+                wrapper.cancel()
+            await join(wrapper)
+        if cancelled_while_joining and not _cleanup:
+            raise asyncio.CancelledError
+
+    async def _execute_round(
+        self, work: RoundWorkItem, *, _owned_round: ActiveInteractionRound | None = None,
+    ) -> None:
+        owned = _owned_round if _owned_round is not None else self._prepare_owned_round(work)
+        if owned is None:
+            return
+        if self._active_interaction_round is not owned:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="original interaction round was replaced")
+        work = owned.work
+        if owned._facade_task is None:
+            owned._facade_task = asyncio.current_task()
+        resuming_goal = owned._resuming_goal
         with execution_origin_scope(work.execution_origin):
-            session = self._interaction_session
-            task_id = uuid.uuid4().hex
+            session = owned._session
+            task_id = owned.task_id
             forwarded = asyncio.Event()
             self._interaction_round_forwarded = forwarded
-            self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
-            self._event_manager.mark_started(work)
             interrupted = False
             try:
+                if work.execution_origin is not None:
+                    work.execution_origin._check_current()
                 if session is None or not self._interaction_output.has_consumer():
                     return
                 if work.kind == "goal" and not resuming_goal:
@@ -4291,11 +4474,18 @@ class DeepAgent(BaseAgent):
                 outcome: RoundOutcome = await self.run_one_round(
                     work, task_id, session
                 )
+                if work.execution_origin is not None and work.execution_origin._checker is not None:
+                    await self._drain_owned_round(owned)
                 interrupted = work.kind == "goal" and outcome.interrupted
-                self._active_interaction_round.waiting_for_input = interrupted
+                owned.waiting_for_input = interrupted
+                if self._active_interaction_round is not owned:
+                    raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                                      error_msg="original interaction round was replaced")
                 if not self._is_interaction_running():
                     return
                 if outcome.next_work is not None:
+                    if work.execution_origin is not None:
+                        work.execution_origin._check_current()
                     self._event_manager.push_user(outcome.next_work)
                     self._notify_work()
                 if outcome.error_code is not None:
@@ -4309,6 +4499,8 @@ class DeepAgent(BaseAgent):
                         self._emit_interaction_event(error)
             except asyncio.CancelledError:
                 logger.info("[DeepAgent] round cancelled")
+            except _OwnedRoundExitUnconfirmed:
+                raise
             except Exception:
                 logger.exception("[DeepAgent] round execution failed")
                 self._emit_interaction_event(
@@ -4318,13 +4510,15 @@ class DeepAgent(BaseAgent):
                     )
                 )
             finally:
+                if work.execution_origin is not None and work.execution_origin._checker is not None:
+                    await self._drain_owned_round(owned, cancel=bool(asyncio.current_task().cancelling()), _cleanup=True)
                 if not interrupted:
                     self._event_manager.mark_finished(work)
                 if session is not None:
                     emitted = await self._emit_round_boundary(session)
                     if not emitted:
                         forwarded.set()
-                if not interrupted:
+                if not interrupted and self._active_interaction_round is owned:
                     self._active_interaction_round = None
                 self._try_transition_interaction_phase(InteractionPhase.IDLE)
 
