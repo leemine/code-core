@@ -120,10 +120,32 @@ class GoalManager:
         record = self._store.load()
         return record.copy_for_response() if record is not None else None
 
-    async def get(self) -> Optional[GoalRecord]:
-        async with self._control_lock:
-            record = self._store.load()
-            return record.copy_for_response() if record is not None else None
+    async def get(self, *, _check_current=None) -> Optional[GoalRecord]:
+        if _check_current is None:
+            async with self._control_lock:
+                record = self._store.load()
+                return record.copy_for_response() if record is not None else None
+        lock, store = self._control_lock, self._store
+        session = getattr(store, "_session", None)
+
+        def check():
+            from openjiuwen.harness.goal.readmission import _sync
+            if (self._control_lock is not lock or self._store is not store
+                    or getattr(store, "_session", None) is not session):
+                raise PermissionError("[PERMISSION_DENIED] original Goal read target changed")
+            _sync(_check_current)
+            if (self._control_lock is not lock or self._store is not store
+                    or getattr(store, "_session", None) is not session):
+                raise PermissionError("[PERMISSION_DENIED] original Goal read target changed")
+
+        check()
+        async with lock:
+            check()
+            record = store.load()
+            result = record.copy_for_response() if record is not None else None
+            check()
+        check()
+        return result
 
     async def set(
         self,
