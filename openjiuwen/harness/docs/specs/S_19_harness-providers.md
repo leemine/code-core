@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
-| 最近一次修订日期 | 2026-09-30 |
-| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md |
+| 最近一次修订日期 | 2026-10-04 |
+| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md |
 
 ## 范围 / 边界
 
@@ -20,7 +20,15 @@
 1. **骨架唯一**：provider 继承 `SerializedTurnHarness`，只实现 `_open_session` / `_close_session` /
    `_execute_turn`（+ `_steer` / `_interrupt_turn`）。每个已接受输入恰好一个 STARTED 与一个 terminal
    `TurnLifecycleEvent`；stop 时排队中的 Turn 以 `HARNESS_STOP` ABORTED 收口；terminal 后队列为空才
-   进入 IDLE。
+   进入 IDLE。私有 `_capture_owned_turn` 仅查唯一原 active/queue 对象；
+   `_cancel_queued_turn` 在原 command lock 按对象身份核验，只标记尚未 dispatch 的原项。
+   同一 supervisor 按原序发 STARTED/USER_ABORT，不调用 Provider；它不是活动 Turn 退出接口。
+   交互入账前固定原 PendingTurn：显式 turn_id 必须匹配原 active；None 只允许当时没有
+   active 的 Session 级请求，不从后来 active 补来源。账本保留 request/handler/owner、
+   handling 以及原 cancel_task；ID 在 handle 和 cancel 都真实结束前不能复用，cancel
+   失败保留并上抛、后续可在同 entry 重试；因此公开 abort/stop 会传播原先被吞掉的取消
+   回调错误，签名及正常成功路径不变。取消只等待原 snapshot，finally/done 只按 is
+   清理原 entry；取消 waiter 不取消原 callback。迟到或已取消回复不能成为有效审批。
 2. **能力声明真实**：
 
    | provider | card | capabilities | optional host capabilities |
