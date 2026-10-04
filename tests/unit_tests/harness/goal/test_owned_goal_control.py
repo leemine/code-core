@@ -589,3 +589,44 @@ async def test_waiting_goal_control_clears_only_original_interruption_and_wakes(
     assert wakes == [None] and c.agent._active_interaction_round is None
     if action == "set":
         assert c.h.events.next_work().context["goal_id"] == c.h.manager.peek().goal_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("at", ["capture", "apply"])
+async def test_original_stop_phase_is_not_live_goal_control(case, at):
+    c = case
+    if at == "apply":
+        target = c.h.manager._capture_owned_control(expected_origin=c.source)
+    assert c.agent._try_transition_interaction_phase(InteractionPhase.TERMINATED)
+    with pytest.raises(PermissionError):
+        if at == "capture":
+            c.h.manager._capture_owned_control(expected_origin=c.source)
+        else:
+            await c.h.manager._apply_owned_control(target, action="pause", check_current=lambda: None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["set", "pause", "clear"])
+async def test_stop_during_commit_prevents_late_control_emission(case, action):
+    import asyncio
+
+    c = case
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def commit():
+        entered.set()
+        await release.wait()
+
+    c.h.session.commit = commit
+    target = c.h.manager._capture_owned_control(expected_origin=c.source)
+    before = len(c.h.emitted)
+    params = {"objective": "replacement", "overwrite_confirmed": True} if action == "set" else {}
+    applying = asyncio.create_task(
+        c.h.manager._apply_owned_control(target, action=action, check_current=lambda: None, **params)
+    )
+    await entered.wait()
+    c.agent._try_transition_interaction_phase(InteractionPhase.TERMINATED)
+    release.set()
+    with pytest.raises(PermissionError):
+        await applying
+    assert len(c.h.emitted) == before
