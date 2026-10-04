@@ -47,3 +47,16 @@ messager 不联网，不启动 Provider。原两项红测已保留；首次临�
 新增文件进入既有 stable discover/command 与 regression_manifest；原预算/白名单保持。
 最终受影响定向 350 passed、14 既有移除工具 skips、41 subtests；新增文件含 15 例。不能把 skips 写成通过。
 使用明确候选 core source overlay 与既有 6dce 锁环境；新正式配对/真实 UI 尚未验证。
+
+## Legacy reader 路由修复
+
+决定文件副作用的 legacy 检查必须走原 writer factory/session，不能从可改向或滞后的 read
+factory 推断原库没有受管成员。现复用原 DbSessions.write（只在查询阶段持原锁，不跨 FS
+await），首 await 前固定 DB/DAO/writer 引用，取得 session 后和查询返回后复核实际
+Team/TeamMember mapper/table 路由。纯 read factory 改向不能遮蔽原 writer 的受管行；writer
+或 mapper 改向也在 FS 前拒绝。查询结束后的跨进程首次受管登记与 FS 竞态仍属上述未完成范围，
+此修复不把它描述为原子资源权限。
+
+实际 A 库有受管成员、B 库空 roster，替换原 DbSessions._read_session_local 的独立反例在修复前
+仍删掉 A 工作区，已留红证据。新增创建/清理 × reader/writer/mapper 六例转绿；影响面 356
+passed、14 既有 skips、42 subtests。正式基线已合入本候选，先前 a464 的 stable 不代表此候选。

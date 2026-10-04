@@ -659,3 +659,7 @@ MemberRecordAuthorizer 的可选 bind_for_effect 仅为原 spawn 操作绑定 li
 在首 await 前捕获，读后及每个同步写入口前重验。真实 committed receipt 只交原 permit 的
 同步 on_committed，保存到宿主已有 member 登记槽；回调失败必须保留 committed-but-unconfirmed
 事实。受管 force_delete 的 git/worker 最终消费尚无检查，首入口拒绝，不把 DAO 后置拒绝当保护。
+
+外层决定 FS 副作用的 legacy 查询绑定原 writer 的实际 DB/DAO/factory 与 mapper/table 路由；
+不能用另一 read replica 的空结果放行。复用原 DbSessions 的查询写锁仅到查询完成，不跨文件
+副作用持锁；这仍不是跨进程并发创建受管成员与 FS 的资源事务。
