@@ -349,3 +349,205 @@ async def test_single_consumer_lease_is_enforced() -> None:
     await cursor.aclose()
     harness.events()
     await harness.stop()
+
+
+def _pending(identity: str) -> PendingTurn:
+    return PendingTurn(HarnessInput(content=identity), f"message-{identity}", identity, DeliveryMode.AUTO)
+
+
+@pytest.mark.asyncio
+async def test_cancel_exact_queued_turn_keeps_order_without_provider_dispatch():
+    harness = _ScriptedHarness()
+    executed = []
+    original_execute = harness._execute_turn
+
+    async def execute(turn):
+        executed.append(turn.turn_id)
+        return await original_execute(turn)
+
+    harness._execute_turn = execute
+    harness.release.clear()
+    await harness.start(_context())
+    try:
+        first = await harness.send(HarnessInput(content="first"))
+        await asyncio.sleep(0)
+        second = await harness.send(HarnessInput(content="cancel"))
+        third = await harness.send(HarnessInput(content="successor"))
+        owned = harness._capture_owned_turn(second.turn_id)
+        assert owned is not None
+        await harness._cancel_queued_turn(owned)
+        await harness._cancel_queued_turn(owned)
+        assert [turn.turn_id for turn in harness._pending] == [second.turn_id, third.turn_id]
+        with pytest.raises(HarnessStateError, match="already active"):
+            await harness._cancel_queued_turn(harness.active_turn)
+        from dataclasses import replace
+        with pytest.raises(HarnessStateError, match="not owned"):
+            await harness._cancel_queued_turn(replace(owned))
+        harness.release.set()
+        await _collect_turn(harness, first.turn_id)
+        canceled = await _collect_turn(harness, second.turn_id)
+        successor = await _collect_turn(harness, third.turn_id)
+        lifecycle = [event.event.kind for event in canceled if isinstance(event.event, TurnLifecycleEvent)]
+        assert lifecycle == [TurnEventKind.STARTED, TurnEventKind.ABORTED]
+        assert _terminal(canceled).result.termination.kind.value == "user_abort"
+        assert _terminal(successor).kind is TurnEventKind.FINISHED
+        assert executed == [first.turn_id, third.turn_id]
+        assert harness._capture_owned_turn(second.turn_id) is None
+        with pytest.raises(HarnessStateError, match="not owned"):
+            await harness._cancel_queued_turn(owned)
+    finally:
+        await harness.stop()
+
+
+def test_owned_turn_lookup_rejects_ambiguity_without_mutation():
+    harness = _ScriptedHarness()
+    first, duplicate = _pending("same"), _pending("same")
+    harness._active_turn = first
+    harness._pending.append(duplicate)
+    with pytest.raises(HarnessStateError, match="ambiguous"):
+        harness._capture_owned_turn("same")
+    assert not first.abort_requested and not duplicate.abort_requested
+    with pytest.raises(HarnessStateError, match="non-empty"):
+        harness._capture_owned_turn("")
+    assert harness._capture_owned_turn("absent") is None
+
+
+@pytest.mark.asyncio
+async def test_interaction_id_remains_reserved_through_cancel_waiter_cancellation():
+    harness = _ScriptedHarness()
+    handling, release_handle, canceling, release_cancel = (asyncio.Event() for _ in range(4))
+    canceled = []
+
+    class Handler:
+        async def handle(self, request):
+            handling.set()
+            await release_handle.wait()
+            return UserInputResponse(request_id=request.request_id, status=InteractionResponseStatus.COMPLETED,
+                                     content="answer")
+
+        async def cancel(self, request_id, *, reason):
+            canceled.append(request_id)
+            canceling.set()
+            await release_cancel.wait()
+
+    harness._context = _context(interactions=Handler())
+    old, new = _pending("old"), _pending("new")
+    harness._active_turn = old
+    request = UserInputRequest(request_id="reused", prompt="old?", turn_id="old")
+    handle = asyncio.create_task(harness._request_interaction(request))
+    await handling.wait()
+    original = harness._pending_interactions["reused"]
+    cancel = asyncio.create_task(harness._cancel_pending_interactions(
+        InteractionCancelReason.TURN_ABORTED, expected_turn=old))
+    await canceling.wait()
+    release_handle.set()
+    await handle
+    assert harness._pending_interactions["reused"] is original
+    harness._active_turn = new
+    replacement = UserInputRequest(request_id="reused", prompt="new?", turn_id="new")
+    with pytest.raises(HarnessStateError, match="already active"):
+        await harness._request_interaction(replacement)
+    cancel.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancel
+    assert not original.cancel_task.done()
+    retry = asyncio.create_task(harness._cancel_pending_interactions(
+        InteractionCancelReason.TURN_ABORTED, expected_turn=old))
+    await asyncio.sleep(0)
+    assert canceled == ["reused"]
+    release_cancel.set()
+    await retry
+    assert not harness._pending_interactions
+    release_handle.clear()
+    next_handle = asyncio.create_task(harness._request_interaction(replacement))
+    await asyncio.sleep(0)
+    current = harness._pending_interactions["reused"]
+    harness._release_interaction_entry(original)
+    assert harness._pending_interactions["reused"] is current
+    await harness._cancel_pending_interactions(InteractionCancelReason.TURN_ABORTED, expected_turn=old)
+    assert canceled == ["reused"]
+    release_handle.set()
+    await next_handle
+    assert not harness._pending_interactions
+
+
+@pytest.mark.asyncio
+async def test_failed_interaction_cancel_retains_id_and_exact_retry():
+    harness = _ScriptedHarness()
+    handling, release = asyncio.Event(), asyncio.Event()
+    count = []
+
+    class Handler:
+        async def handle(self, request):
+            handling.set()
+            await release.wait()
+            return UserInputResponse(request_id=request.request_id, status=InteractionResponseStatus.COMPLETED,
+                                     content="answer")
+
+        async def cancel(self, request_id, *, reason):
+            count.append(request_id)
+            if len(count) == 1:
+                raise RuntimeError("synthetic cancel unconfirmed")
+
+    harness._context = _context(interactions=Handler())
+    owner = _pending("original")
+    harness._active_turn = owner
+    request = UserInputRequest(request_id="request", prompt="?", turn_id=owner.turn_id)
+    work = asyncio.create_task(harness._request_interaction(request))
+    await handling.wait()
+    entry = harness._pending_interactions["request"]
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        await harness._cancel_pending_interactions(InteractionCancelReason.TURN_ABORTED, expected_turn=owner)
+    release.set()
+    await work
+    assert harness._pending_interactions["request"] is entry
+    with pytest.raises(HarnessStateError, match="already active"):
+        await harness._request_interaction(request)
+    await harness._cancel_pending_interactions(InteractionCancelReason.TURN_ABORTED, expected_turn=owner)
+    assert not harness._pending_interactions and count == ["request", "request"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_completion_does_not_release_still_handling_entry():
+    harness = _ScriptedHarness()
+    handler = _AnsweringHandler()
+    handler.block.clear()
+    # This provider callback acknowledges cancel without ending its handle yet.
+    async def acknowledge(*_, **__):
+        return None
+    handler.cancel = acknowledge
+    harness._context = _context(interactions=handler)
+    owner = _pending("original")
+    harness._active_turn = owner
+    work = asyncio.create_task(harness._request_interaction(
+        UserInputRequest(request_id="held", prompt="?", turn_id=owner.turn_id)))
+    await asyncio.sleep(0)
+    await harness._cancel_pending_interactions(InteractionCancelReason.TURN_ABORTED, expected_turn=owner)
+    assert "held" in harness._pending_interactions
+    handler.block.set()
+    await work
+    assert not harness._pending_interactions
+
+
+@pytest.mark.asyncio
+async def test_interactions_pin_explicit_turn_and_allow_only_idle_session_none():
+    harness = _ScriptedHarness()
+    handler = _AnsweringHandler()
+    harness._context = _context(interactions=handler)
+    request = UserInputRequest(request_id="idle", prompt="session?")
+    assert await harness._request_interaction(request) is not None
+    old, new = _pending("old"), _pending("new")
+    harness._active_turn = old
+    with pytest.raises(HarnessStateError, match="original active"):
+        await harness._request_interaction(request)
+    with pytest.raises(HarnessStateError, match="original active"):
+        await harness._request_interaction(UserInputRequest(request_id="mismatch", prompt="?", turn_id="new"))
+    handler.block.clear()
+    work = asyncio.create_task(harness._request_interaction(
+        UserInputRequest(request_id="explicit", prompt="?", turn_id="old")))
+    await asyncio.sleep(0)
+    assert harness._pending_interactions["explicit"].owner is old
+    harness._active_turn = new
+    handler.block.set()
+    assert await work is None
+    assert not harness._pending_interactions

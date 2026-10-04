@@ -92,6 +92,15 @@ class PendingTurn:
     stop_requested: bool = False
 
 
+@dataclass(slots=True, eq=False)
+class _PendingInteraction:
+    request: HarnessInteractionRequest
+    handler: Any = field(repr=False)
+    owner: PendingTurn | None = field(repr=False)
+    handling: bool = True
+    cancel_task: asyncio.Task[None] | None = field(default=None, repr=False)
+
+
 @dataclass(frozen=True, slots=True)
 class TurnTiming:
     """Wall-clock and monotonic anchors captured when a turn starts."""
@@ -138,7 +147,7 @@ class SerializedTurnHarness(ABC):
         self._stopping = False
         self._command_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
-        self._pending_interactions: dict[str, Any] = {}
+        self._pending_interactions: dict[str, _PendingInteraction] = {}
         self._latest_checkpoint: HarnessCheckpoint | None = None
         self._checkpoint_sequence = 0
         self._checkpoint_storage_revision: str | None = None
@@ -168,6 +177,36 @@ class SerializedTurnHarness(ABC):
     def active_turn(self) -> PendingTurn | None:
         """Return the turn currently under execution, if any."""
         return self._active_turn
+
+    def _capture_owned_turn(self, turn_id: str) -> PendingTurn | None:
+        """Look up a unique original Turn without selecting a current fallback.
+
+        Synchronous and event-loop local; mutation must recheck the returned
+        object under the original command lock.
+        """
+        if not isinstance(turn_id, str) or not turn_id:
+            raise HarnessStateError("owned turn requires a non-empty turn id")
+        candidates = tuple(self._pending)
+        if self._active_turn is not None:
+            candidates += (self._active_turn,)
+        matches = [turn for turn in candidates if turn.turn_id == turn_id]
+        if len(matches) > 1:
+            raise HarnessStateError("owned turn identity is ambiguous")
+        return matches[0] if matches else None
+
+    async def _cancel_queued_turn(self, expected: PendingTurn) -> None:
+        """Fence one original queued Turn; this is not active Provider exit.
+
+        Keep the same queue and event ordering. Its original supervisor emits
+        STARTED/ABORTED when reached, without dispatching it to the Provider.
+        """
+        async with self._command_lock:
+            self._require_accepting()
+            if (not isinstance(expected, PendingTurn) or self._active_turn is expected
+                    or not any(turn is expected for turn in self._pending)
+                    or self._capture_owned_turn(expected.turn_id) is not expected):
+                raise HarnessStateError("queued turn is not owned or already active")
+            expected.abort_requested = True
 
     # ------------------------------------------------------------------
     # Provider hooks
@@ -442,7 +481,11 @@ class SerializedTurnHarness(ABC):
             await self._transition(HarnessState.RUNNING)
             await self._emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), turn=active)
             try:
-                terminal_kind, result = await self._execute_turn(active)
+                if active.abort_requested:
+                    terminal_kind = TurnEventKind.ABORTED
+                    result = interrupted_result(active, provider_name=self.card.name, timing=TurnTiming())
+                else:
+                    terminal_kind, result = await self._execute_turn(active)
             except Exception as exc:
                 logger.exception("[%s] turn %s crashed inside the provider", self.card.name, active.turn_id)
                 terminal_kind, result = self._crash_result(active, exc)
@@ -546,13 +589,35 @@ class SerializedTurnHarness(ABC):
         context = self._context
         if context is None or context.interactions is None:
             return None
-        handler = context.interactions
-        self._pending_interactions[request.request_id] = handler
+        # Pin the original owner before the first callback/await. None is a
+        # legacy Session-level interaction only while no Turn is active.
+        owner = self._active_turn
+        if ((owner is None and request.turn_id is not None)
+                or (owner is not None and request.turn_id != owner.turn_id)):
+            raise HarnessStateError("interaction does not belong to the original active turn")
+        if owner is not None and owner.abort_requested:
+            return None
+        if request.request_id in self._pending_interactions:
+            raise HarnessStateError("interaction id is already active")
+        entry = _PendingInteraction(request, context.interactions, owner)
+        self._pending_interactions[request.request_id] = entry
         try:
-            response = await handler.handle(request)
+            response = await entry.handler.handle(request)
         finally:
-            self._pending_interactions.pop(request.request_id, None)
+            entry.handling = False
+            self._release_interaction_entry(entry)
+        if entry.cancel_task is not None or (owner is not None and (
+                self._active_turn is not owner or owner.abort_requested)):
+            return None
         return validate_interaction_response(request, response)
+
+    def _release_interaction_entry(self, entry: _PendingInteraction) -> None:
+        cancel = entry.cancel_task
+        if entry.handling or (cancel is not None and (
+                not cancel.done() or cancel.cancelled() or cancel.exception() is not None)):
+            return
+        if self._pending_interactions.get(entry.request.request_id) is entry:
+            self._pending_interactions.pop(entry.request.request_id)
 
     async def _confirm_provider_extension(self, request_type: str, payload: Mapping[str, Any]) -> bool:
         """Ask the host to ratify a provider-specific decision, if it can.
@@ -581,14 +646,26 @@ class SerializedTurnHarness(ABC):
         response = await self._request_interaction(request)
         return response is not None and response.status is InteractionResponseStatus.COMPLETED
 
-    async def _cancel_pending_interactions(self, reason: InteractionCancelReason) -> None:
-        pending = dict(self._pending_interactions)
-        self._pending_interactions.clear()
-        for request_id, handler in pending.items():
-            try:
-                await handler.cancel(request_id, reason=reason)
-            except Exception:
-                logger.exception("[%s] failed to cancel interaction %s", self.card.name, request_id)
+    async def _cancel_pending_interactions(
+        self, reason: InteractionCancelReason, *, expected_turn: PendingTurn | None = None
+    ) -> None:
+        # Reserve every original entry before the first await. Releasing the ID
+        # early would let a late handler.cancel(id) cancel a successor's entry.
+        pending = tuple(entry for entry in self._pending_interactions.values()
+                        if expected_turn is None or entry.owner is expected_turn)
+        tasks = []
+        for entry in pending:
+            task = entry.cancel_task
+            if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+                task = asyncio.create_task(entry.handler.cancel(entry.request.request_id, reason=reason))
+                entry.cancel_task = task
+                task.add_done_callback(lambda _done, original=entry: self._release_interaction_entry(original))
+            tasks.append(task)
+        for task in tasks:
+            # A cancelled caller cannot discard the original cancellation or
+            # free its ID before the real handler has finished. Failure stays
+            # in the same ledger and is reported; another call can retry it.
+            await asyncio.shield(task)
 
     # ------------------------------------------------------------------
     # Checkpoints

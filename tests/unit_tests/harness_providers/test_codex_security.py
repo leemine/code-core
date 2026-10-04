@@ -321,3 +321,34 @@ async def test_permission_bound_checkpoint_cannot_drop_host_approval_capability(
         await resumed.start(_context(checkpoint=checkpoint, resume_policy=ResumePolicy.REQUIRE_RESUME))
     assert len(state.clients) == 1
     await resumed.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_turn", [None, "old"])
+async def test_approval_authorizer_wait_cannot_bind_late_interaction_to_successor(initial_turn):
+    import asyncio
+
+    from openjiuwen.harness_protocol import DeliveryMode, HarnessInput, HarnessStateError
+    from openjiuwen.harness_providers.base import PendingTurn
+
+    harness = CodexHarness()
+    handler = SimpleNamespace(handle=AsyncMock(), cancel=AsyncMock())
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def authorize(_request):
+        entered.set()
+        await release.wait()
+        return True
+
+    harness._context = _context(interactions=handler, tool_authorizer=authorize)
+    if initial_turn is not None:
+        harness._active_turn = PendingTurn(HarnessInput(content="old"), "old-message", "old", DeliveryMode.AUTO)
+    pending = asyncio.create_task(harness._route_approval("item/commandExecution/requestApproval", {"itemId": "tool"}))
+    await entered.wait()
+    successor = PendingTurn(HarnessInput(content="new"), "new-message", "new", DeliveryMode.AUTO)
+    harness._active_turn = successor
+    release.set()
+    with pytest.raises(HarnessStateError, match="original active"):
+        await pending
+    handler.handle.assert_not_awaited()
+    assert not harness._pending_interactions and not successor.abort_requested
