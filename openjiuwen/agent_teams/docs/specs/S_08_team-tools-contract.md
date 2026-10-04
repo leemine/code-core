@@ -651,3 +651,11 @@ SQLite 全量清理在原事务内先取得数据库 write reservation，再检�
 独立数据库实例不能在检查和清理之间插入已授权成员。PostgreSQL 对原 member 表取事务锁
 （未做真实服务验证）。无法跨 DDL 保持同一屏障的 MySQL 全量清理在 member 表存在时拒绝，
 包括当次只有 legacy 行的情况；逐成员原授权操作不因此开放或关闭。
+
+### 原 workspace 副作用前置能力（F_122）
+
+MemberRecordAuthorizer 的可选 bind_for_effect 仅为原 spawn 操作绑定 live 来源；不可由 wire
+重建，不代替 member DAO 的原事务授权/CAS。来源、Backend/DB、placement/config 和原输入须
+在首 await 前捕获，读后及每个同步写入口前重验。真实 committed receipt 只交原 permit 的
+同步 on_committed，保存到宿主已有 member 登记槽；回调失败必须保留 committed-but-unconfirmed
+事实。受管 force_delete 的 git/worker 最终消费尚无检查，首入口拒绝，不把 DAO 后置拒绝当保护。
