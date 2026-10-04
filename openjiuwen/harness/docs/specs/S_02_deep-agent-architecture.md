@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md` |
+| 关联 feature | `F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
 
 ## 范围 / 边界
 
@@ -125,7 +125,13 @@ def loop_coordinator(self) -> Optional[LoopCoordinator]
 - `stop` 进入 teardown 即置 TERMINATED；phase 不是 owned task 已退出的证明。
   `controller.stop()` 的超时或清理错误必须传给调用方；失败保留原 controller、session
   和 `_interaction_started`，由同一实例再次 `stop()`，不创建替代实例掩盖未退出任务。
-  controller 确认退出后才清除 started 标记。实际调度任务的有界 join 见 S_03。
+  controller 与原 interaction round 均确认退出后才清除 started 标记。实际调度任务的有界 join 见 S_03。
+  round 在 stop 首次 await 前保留至 `_stopping_interaction_round_tasks`，这只是原 Task
+  的退出引用集合。stop 复用五秒预算等待 round finally 退出；超时或调用者取消保留原引用、
+  controller/session 与 started，且不重复 cancel 已在清理的 Task。拒绝 round 自己 stop，
+  不扫描或停止外部 Task。已退出的异常 Task 先清原引用再报告一次，后续 stop 可结清。
+  supervisor 在 follow-up promotion await 返回后、唯一 round 创建点前复核原 phase，
+  TERMINATED 时不得再创建 round。
 - `unbind_session` 的既有错误抑制不影响调度任务所有权：解绑只保存任务状态、退订事件
   并移除 session 映射，不能替代 `controller.stop()`，也不清除其 owned task 记录。
 - `start` 绑到第二个 session → `RuntimeError`。
