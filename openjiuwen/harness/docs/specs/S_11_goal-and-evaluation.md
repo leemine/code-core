@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/goal/` |
 | 最近一次修订日期 | 2026-10-05 |
-| 关联 feature | `F_38_goal-idle-readmission.md`、 `F_10_provider-neutral-goal-driver.md`, `F_35_goal-live-execution-origin.md`, `F_37_owned-goal-control.md` |
+| 关联 feature | `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 `F_10_provider-neutral-goal-driver.md`, `F_35_goal-live-execution-origin.md`, `F_37_owned-goal-control.md` |
 
 ## 范围 / 边界
 
@@ -167,3 +167,13 @@ await 后均复核该归属，失败不排队、不触发自动 ensure。
 活动 Goal 控制 selector 在来源回调前固定实际 Store backing Session，并要求其与
 原 attempt Session 为同一对象。capture/apply/commit await 后/clear ACK 的静态复核
 均检查该对象归属；同 ID 和相同记录不是可替换存储的证明。
+
+## 空闲 Goal 的停止性控制（F39）
+
+Native 私有 `_capture_idle_goal_control` 只接已有 Goal 的 pause/clear；控制授权与旧执行来源
+分离。hot 必须显式原 Pending 及成功的原退出图，cold 必须首次 managed Pending 尚未
+产生、原 slot 为 None 且所有原库存为空。复用 F38 原选择器及真实 store backing Session
+检查，持久 GoalRecord 不赋权。原 command → send → control 锁内复用 GoalManager
+保存和 commit；await 后及最终 `check_result` 重验当前控制授权和原目标。pause 保持
+slot，clear 清 slot。无新 Turn/模型/attach/输出 lease；idle 仅原调用 ACK，legacy/live
+goal_updated 事件保持。调用者取消不丢原操作 Task，同对象同行为重试等待同一结果。
