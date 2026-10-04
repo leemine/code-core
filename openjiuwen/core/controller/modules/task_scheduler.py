@@ -862,21 +862,17 @@ class TaskScheduler:
         while self._running:
             try:
                 # 1. Get tasks to execute
-                submitted_tasks = await self._task_manager.get_task(task_filter=TaskFilter(status=TaskStatus.SUBMITTED))
+                submitted_tasks = await self._task_manager._capture_submitted_tasks()
 
                 # 2. Concurrently start all new tasks (non-blocking)
                 for task in submitted_tasks:
-                    # Check whether session exists
-                    session = self._sessions.get(task.session_id)
-                    if not session:
-                        logger.warning(
-                            f"Task {task.task_id} session {task.session_id} not found, skipping"
-                        )
-                        continue
-
                     async with self._lock:
                         if not self._running:
                             break
+                        # A scan can wait on this lock while its Task is canceled,
+                        # removed or replaced. Admit only that exact live object.
+                        if not self._task_manager._is_submitted_task(task):
+                            continue
                         if len(self._running_tasks) >= self._config.max_concurrent_tasks:
                             logger.warning(f"Reached max concurrent tasks limit ({self._config.max_concurrent_tasks}), "
                                         "waiting for next schedule")
@@ -885,6 +881,13 @@ class TaskScheduler:
                         # Check whether it is already running
                         if (task.task_id in self._running_tasks
                                 or self._capture_owned_execution(task.task_id) is not None):
+                            continue
+
+                        session = self._sessions.get(task.session_id)
+                        if not session:
+                            logger.warning(
+                                f"Task {task.task_id} session {task.session_id} not found, skipping"
+                            )
                             continue
 
                         # Start non-blockingly using create_task

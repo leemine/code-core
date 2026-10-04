@@ -358,6 +358,18 @@ class TaskManager:
             # Return deep copies to prevent external modifications to internal state
             return [task.model_copy(deep=True) for task in result_tasks]
 
+    async def _capture_submitted_tasks(self) -> List[Task]:
+        """Capture original submitted Tasks for the scheduler, never public callers."""
+        async with self._lock:
+            # Match the candidate iteration order of the public status query.
+            return [self.tasks[task_id] for task_id in set(self.tasks)
+                    if self.tasks[task_id].status == TaskStatus.SUBMITTED]
+
+    def _is_submitted_task(self, expected: Task) -> bool:
+        """Recheck the captured object synchronously on the manager's event loop."""
+        return (self.tasks.get(expected.task_id) is expected
+                and expected.status == TaskStatus.SUBMITTED)
+
     def _collect_all_children(self, parent_id: str, children_set: Set[str]):
         """Recursively collect all child task IDs
 

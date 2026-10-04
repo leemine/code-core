@@ -9,12 +9,24 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.modules import task_scheduler as module
+from openjiuwen.core.controller.modules.task_manager import TaskFilter
 from openjiuwen.core.controller.modules.task_scheduler import TaskScheduler
 from openjiuwen.core.controller.schema import EventType, TaskStatus
 
 
 def scheduler():
     manager = SimpleNamespace(get_task=AsyncMock(return_value=[]), update_task_status=AsyncMock())
+    manager.tasks = {}
+
+    async def capture():
+        tasks = await manager.get_task(task_filter=TaskFilter(status=TaskStatus.SUBMITTED))
+        manager.tasks = {task.task_id: task for task in tasks}
+        return tasks
+
+    manager._capture_submitted_tasks = capture
+    manager._is_submitted_task = lambda task: (
+        manager.tasks.get(task.task_id) is task and task.status is TaskStatus.SUBMITTED
+    )
     return TaskScheduler(ControllerConfig(), manager, Mock(), Mock(), Mock(), Mock())
 
 

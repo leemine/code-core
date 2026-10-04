@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_28_round-execution-origin.md`、`F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md` |
+| 关联 feature | `F_24_owned-task-stop-confirmation.md`、`F_26_scheduler-owned-exit-capture.md`、`F_28_round-execution-origin.md`、`F_29_scheduler-submitted-admission.md` |
 
 ## 范围 / 边界
 
@@ -78,6 +78,11 @@
     或 running 映射不一致必须拒绝；ID 复用不能替换尚未退出的 wrapper，晚到 done 回调
     只能清理同一对象。原调用者持 Task 检查退出，不以业务 terminal 状态替代实际 done。
     不全局扫描 asyncio tasks，不创建另一任务队列或调度状态机。
+
+13. Scheduler 扫描只通过 TaskManager 私有接口捕获原 SUBMITTED Task；等待原调度锁后，
+    对当前同 ID 原对象及状态、running/owned/容量和 Session 映射作无 await 复核再创建。
+    被取消/删除/替换的旧扫描不调度；新扫描仍允许正常替换对象。公开任务查询保持深拷贝。
+    此准入复核不等于原 wrapper 退出确认，也不扩大公开 cancel 语义。
 
 ## 接口契约
 
