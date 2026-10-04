@@ -224,7 +224,7 @@ BLOCK 背压遵循公共协议：stop 时消费者需继续排空事件。
 ## 进程内原始执行来源
 
 `ExecutionOrigin` 是宿主生成的 opaque live-only 来源，不是授权结论。显式 scope 捕获原来源，
-既有 InboxMessage、ActiveRound、InputEvent/Task.inputs 与 coordination EventMessage 保留
+既有 InboxMessage、ActiveRound、InputEvent/Task.inputs 与 coordination EventMessage / InnerEventMessage 保留
 同一个对象；序列化/恢复不包含来源，也不从最新回合或字符串重新生成。词法 scope 退出只
 使自身句柄失效，origin 本体仍可排队；宿主另行核验原 admission 生命周期。
 
@@ -234,3 +234,9 @@ Native send/steer/follow-up/pause/resume/retry 不混合不同来源。旧 None 
 始终不是所有权证明。成员来源不等于子 Agent 或其它成员的授权。
 
 以上 origin 扩展仅由普通 Native/TeamHarness 实现；MemberRuntime 的跨 Provider 基础表面仍保留原 send 参数。External/跨进程不因这项载体扩展获得来源或授权。详见 F_119_live-execution-origin。
+
+协调内层桥接也保留事件自身来源：`enqueue_user_input` 在提交时捕获，self task echo
+转为 `SCHEDULER_SCAN` 时复制原 EventMessage 的 private origin，不能借用发布者当前 scope。
+JSON 冷恢复仍无来源；EventBus 回调沿已有词法 scope 执行，退出后继承该句柄的晚到子任务
+不能取回来源。此载体不为 scheduler 扫到的持久 Task、Review 或 mailbox 行补发授权，
+不证明队列排空或 Team 结束。详见 F_120_inner-event-execution-origin。
