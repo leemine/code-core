@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
 | 最近一次修订日期 | 2026-10-04 |
-| 关联 feature | `F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
+| 关联 feature | `F_28_round-execution-origin.md`、`F_04_authoritative-terminal-stream.md`、`F_24_owned-task-stop-confirmation.md`、`F_25_owned-round-stop-confirmation.md` |
 
 ## 范围 / 边界
 
@@ -191,3 +191,17 @@ def loop_coordinator(self) -> Optional[LoopCoordinator]
 - `_load_goal_record_locked` / `_promote_loop_follow_ups` 的 goal 语义见 `S_11`。
 - `switch_mode` / plan 文件路径解析最终落到 `tools/agent_mode_tools.py` 的
   `resolve_plan_file_path` / `get_or_create_plan_slug`，见 `S_05`。
+
+## Round 的进程内执行来源
+
+`RoundWorkItem.execution_origin` 是原 `ExecutionOrigin` 的私有 live carrier；默认构造和
+公开字段恢复均为 None，不读取 ambient。`with_execution_origin` 复制不可变值，保留来源
+对象身份，显式 None 清源；`asdict`/JSON、inputs/context 和持久 Session state 不含来源。
+
+`send_input` 在首次 await 前捕获来源，沿原 EventManager queue 显式传递。`_execute_round`
+和 `run_one_round` 在真实执行、rails/resume 和 terminal cleanup 期间保持词法 scope，
+无来源的 work 遮蔽 supervisor 旧 ambient。Goal 的 suspended resume 继承 suspended work
+来源；active steer 只接受相同来源对象。此载体不负责认证或授权。
+
+后继 work 和控制器 InputEvent 保持原来源；follow-up 批次遵循 S_03。此通路不代表 Native
+宿主 entry 已绑定、plain resume 已证明原 Turn，或自动 Goal 再 ensure 拥有持久授权。

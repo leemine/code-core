@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from enum import Enum
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional
 
+from openjiuwen.core.controller.schema.execution_origin import ExecutionOrigin, resolve_execution_origin
 from openjiuwen.core.session.stream import OutputSchema
 
 if TYPE_CHECKING:
@@ -65,6 +66,22 @@ class RoundWorkItem:
     inputs: Dict[str, object]
     context: Dict[str, object] = field(default_factory=dict)
     is_follow_up: bool = False
+    _origin: InitVar[ExecutionOrigin | None] = None
+
+    def __post_init__(self, _origin: ExecutionOrigin | None) -> None:
+        # InitVar is excluded from fields/asdict/JSON. Instance storage lets
+        # dataclasses.replace preserve the same live object, without ambient
+        # capture or putting provenance in inputs/context/Session state.
+        object.__setattr__(self, "_origin", resolve_execution_origin(_origin))
+
+    @property
+    def execution_origin(self) -> ExecutionOrigin | None:
+        """Original live source; fresh/restored public fields have none."""
+        return self._origin
+
+    def with_execution_origin(self, origin: ExecutionOrigin | None) -> RoundWorkItem:
+        """Copy this frozen value with an explicit source (None clears it)."""
+        return replace(self, _origin=resolve_execution_origin(origin))
 
     @classmethod
     def user(
