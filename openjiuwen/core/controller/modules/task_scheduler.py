@@ -47,6 +47,9 @@ if TYPE_CHECKING:
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
+_STOP_TIMEOUT_SECONDS = 5.0
+
+
 @dataclass
 class TaskExecutorDependencies:
     """Task executor dependencies
@@ -271,6 +274,10 @@ class TaskScheduler:
         # Scheduler running state
         self._running = False
         self._scheduler_task: Optional[asyncio.Task] = None
+        # Business bookkeeping is removed before terminal UI publication. Keep
+        # the same owned Tasks until their final IO actually finishes.
+        self._owned_execution_tasks: set[asyncio.Task] = set()
+        self._stopping_tasks: set[asyncio.Task] = set()
 
         # Running tasks: task_id -> (TaskExecutor, asyncio.Task)
         self._running_tasks: Dict[str, Tuple[Optional[TaskExecutor], Optional[asyncio.Task]]] = {}
@@ -839,6 +846,8 @@ class TaskScheduler:
                         continue
 
                     async with self._lock:
+                        if not self._running:
+                            break
                         if len(self._running_tasks) >= self._config.max_concurrent_tasks:
                             logger.warning(f"Reached max concurrent tasks limit ({self._config.max_concurrent_tasks}), "
                                         "waiting for next schedule")
@@ -853,6 +862,8 @@ class TaskScheduler:
                             self._execute_task_wrapper(task.task_id, session)
                         )
 
+                        self._owned_execution_tasks.add(exec_task)
+                        exec_task.add_done_callback(self._owned_execution_tasks.discard)
                         # Record in running tasks
                         self._running_tasks[task.task_id] = (None, exec_task)
 
@@ -907,7 +918,9 @@ class TaskScheduler:
 
         if tasks:
             # Use gather to wait for all tasks to complete
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Cancelling the scheduler waiter must not cancel each owned task
+            # again while that task is already unwinding its cleanup.
+            results = await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
 
             # Collect statistics
             success_count = sum(1 for r in results if not isinstance(r, Exception))
@@ -926,6 +939,9 @@ class TaskScheduler:
 
         Starts the background scheduling task and begins periodic scanning and execution of pending tasks.
         """
+        if self._stopping_tasks:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="scheduler stop is not confirmed; retry stop before start")
         if self._running:
             logger.warning("TaskScheduler is already running")
             return
@@ -934,31 +950,48 @@ class TaskScheduler:
         logger.info("TaskScheduler started")
 
     async def stop(self):
-        """Stop task scheduler
+        """Stop only owned work and confirm exit within a five-second budget.
 
-        Stops the background scheduling task and stops scanning and executing tasks.
-        Cancels all running tasks to ensure clean shutdown.
+        Cancellation of this caller does not discard ownership or cancel a
+        shared join. A timed-out stop can be retried against the same tasks;
+        start remains blocked until their exit has been confirmed.
         """
-        if not self._running:
-            logger.warning("TaskScheduler is not running")
-            return
-
         self._running = False
-
-        # Cancel all running tasks to prevent hanging on stream writes
-        if self._running_tasks:
-            logger.info(f"Cancelling {len(self._running_tasks)} running tasks before stopping...")
-            async with self._lock:
-                for task_id, (executor, exec_task) in list(self._running_tasks.items()):
-                    if exec_task and not exec_task.done():
-                        exec_task.cancel()
-                        logger.info(f"Cancelled task {task_id} successfully")
-
-        if self._scheduler_task:
-            self._scheduler_task.cancel()
-            try:
-                await self._scheduler_task
-            except asyncio.CancelledError:
-                pass
-
-        logger.info("TaskScheduler stopped")
+        # This snapshot and cancellation are synchronous on the scheduler's
+        # event loop. schedule() rechecks _running under its existing lock
+        # before creating work, so no new execution can slip past this point.
+        owned = set(self._owned_execution_tasks)
+        owned.update(task for _, task in self._running_tasks.values() if task is not None)
+        if self._scheduler_task is not None:
+            owned.add(self._scheduler_task)
+        if asyncio.current_task() in owned or asyncio.current_task() in self._stopping_tasks:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="an owned execution cannot confirm its own scheduler stop")
+        fresh = owned - self._stopping_tasks
+        self._stopping_tasks.update(owned)
+        owned = set(self._stopping_tasks)
+        for task in fresh:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        pending = {task for task in owned if not task.done()}
+        if pending:
+            _, pending = await asyncio.wait(pending, timeout=_STOP_TIMEOUT_SECONDS)
+        if pending:
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="scheduler stop timed out; owned execution exit is unconfirmed")
+        errors = [task.exception() for task in owned if not task.cancelled() and task.exception() is not None]
+        # Another waiter may already have completed this same close. Remove
+        # only its original objects, never a subsequent scheduler generation.
+        self._stopping_tasks.difference_update(owned)
+        self._owned_execution_tasks.difference_update(owned)
+        for task_id, (_, task) in tuple(self._running_tasks.items()):
+            if task in owned:
+                self._running_tasks.pop(task_id, None)
+        if self._scheduler_task in owned:
+            self._scheduler_task = None
+        if errors:
+            # Exit is known even when cleanup failed. Report the error to this
+            # caller, but do not turn an exited task into a permanent lock.
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, cause=errors[0],
+                              error_msg="owned task failed during scheduler stop")
+        logger.info("TaskScheduler stopped with owned execution exit confirmed")
