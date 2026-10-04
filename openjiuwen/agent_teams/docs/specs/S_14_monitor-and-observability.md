@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（agent 层 span 在 `openjiuwen/harness/observability/`） |
-| 最近一次修订日期 | 2026-09-03 |
+| 最近一次修订日期 | 2026-10-05 |
 | 关联 feature | F_09_team-stream-logging.md、F_37_observability-otel-trace.md、F_83_agent-tier-rail-split.md、F_110_genai-semconv-canonicalization.md |
 
 ## 范围 / 边界
@@ -402,3 +402,15 @@ class MonitorEvent(BaseModel):
 - **S_06 Runtime Pool & Dispatch**：`TeamRuntimeManager.get_monitor` 复用 pool 的 `_resolve_entry` 寻址；entry 不存在直接返回 `None`，不影响 dispatch / gate。`get_monitor` 只读 pool，不参与决策。
 - **S_07 Interaction Views & HITT**：HumanAgent inbox 与 monitor 是两条独立观察通道——前者面向"扮演成员"的人类输入交互，后者面向"旁观团队运行"的纯读数据。共用 `TeamDatabase`，不共用任何 listener / 队列。
 - **S_08 Team Tools Contract**：team tools 修改任务 / 邮箱时通过 `TeamMessageManager` / `TeamTaskManager` 发出 `TeamEvent.TASK_*` / `MESSAGE` / `BROADCAST` 事件，由 monitor 翻译为 `MonitorEvent`。工具与监控解耦：工具不知道有 monitor 在看。
+
+## 原成员记录来源（可选宿主装配）
+
+受管 `TeamDatabase` 的成员创建和七类修改复用原写事务，调用宿主 live authorizer，
+固定原 ExecutionOrigin、DB、实体与 actor；记录 nonce/revision/source_id 只是对照，
+不授权。合法写入在原事务提交时产生不可序列化 receipt。旧无 stamp 行不自动认领。
+monitor 的 `MemberInfo` 仅在进程内携带写时 stamp，JSON 不含该字段；读取不补签。
+此接缝尚未挂入 Team host；从成员 stamp 到跨 E2A 最终交付的来源重验仍须独立接线。
+
+原成员事务的 receipt 不是当前 ACK 授权：commit 返回后来源漂移须报告
+`MemberWriteCommittedButUnconfirmed` 并保留原交易事实。宿主在保留或当前交付 receipt 前
+调用其 `check_current()`；该方法对照原发行字段和原 source，不读最新 owner 或 latest row 补签。
