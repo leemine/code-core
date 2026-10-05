@@ -118,3 +118,12 @@ RUN_OPENCODE_OC1=1 timeout 240 python -m pytest \
 `RUN_OPENCODE_OC1` / `OPENCODE_OC1_CLI` 名称为 OC1 建立时的兼容入口，OC2–OC5 继续复用。测试创建并回收
 自己的 loopback listener、私有运行根、
 服务和工具进程；不调用远端模型，不安装 CLI，不构成 Web/CLI 产品渠道或正式锁定发布验收。
+
+### Graceful abort and durable idle
+
+The CLI's Session-level `MessageAbortedError` can precede its completed assistant
+snapshot. After a requested abort, the Provider continues observing that exact
+Session until the latest current-root aborted assistant, a subsequent native
+idle, and exact message readback agree. The Session error or abort acknowledgment
+alone never creates a resumable checkpoint. Missing or conflicting proof keeps
+cold resume fail-closed; the host must still stop and confirm its owned resources.
