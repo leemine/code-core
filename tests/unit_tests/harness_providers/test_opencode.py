@@ -832,6 +832,7 @@ class InteractiveTransport(FakeTransport):
                 time={"completed": 1},
                 error={"name": "MessageAbortedError", "data": {"message": "Aborted"}},
             )
+            self.history = [{"info": self.completed, "parts": []}]
             await self.queue.put(event("message.updated", info=self.completed))
             await self.queue.put(event("session.idle"))
             return True
@@ -1466,3 +1467,208 @@ def test_governed_opencode_requires_ordinary_approval_channel():
     with pytest.raises(HarnessProtocolError, match="requires host tool approvals"):
         harness._validate_context(context(tool_authorizer=authorize))
     assert harness._server is None
+
+
+class AbortEventTransport(FakeTransport):
+    """Controlled native SSE ordering; the real harness owns all turn state."""
+
+    def __init__(self, order):
+        super().__init__(order)
+        self.prompted = asyncio.Event()
+        self.before_message = None
+
+    async def next_event(self):
+        value = await super().next_event()
+        if value["type"] == "message.updated" and self.before_message is not None:
+            self.before_message()
+        return value
+
+    async def request(self, method, path, body=None):
+        if method == "POST" and path.endswith("/prompt_async"):
+            self.requests.append((method, path, body))
+            self.user_id = body["messageID"]
+            self.prompted.set()
+            return None
+        if method == "POST" and path.endswith("/abort"):
+            self.requests.append((method, path, body))
+            error = {"name": "MessageAbortedError", "data": {"message": "synthetic abort"}}
+            aborted = info(parentID=self.user_id, time={"completed": 1}, error=error)
+            native_error_event = event("session.error", error=error)
+            message = event("message.updated", info=aborted)
+            idle = event("session.idle")
+            self.history = [{"info": aborted, "parts": []}]
+            orders = {
+                "error-first": [native_error_event, message, idle],
+                "native-order": [
+                    native_error_event,
+                    event("session.status", status={"type": "idle"}),
+                    idle,
+                    message,
+                    event("session.status", status={"type": "idle"}),
+                    idle,
+                ],
+                "message-first": [message, native_error_event, idle],
+                "no-message": [native_error_event, idle],
+                "wrong-root": [
+                    native_error_event,
+                    event("message.updated", info={**aborted, "parentID": "msg_other"}),
+                    idle,
+                ],
+                "wrong-session-message": [
+                    native_error_event,
+                    event("message.updated", info={**aborted, "sessionID": "ses_other"}),
+                    idle,
+                ],
+                "no-idle": [native_error_event, message],
+                "incomplete-message": [
+                    native_error_event,
+                    event("message.updated", info={**aborted, "time": {}}),
+                    idle,
+                ],
+                "superseded-message": [
+                    native_error_event,
+                    message,
+                    event("message.updated", info=info(mid="msg_new", parentID=self.user_id)),
+                    message,
+                    idle,
+                ],
+                "other-error": [event("session.error", error={"name": "APIError"}), message, idle],
+                "foreign-error": [
+                    event("session.error", sessionID="ses_other", error={"name": "APIError"}),
+                    message,
+                    idle,
+                ],
+            }
+            if self.mode.startswith("readback-"):
+                orders[self.mode] = [native_error_event, message, idle]
+                field = self.mode.removeprefix("readback-")
+                changes = {
+                    "id": "msg_wrong",
+                    "parentID": "msg_wrong",
+                    "sessionID": "ses_wrong",
+                    "role": "user",
+                    "time": {},
+                    "error": {"name": "APIError"},
+                }
+                self.history = [{"info": {**aborted, field: changes[field]}, "parts": []}]
+            events = orders[self.mode]
+            for value in events:
+                await self.queue.put(value)
+            return True
+        if method == "GET" and "/message/" in path:
+            return self.history[-1]
+        return await super().request(method, path, body)
+
+
+class AbortEventHarness(FakeHarness):
+    def __init__(self, mode, history=None):
+        super().__init__(mode)
+        self.history = history
+
+    async def _open_session(self, ctx):
+        self.transport = self._transport = AbortEventTransport(self.mode)
+        if self.history is not None:
+            self.transport.history = self.history
+        session_id, resumed = await self._activate_session(ctx)
+        self._session_id = session_id
+        await self._publish_session_checkpoint(
+            reason=CheckpointReason.SESSION_ACTIVATED, resumable=True, state="idle", resumed=resumed
+        )
+        return session_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order", ["error-first", "message-first", "foreign-error", "native-order"])
+async def test_requested_abort_session_error_waits_for_correlated_message_and_idle(order):
+    sink = RecordingSink()
+    harness = AbortEventHarness(order)
+    await harness.start(context(checkpoint_sink=sink))
+    try:
+        if order == "native-order":
+
+            def no_early_checkpoint():
+                assert sink.saved[-1][0].data["state"] == "turn_active"
+
+            harness.transport.before_message = no_early_checkpoint
+        receipt = await harness.send(HarnessInput("ordinary cancellation"))
+        await harness.transport.prompted.wait()
+        await harness.abort(mode=AbortMode.GRACEFUL)
+        events = await collect_turn(harness, receipt.turn_id)
+        assert_turn_invariants(events, receipt.turn_id)
+        result = terminal_of(events)
+        assert result.kind is TurnEventKind.ABORTED
+        assert result.result.status is TurnStatus.INTERRUPTED and result.result.error is None
+        checkpoint = sink.saved[-1][0]
+        assert checkpoint.data["state"] == "idle" and checkpoint.data["resumable"] is True
+        assert sink.saved[-1][1] is CheckpointReason.TURN_COMPLETED
+        assert not harness._poisoned
+    finally:
+        await harness.stop()
+    resumed = AbortEventHarness(order, history=harness.transport.history)
+    try:
+        await resumed.start(context(checkpoint=checkpoint, resume_policy=ResumePolicy.REQUIRE_RESUME))
+        assert resumed.provider_session_id == "ses_s"
+        assert not any(method == "POST" and path == "/session" for method, path, _ in resumed.transport.requests)
+    finally:
+        await resumed.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "order",
+    [
+        "no-message",
+        "wrong-root",
+        "wrong-session-message",
+        "no-idle",
+        "other-error",
+        "incomplete-message",
+        "superseded-message",
+        "readback-id",
+        "readback-parentID",
+        "readback-sessionID",
+        "readback-role",
+        "readback-time",
+        "readback-error",
+    ],
+)
+async def test_session_abort_error_without_confirmed_correlated_idle_cannot_resume(order):
+    sink = RecordingSink()
+    harness = AbortEventHarness(order)
+    await harness.start(context(checkpoint_sink=sink))
+    try:
+        receipt = await harness.send(HarnessInput("ordinary cancellation"))
+        await harness.transport.prompted.wait()
+        await harness.abort(mode=AbortMode.GRACEFUL)
+        events = await collect_turn(harness, receipt.turn_id)
+        assert_turn_invariants(events, receipt.turn_id)
+        terminal = terminal_of(events)
+        assert terminal.kind is TurnEventKind.ABORTED and terminal.result.status is TurnStatus.INTERRUPTED
+        checkpoint = sink.saved[-1][0]
+        assert checkpoint.data["state"] == "turn_active" and checkpoint.data["resumable"] is False
+        assert harness._poisoned
+    finally:
+        await harness.stop()
+    resumed = AbortEventHarness(order)
+    with pytest.raises(HarnessProtocolError, match="confirmed idle"):
+        await resumed.start(context(checkpoint=checkpoint, resume_policy=ResumePolicy.REQUIRE_RESUME))
+
+
+@pytest.mark.parametrize(
+    "requested,name,accepted",
+    [
+        (True, "MessageAbortedError", True),
+        (False, "MessageAbortedError", False),
+        (True, "APIError", False),
+        (True, "MessageAbortedError-extra", False),
+    ],
+)
+def test_session_abort_error_is_only_nonterminal_for_exact_requested_abort(requested, name, accepted):
+    accumulator = Accumulator("ses_s", "msg_u", 10000)
+    value = event("session.error", error={"name": name, "data": {"message": "synthetic"}})
+    if accepted:
+        assert accumulator.consume(value, abort_requested=requested) == []
+        assert accumulator.aborted_id is None and accumulator.final_id is None
+    else:
+        with pytest.raises(OpenCodeError):
+            accumulator.consume(value, abort_requested=requested)
