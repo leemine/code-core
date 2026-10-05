@@ -403,6 +403,10 @@ class OpenCodeHarness(SerializedTurnHarness):
                         error = OpenCodeError("interaction_declined")
                         return TurnEventKind.FAILED, acc.result(timing, error=error)
                     if acc.is_idle(event) and acc.aborted_id and turn.abort_requested:
+                        message = await transport.request(
+                            "GET", f"/session/{self._session_id}/message/{acc.aborted_id}"
+                        )
+                        await self._emit_mapped(turn, acc.reconcile(message, aborted=True))
                         await self._publish_session_checkpoint(
                             reason=CheckpointReason.TURN_COMPLETED,
                             resumable=True,
