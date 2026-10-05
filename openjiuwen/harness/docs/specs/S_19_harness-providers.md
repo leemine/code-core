@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
 | 最近一次修订日期 | 2026-10-05 |
-| 关联 feature | `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
+| 关联 feature | `F_41_opencode-abort-event-reconciliation.md`、 `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
 
 ## 范围 / 边界
 
@@ -470,3 +470,16 @@ Native 私有 `_capture_idle_goal_control` 只接已有 Goal 的 pause/clear；�
 保存和 commit；await 后及最终 `check_result` 重验当前控制授权和原目标。pause 保持
 slot，clear 清 slot。无新 Turn/模型/attach/输出 lease；idle 仅原调用 ACK，legacy/live
 goal_updated 事件保持。调用者取消不丢原操作 Task，同对象同行为重试等待同一结果。
+
+### OpenCode requested-abort reconciliation
+
+For the current Session with `abort_requested`, a native `session.error` whose
+name is exactly `MessageAbortedError` is nonterminal. It cannot select an
+assistant or establish native idle. Only the latest current-root assistant with
+that error and `time.completed` is an aborted candidate; a newer message
+supersedes it. A subsequent native idle plus exact native GET readback of
+message ID / Session / root / role / completion / error is required before the
+existing aborted branch publishes an idle checkpoint. Missing or conflicting
+proof retains the original failure and strict resume rejection. Foreign Session
+events retain their original ignore behavior. See
+`F_41_opencode-abort-event-reconciliation.md`.

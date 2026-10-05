@@ -57,7 +57,6 @@ class Accumulator:
         self.infos, self.parts = {}, {}
         self.tool_started, self.tool_completed = set(), set()
         self.final_id = None
-        self.aborted_id = None
         self.denied_calls = set()
         self.interactions = {}
         self.seen_bytes = 0
@@ -72,7 +71,12 @@ class Accumulator:
         if kind in {"permission.asked", "question.asked"}:
             raise OpenCodeError("interaction_event_not_routed")
         if kind == "session.error":
-            raise native_error(props.get("error"), source=kind)
+            error = props.get("error")
+            if abort_requested and isinstance(error, Mapping) and error.get("name") == "MessageAbortedError":
+                # Native emits this session-level hint before the correlated
+                # assistant snapshot. It proves neither this Turn nor idle.
+                return []
+            raise native_error(error, source=kind)
         if kind == "message.updated":
             info = props["info"]
             if (
@@ -92,7 +96,6 @@ class Accumulator:
                 ):
                     self.infos[mid] = info
                     self.parts.setdefault(mid, {})
-                    self.aborted_id = mid
                     self.final_id = None
                     return []
                 raise native_error(info["error"], source=kind)
@@ -151,6 +154,22 @@ class Accumulator:
 
     def mark_denied(self, call_id):
         self.denied_calls.add(call_id)
+
+    @property
+    def aborted_id(self):
+        """Latest correlated, completed native abort; idle/readback still required."""
+        if not self.infos:
+            return None
+        mid = next(reversed(self.infos))
+        info = self.infos[mid]
+        error = info.get("error")
+        if (
+            info.get("time", {}).get("completed")
+            and isinstance(error, Mapping)
+            and error.get("name") == "MessageAbortedError"
+        ):
+            return mid
+        return None
 
     @property
     def failed_id(self):
@@ -259,9 +278,17 @@ class Accumulator:
             and props.get("status", {}).get("type") == "idle"
         )
 
-    def reconcile(self, message, *, rejected=False, failed=False):
+    def reconcile(self, message, *, rejected=False, failed=False, aborted=False):
         info = message["info"]
-        expected_id = self.failed_id if failed else self.rejected_id if rejected else self.final_id
+        expected_id = (
+            self.aborted_id
+            if aborted
+            else self.failed_id
+            if failed
+            else self.rejected_id
+            if rejected
+            else self.final_id
+        )
         expected_finish = (
             self.infos[expected_id]["finish"] if failed and expected_id else ("tool-calls" if rejected else "stop")
         )
@@ -271,12 +298,19 @@ class Accumulator:
             or info.get("parentID") != self.user_id
             or info.get("sessionID") != self.session_id
             or info.get("role") != "assistant"
-            or info.get("finish") != expected_finish
+            or (not aborted and info.get("finish") != expected_finish)
             or not info.get("time", {}).get("completed")
-            or info.get("error")
+            or (not aborted and info.get("error"))
+            or (
+                aborted
+                and (not isinstance(info.get("error"), Mapping) or info["error"].get("name") != "MessageAbortedError")
+            )
         ):
             raise OpenCodeError("terminal_reconciliation_failed")
-        result = self.consume({"type": "message.updated", "properties": {"sessionID": self.session_id, "info": info}})
+        result = self.consume(
+            {"type": "message.updated", "properties": {"sessionID": self.session_id, "info": info}},
+            abort_requested=aborted,
+        )
         for part in message["parts"]:
             result.extend(
                 self.consume(
