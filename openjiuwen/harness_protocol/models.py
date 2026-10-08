@@ -86,6 +86,7 @@ class HarnessCapability(str, Enum):
     PAUSE_RESUME = "pause_resume"
     PERSISTENT_SESSION = "persistent_session"
     CHECKPOINT = "checkpoint"
+    RUNTIME_AUTHORIZATION = "runtime_authorization"
     NATIVE_TOOLS = "native_tools"
     MCP_TOOLS = "mcp_tools"
     HOOKS = "hooks"

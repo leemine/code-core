@@ -32,6 +32,7 @@ from openjiuwen.harness_protocol import (
     DeliveryMode,
     EventBufferConfig,
     EventOverflowPolicy,
+    ExecutionAuthorization,
     HarnessCapability,
     HarnessCard,
     HarnessCheckpoint,
@@ -43,6 +44,7 @@ from openjiuwen.harness_protocol import (
     HarnessInteractionRequest,
     HarnessInteractionResponse,
     HarnessProtocolError,
+    HarnessRuntimePolicy,
     HarnessState,
     HarnessStateError,
     HostCapability,
@@ -146,6 +148,7 @@ class SerializedTurnHarness(ABC):
         self._cycle_started = False
         self._cleanup_pending = False
         self._stopping = False
+        self._authorization_unconfirmed = False
         self._command_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._pending_interactions: dict[str, _PendingInteraction] = {}
@@ -275,6 +278,7 @@ class SerializedTurnHarness(ABC):
             self._context = context
             self._event_buffer = BoundedEventBuffer(self._buffer_config.capacity)
             self._sequence = 0
+            self._authorization_unconfirmed = False
             self._pending.clear()
             self._active_turn = None
             self._supervisor_task = None
@@ -433,6 +437,8 @@ class SerializedTurnHarness(ABC):
         return PendingTurn(content=content, message_id=message_id, turn_id=turn_id, accepted_mode=accepted_mode)
 
     def _require_accepting(self) -> None:
+        if self._authorization_unconfirmed:
+            raise HarnessStateError("runtime authorization is unconfirmed")
         if not self._cycle_started or self._stopping or self._state is HarnessState.TERMINATED:
             raise HarnessStateError(f"cannot send to a stopped {self.card.name} harness")
 
@@ -457,6 +463,32 @@ class SerializedTurnHarness(ABC):
     async def resume(self, *, query: HarnessInput | None = None) -> None:
         _ = query
         raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support pause/resume")
+
+    async def update_authorization(
+        self, authorization: ExecutionAuthorization, *, runtime_policy: HarnessRuntimePolicy | None = None
+    ) -> None:
+        """Apply a trusted host decision between existing serialized Turn chains."""
+        if not self.card.supports(HarnessCapability.RUNTIME_AUTHORIZATION):
+            raise UnsupportedHarnessCapabilityError("runtime authorization is unsupported")
+        while True:
+            async with self._command_lock:
+                if not self._cycle_started or self._stopping:
+                    raise HarnessStateError("runtime authorization requires an active session")
+                self._authorization_unconfirmed = True
+                supervisor = self._supervisor_task
+                if self._active_turn is None and not self._pending:
+                    # stop() also claims this lock before closing native resources.
+                    await self._apply_authorization(authorization, runtime_policy=runtime_policy)
+                    self._authorization_unconfirmed = False
+                    return
+            if supervisor is None:
+                raise HarnessStateError("authorization boundary is unavailable")
+            await asyncio.shield(supervisor)
+
+    async def _apply_authorization(
+        self, authorization: ExecutionAuthorization, *, runtime_policy: HarnessRuntimePolicy | None = None
+    ) -> None:
+        raise UnsupportedHarnessCapabilityError("runtime authorization is unsupported")
 
     async def export_checkpoint(self) -> HarnessCheckpoint | None:
         return self._latest_checkpoint

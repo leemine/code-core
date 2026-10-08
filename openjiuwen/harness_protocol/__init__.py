@@ -101,6 +101,7 @@ from openjiuwen.harness_protocol.protocol import (
     HarnessAuthorizationProvider,
     HarnessProtocol,
     HarnessProvider,
+    HarnessRuntimeAuthorization,
 )
 from openjiuwen.harness_protocol.results import (
     ContentBlock,
@@ -141,6 +142,7 @@ __all__ = [
     "AgentExecutionSpec",
     "ExecutionAuthorization",
     "HarnessAuthorizationProvider",
+    "HarnessRuntimeAuthorization",
     "PROTOCOL_VERSION",
     "AbortMode",
     "AfterToolContext",

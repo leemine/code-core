@@ -249,3 +249,32 @@ async def connect_with_host_approvals(
     if resume_thread_id is not None and thread_id != resume_thread_id:
         raise HarnessProtocolError("Codex resumed a different thread under host approval policy")
     return thread_type(client, thread_id), str(effective.get("model") or ""), fingerprint
+
+
+async def resume_with_full_access(*, client: Any, sdk: Any, options: dict[str, Any], thread_id: str):
+    """Resume the same thread and retain raw effective permission confirmation."""
+    await client._ensure_initialized()
+    params = {
+        "threadId": thread_id,
+        "approvalPolicy": "never",
+        "sandbox": "danger-full-access",
+        "approvalsReviewer": "user",
+        "config": dict(options.get("config", {})),
+    }
+    for key, wire_key in (
+        ("cwd", "cwd"),
+        ("model", "model"),
+        ("model_provider", "modelProvider"),
+        ("developer_instructions", "developerInstructions"),
+    ):
+        if key in options:
+            params[wire_key] = options[key]
+    response = await client._client.request("thread/resume", params, response_model=RootModel[dict])
+    effective = response.model_dump(mode="json")
+    if (
+        (effective.get("thread") or {}).get("id") != thread_id
+        or effective.get("approvalPolicy") != "never"
+        or (effective.get("sandbox") or {}).get("type") != "dangerFullAccess"
+    ):
+        raise HarnessProtocolError("Codex did not confirm full access on the original thread")
+    return sdk.AsyncThread(client, thread_id), str(effective.get("model") or "")

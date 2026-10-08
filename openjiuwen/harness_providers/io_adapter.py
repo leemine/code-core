@@ -110,6 +110,7 @@ class _OutputIterator:
 class _PendingInteraction:
     request: HarnessInteractionRequest
     future: asyncio.Future[HarnessInteractionResponse]
+    automatically_resolved: bool = False
 
 
 class HarnessIOAdapter:
@@ -197,6 +198,26 @@ class HarnessIOAdapter:
     def pending_interrupt_ids(self) -> tuple[str, ...]:
         """Return the ids of interactions waiting for an ``InteractiveInput``."""
         return tuple(self._pending)
+
+    def set_tool_auto_approval(self, enabled: bool) -> None:
+        """Set host tool review policy and re-evaluate only pending tool approvals.
+
+        Native permissions are applied separately through runtime authorization;
+        this method alone is not an effective full-access acknowledgement.
+        """
+        if type(enabled) is not bool:
+            raise TypeError("tool auto approval must be boolean")
+        self._auto_approve_tools = enabled
+        if enabled:
+            for pending in tuple(self._pending.values()):
+                if isinstance(pending.request, ToolApprovalRequest) and not pending.future.done():
+                    pending.automatically_resolved = True
+                    pending.future.set_result(
+                        ToolApprovalResponse(
+                            request_id=pending.request.request_id,
+                            decision=ToolApprovalDecision.ALLOW,
+                        )
+                    )
 
     def has_pending_interrupt(self) -> bool:
         return bool(self._pending)
@@ -445,7 +466,19 @@ class HarnessIOAdapter:
             await self._output_queue.put(
                 ProjectedOutput(turn_id=request.turn_id, chunk=self._interaction_chunk(request))
             )
-            return await pending.future
+            response = await pending.future
+            if pending.automatically_resolved:
+                await self._output_queue.put(
+                    ProjectedOutput(
+                        turn_id=request.turn_id,
+                        chunk=OutputSchema(
+                            type="chat.interaction_resolved",
+                            index=self._next_output_index(),
+                            payload={"interaction_id": request.request_id, "kind": "tool_approval"},
+                        ),
+                    )
+                )
+            return response
         except OutputBudgetExceeded as exc:
             self._fail_output(exc)
             raise
