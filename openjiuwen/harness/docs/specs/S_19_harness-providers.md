@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
-| 最近一次修订日期 | 2026-10-05 |
-| 关联 feature | `F_41_opencode-abort-event-reconciliation.md`、 `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
+| 最近一次修订日期 | 2026-10-08 |
+| 关联 feature | `F_42_runtime-authorization.md`、 `F_41_opencode-abort-event-reconciliation.md`、 `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
 
 ## 范围 / 边界
 
@@ -483,3 +483,25 @@ existing aborted branch publishes an idle checkpoint. Missing or conflicting
 proof retains the original failure and strict resume rejection. Foreign Session
 events retain their original ignore behavior. See
 `F_41_opencode-abort-event-reconciliation.md`.
+
+
+### Runtime authorization control (2026-10-08)
+
+`HarnessRuntimeAuthorization.update_authorization` is an optional trusted-host
+control, gated by `RUNTIME_AUTHORIZATION`. Immutable construction and Binding
+identity stay unchanged. The existing SerializedTurnHarness command lock and
+supervisor apply a new immutable authorization/policy snapshot at an idle Turn
+chain boundary. Pending changes are not effective acknowledgements. Failure or
+cancellation blocks new input until a verified update or confirmed stop/start.
+OpenCode confirms owned service exit before changing previously applied rules,
+resumes the same native Session to clear process-local remembered grants, then
+appends and exactly reads back the native rules. Codex
+closes its owned process and resumes the same thread with verified native sandbox,
+approval and MCP configuration. No input is replayed and no event consumer grants
+permission. Host tool auto-approval is a separate control; it may re-evaluate tool
+requests only, never UserInputRequest. Plan and mandatory resource authorization
+remain narrower than full access. Real Provider verification is recorded separately.
+
+Automatically resolved pending tool approvals emit `chat.interaction_resolved`
+with the exact `interaction_id` through the existing IO output stream; this
+receipt never grants authorization and does not resolve user questions.

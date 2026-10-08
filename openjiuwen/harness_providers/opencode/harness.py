@@ -6,6 +6,7 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from openjiuwen.harness_protocol import (
@@ -37,7 +38,7 @@ from .errors import OpenCodeError
 from .mapping import Accumulator, native_id
 from .model_gateway import capture_model_source, model_source_current
 from .native_plugins import validate_native_plugin_packages
-from .options import native_config, validate_readback
+from .options import _permission_config, native_config, validate_readback
 from .preflight import OpenCodePreflightEndpoint, PreflightGate, preflight_fingerprint
 
 
@@ -50,6 +51,7 @@ class OpenCodeHarness(SerializedTurnHarness):
                 HarnessCapability.GRACEFUL_ABORT,
                 HarnessCapability.PERSISTENT_SESSION,
                 HarnessCapability.CHECKPOINT,
+                HarnessCapability.RUNTIME_AUTHORIZATION,
                 HarnessCapability.MCP_TOOLS,
             }
         ),
@@ -67,6 +69,8 @@ class OpenCodeHarness(SerializedTurnHarness):
         self._config = config or OpenCodeHarnessConfig()
         super().__init__(event_buffer_capacity=self._config.event_buffer_capacity)
         self._server = self._transport = None
+        self._authorization_restart_context = None
+        self._runtime_permissions = None
         self._poisoned = False
         self._native_plugin_fingerprint = None
         self._preflight = None
@@ -160,6 +164,9 @@ class OpenCodeHarness(SerializedTurnHarness):
 
     async def _open_session(self, context: HarnessContext) -> str:
         # Imports remain cheap and platform-independent until runtime startup.
+        if self._authorization_restart_context is None:
+            self._authorization_restart_context = context
+        self._runtime_permissions = None
         self._poisoned = False
         try:
             if sys.platform != "linux":
@@ -303,10 +310,78 @@ class OpenCodeHarness(SerializedTurnHarness):
             reason=reason,
         )
 
+    async def _apply_authorization(self, authorization, *, runtime_policy=None) -> None:
+        from openjiuwen.harness_protocol import ExecutionAuthorization
+
+        if not isinstance(authorization, ExecutionAuthorization):
+            raise TypeError("execution authorization required")
+        if self._poisoned or self._transport is None:
+            raise HarnessProtocolError("OpenCode session requires restart")
+        permissions = _permission_config(
+            replace(self._config, full_access=authorization.full_access),
+            self.context.host_capabilities,
+            runtime_policy,
+            governed=self.context.tool_authorizer is not None,
+        )
+        rules = [{"permission": key, "pattern": "*", "action": action} for key, action in permissions.items()]
+        try:
+            if (
+                self._runtime_permissions is not None
+                and self._runtime_permissions[-len(rules) :] != rules
+                and self.context.tool_authorizer is None
+            ):
+                # Native "always" grants outrank ask rules in this fixed CLI.
+                # They are process-local, so discard them by confirmed owned
+                # stop/resume, retaining native history and the storage identity.
+                checkpoint = self._latest_checkpoint
+                if checkpoint is None:
+                    raise HarnessProtocolError("OpenCode permission change requires an idle checkpoint")
+                original_id = self._session_id
+                context = replace(
+                    self._authorization_restart_context,
+                    checkpoint=checkpoint,
+                    resume_policy=ResumePolicy.REQUIRE_RESUME,
+                )
+                await self._close_session()
+                resumed_id = await self._open_session(context)
+                if resumed_id != original_id:
+                    raise HarnessProtocolError("OpenCode permission change resumed another session")
+            info = await self._transport.request("GET", f"/session/{self._session_id}")
+            previous = info.get("permission", [])
+            if (
+                info.get("id") != self._session_id
+                or not isinstance(previous, list)
+                or (self._runtime_permissions is not None and previous != self._runtime_permissions)
+            ):
+                raise HarnessProtocolError("OpenCode runtime permissions changed")
+            # Fixed 1.18.18 appends PATCH rules; its evaluator uses the last
+            # matching rule. Verify the full prefix and append, not just a suffix.
+            expected = previous if previous[-len(rules) :] == rules else previous + rules
+            if len(expected) > 4096:
+                raise HarnessProtocolError("OpenCode session permission rule budget exceeded")
+            if expected != previous:
+                await self._transport.request("PATCH", f"/session/{self._session_id}", {"permission": rules})
+            info = await self._transport.request("GET", f"/session/{self._session_id}")
+            if info.get("id") != self._session_id or info.get("permission", []) != expected:
+                raise HarnessProtocolError("OpenCode did not confirm runtime permissions")
+        except BaseException:
+            self._poisoned = True
+            raise
+        self._runtime_permissions = expected
+        self._context = replace(
+            self.context,
+            runtime_policy=runtime_policy,
+            host_capabilities=self.context.host_capabilities | {HostCapability.TOOL_APPROVAL},
+        )
+
     async def _verify(self):
         await self._server.verify_running()
         validate_readback(await self._transport.request("GET", "/config"), self._server.native_config)
         await self._server.verify_native_plugin_inventory()
+        if self._runtime_permissions is not None:
+            info = await self._transport.request("GET", f"/session/{self._session_id}")
+            if info.get("id") != self._session_id or info.get("permission") != self._runtime_permissions:
+                raise HarnessProtocolError("OpenCode runtime permissions changed")
 
     async def _close_session(self) -> None:
         self._poisoned = True

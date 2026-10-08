@@ -19,6 +19,7 @@ from openjiuwen.harness_protocol.models import (
     JsonObject,
     SendReceipt,
 )
+from openjiuwen.harness_protocol.runtime_policy import HarnessRuntimePolicy
 from openjiuwen.harness_protocol.state import HarnessState
 from openjiuwen.harness_protocol.stream import HarnessEventCursor
 
@@ -159,3 +160,24 @@ class HarnessAuthorizationProvider(Protocol):
 
 
 __all__ = ["HarnessProtocol", "HarnessProvider", "HarnessAuthorizationProvider"]
+
+
+@runtime_checkable
+class HarnessRuntimeAuthorization(Protocol):
+    """Optional trusted-host control, independent of immutable construction identity."""
+
+    async def update_authorization(
+        self,
+        authorization: ExecutionAuthorization,
+        *,
+        runtime_policy: HarnessRuntimePolicy | None = None,
+    ) -> None:
+        """Wait for a safe boundary and verify the new native permission policy.
+
+        Returning confirms application to the same native session. Failure or
+        cancellation leaves permission state unconfirmed: the host must block
+        new input until a successful update or confirmed stop. Previously
+        accepted Turns may complete under the old policy while this is pending.
+        This control never authorizes a user question or replays an input.
+        """
+        ...

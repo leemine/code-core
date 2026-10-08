@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
@@ -65,6 +65,7 @@ from openjiuwen.harness_providers.codex.runtime_policy import compile_runtime_po
 from openjiuwen.harness_providers.codex.sdk_compat import (
     connect_with_host_approvals,
     isolate_process_environment,
+    resume_with_full_access,
     validate_effective_startup_sources,
 )
 from openjiuwen.harness_providers.codex.source_policy import validate_startup_sources
@@ -149,6 +150,7 @@ class CodexHarness(SerializedTurnHarness):
                 HarnessCapability.GRACEFUL_ABORT,
                 HarnessCapability.PERSISTENT_SESSION,
                 HarnessCapability.CHECKPOINT,
+                HarnessCapability.RUNTIME_AUTHORIZATION,
                 HarnessCapability.MCP_TOOLS,
             }
         ),
@@ -411,6 +413,13 @@ class CodexHarness(SerializedTurnHarness):
                     expected_sandbox=self._expected_sandbox,
                 )
                 self._permission_fingerprint = fingerprint
+            elif resume_thread_id is not None and config.bypass_approvals_and_sandbox:
+                thread, confirmed_model = await resume_with_full_access(
+                    client=client,
+                    sdk=sdk,
+                    options=options,
+                    thread_id=resume_thread_id,
+                )
             elif resume_thread_id is not None:
                 options.pop("ephemeral", None)
                 thread = await client.thread_resume(resume_thread_id, **options)
@@ -451,6 +460,35 @@ class CodexHarness(SerializedTurnHarness):
         # object itself carries no model field, so keep the confirmed value
         # separate instead of reading it off ``self._thread``.
         self._confirmed_model = confirmed_model
+
+    async def _apply_authorization(self, authorization, *, runtime_policy=None) -> None:
+        from openjiuwen.harness_protocol import ExecutionAuthorization
+
+        if not isinstance(authorization, ExecutionAuthorization):
+            raise TypeError("execution authorization required")
+        if not self._thread_id:
+            raise HarnessProtocolError("Codex runtime authorization requires an existing thread")
+        compiled = compile_runtime_policy(
+            replace(
+                self._config,
+                bypass_approvals_and_sandbox=authorization.full_access,
+                mcp_default_tools_approval_mode="auto" if authorization.full_access else "prompt",
+            ),
+            runtime_policy,
+        )
+        capabilities = set(self.context.host_capabilities)
+        if compiled.config.bypass_approvals_and_sandbox:
+            capabilities.discard(HostCapability.TOOL_APPROVAL)
+        else:
+            capabilities.add(HostCapability.TOOL_APPROVAL)
+        context = replace(self.context, host_capabilities=frozenset(capabilities), runtime_policy=runtime_policy)
+        await self._close_session()
+        self._runtime_config = compiled.config
+        self._expected_sandbox = compiled.expected_sandbox
+        self._permission_fingerprint = None
+        self._runtime_policy_fingerprint = runtime_policy.fingerprint if runtime_policy else None
+        self._context = context
+        await self._connect(context, model=self._active_model, resume_thread_id=self._thread_id)
 
     async def _close_session(self) -> None:
         async with self._session_close_lock:

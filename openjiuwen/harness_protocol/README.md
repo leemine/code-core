@@ -290,3 +290,25 @@ separate from these Provider boundary probes.
 `NativeHarnessProtocolAdapter` (`native_v2`) uses its own startup assembly and does not install
 DeepAgentHarness's final authority rail. It explicitly rejects a non-null `tool_authorizer`
 before allocation until that independent path is wired and verified; callers omitting it remain compatible.
+
+
+### Runtime authorization control (2026-10-08)
+
+`HarnessRuntimeAuthorization.update_authorization` is an optional trusted-host
+control, gated by `RUNTIME_AUTHORIZATION`. Immutable construction and Binding
+identity stay unchanged. The existing SerializedTurnHarness command lock and
+supervisor apply a new immutable authorization/policy snapshot at an idle Turn
+chain boundary. Pending changes are not effective acknowledgements. Failure or
+cancellation blocks new input until a verified update or confirmed stop/start.
+OpenCode confirms owned service exit before changing previously applied rules,
+resumes the same native Session to clear process-local remembered grants, then
+appends and exactly reads back the native rules. Codex
+closes its owned process and resumes the same thread with verified native sandbox,
+approval and MCP configuration. No input is replayed and no event consumer grants
+permission. Host tool auto-approval is a separate control; it may re-evaluate tool
+requests only, never UserInputRequest. Plan and mandatory resource authorization
+remain narrower than full access. Real Provider verification is recorded separately.
+
+Automatically resolved pending tool approvals emit `chat.interaction_resolved`
+with the exact `interaction_id` through the existing IO output stream; this
+receipt never grants authorization and does not resolve user questions.
