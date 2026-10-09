@@ -37,14 +37,18 @@ jobs:
           HOME: ${{ runner.temp }}/personal-context-home
           XDG_CACHE_HOME: ${{ runner.temp }}/personal-context-cache
           TMPDIR: ${{ runner.temp }}/personal-context-tmp
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           mkdir -p "$HOME" "$XDG_CACHE_HOME" "$TMPDIR"
-          .venv/bin/python -m pytest --override-ini addopts='' --timeout=45 -q \
-            tests/unit_tests/harness/personal_context/test_host_execution_authority.py \
-            tests/unit_tests/harness/personal_context/test_closed_class_inventory.py \
-            tests/unit_tests/harness/personal_context/test_balanced_two_stage.py \
-            tests/unit_tests/core/context_engine/test_round_level_compressor.py \
-            tests/unit_tests/core/foundation/llm/test_model_request_authority.py
+          # The preceding sudo/bubblewrap run can own repository-relative logs.
+          # Keep this non-root step's logs and temporary files in its own cwd.
+          cd "$TMPDIR"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest --override-ini addopts='' --timeout=45 -q \
+            "$GITHUB_WORKSPACE/tests/unit_tests/harness/personal_context/test_host_execution_authority.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/harness/personal_context/test_closed_class_inventory.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/harness/personal_context/test_balanced_two_stage.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/core/context_engine/test_round_level_compressor.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/core/foundation/llm/test_model_request_authority.py"
       - name: Upload test archive
         if: always()
         uses: actions/upload-artifact@v7.0.1
