@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.resources import (
@@ -25,7 +26,9 @@ from openjiuwen.harness.resources import (
     load_plugin_package,
     resolve_plugin_parts,
 )
+from openjiuwen.harness.resources.extension_loader import _normalize_prompt_section
 from openjiuwen.harness.schema.build_context import BuildContext
+from openjiuwen.harness.schema.extension_spec import PromptSectionSpec
 from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
     validate_action_policy,
 )
@@ -261,18 +264,14 @@ def _check_prompt_sections_manifest(role: str, integration_path: Path) -> list[V
                 if not isinstance(section, dict):
                     raise TypeError(f"section[{index}] must be a mapping")
                 name = str(section.get("name", "") or f"section[{index}]")
-                file_ref = section.get("file") or section.get("path")
-                if not file_ref:
-                    checks.append(
-                        VerificationCheck(
-                            name=f"prompt_section_ref:{role}:{name}",
-                            status="passed",
-                        )
-                    )
-                    continue
-                resolved = _resolve_prompt_section_file(integration_path, str(file_ref))
-                if not resolved.is_file():
-                    raise FileNotFoundError(resolved)
+                file_ref = section.get("file")
+                if file_ref is not None:
+                    resolved = _resolve_prompt_section_file(integration_path, str(file_ref))
+                    if not resolved.is_file():
+                        raise FileNotFoundError(resolved)
+                # Use the runtime loader's normalization and strict schema;
+                # checking only file existence lets malformed entries merge.
+                PromptSectionSpec.model_validate(_normalize_prompt_section(section, integration_path))
                 checks.append(
                     VerificationCheck(
                         name=f"prompt_section_ref:{role}:{name}",
@@ -974,6 +973,8 @@ def _repair_failed_file_context(root: Path, failed_checks: list[dict[str, Any]])
 
 
 def _failed_check_relative_path(check_name: str) -> str:
+    if check_name.startswith("prompt_section_ref:"):
+        return "prompt_sections/sections.yaml"
     for prefix in ("python_compile:", "yaml_parse:", "json_parse:"):
         if check_name.startswith(prefix):
             value = check_name.removeprefix(prefix)
@@ -1036,20 +1037,27 @@ class HarnessRepairAgent:
             workspace=role_integration_worktree,
             agent_skills_dirs=self._agent_skills_dirs,
         )
-        session = Session(
-            session_id=f"member_verifier_repair_{role}",
-            card=getattr(agent, "card", None) or AgentCard(name="member_verifier_repair"),
-        )
-        response = await agent.invoke(
-            inputs={
-                "query": self._build_repair_user_message(
-                    role=role,
-                    role_integration_worktree=role_integration_worktree,
-                    failed_checks=repairable_checks,
-                )
-            },
-            session=session,
-        )
+        operation = getattr(getattr(agent, "deep_config", None), "sys_operation", None)
+        try:
+            session = Session(
+                session_id=f"member_verifier_repair_{role}",
+                card=getattr(agent, "card", None) or AgentCard(name="member_verifier_repair"),
+            )
+            response = await agent.invoke(
+                inputs={
+                    "query": self._build_repair_user_message(
+                        role=role,
+                        role_integration_worktree=role_integration_worktree,
+                        failed_checks=repairable_checks,
+                    )
+                },
+                session=session,
+            )
+        finally:
+            # The factory creates a fresh role-local operation for this one
+            # repair. Release it on success, failure and cancellation alike.
+            if operation is not None:
+                Runner.resource_mgr.remove_sys_operation(operation.id)
         repair = RepairItem(
             role=role,
             action="deepagent_repair",
