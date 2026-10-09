@@ -58,7 +58,10 @@ def test_source_metadata_module_adds_no_production_class() -> None:
 def test_embedded_core_public_surface_and_personal_context_signatures_match_contract() -> None:
     assert personal_context.__all__ == ["PersonalContext"]
     assert not inspect.iscoroutinefunction(PersonalContext.__init__)
-    assert str(inspect.signature(PersonalContext)) == "(*, home: 'str | Path') -> 'None'"
+    assert str(inspect.signature(PersonalContext)) == (
+        "(*, home: 'str | Path', model_request_authority=None, "
+        "fetch_environment=None, execution_check=None) -> 'None'"
+    )
     public_methods = {
         name: method
         for name, method in inspect.getmembers(PersonalContext, inspect.isfunction)
