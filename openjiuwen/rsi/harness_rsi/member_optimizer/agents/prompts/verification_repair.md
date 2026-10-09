@@ -32,6 +32,16 @@ You may repair only these local package surfaces when needed:
 
 The verifier may report these repairable failures:
 
+- `prompt_section_ref:*`
+  - Repair `prompt_sections/sections.yaml` and only the referenced local files.
+  - Each file entry requires `name` and `file`; optional fields are `priority`
+    and `render_params`. Example: `{"name": "readback", "file": "prompt_sections/files/readback.md", "priority": 30}`.
+  - Paths are relative to the package root, or filenames under
+    `prompt_sections/files`; do not prefix a filename with `files/`.
+  - `id`, `type`, `path`, `phase`, `activation_phase`, and `scope` are not
+    fields of this manifest. Preserve the intended section and other valid
+    entries; do not remove unrelated sections just to pass validation.
+
 - `integration_dir:*`
   - Missing required package directory or file in the integration package.
   - Fix by restoring the required local package file or correcting a broken path reference.

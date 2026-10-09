@@ -140,7 +140,10 @@ def create_member_optimizer_agent(
         max_iterations=profile.max_iterations,
         language="en",
         restrict_to_work_dir=True,
-        auto_create_workspace=True,
+        # A repair operates on an existing role package. Bootstrapping a
+        # general agent workspace would add unrelated memory/identity files
+        # to the candidate being verified.
+        auto_create_workspace=profile.key != VERIFICATION_REPAIR.key,
     )
 
 
@@ -231,13 +234,26 @@ def create_verification_repair_agent(
     extra_rails: list[Any] | None = None,
 ) -> Any:
     """Create the verification repair Member Optimizer Agent."""
-    return create_member_optimizer_agent(
-        profile=VERIFICATION_REPAIR,
-        model_config_ref=model_config_ref,
+    # Repair edits the integration worktree in place; unlike action execution,
+    # it has no structured-file writer after invoke. Give it only the existing
+    # filesystem tools, confined to this role's integration directory.
+    tools, sys_operation = _build_file_tools_for_workspace(
         workspace=workspace,
-        agent_skills_dirs=agent_skills_dirs,
-        extra_rails=extra_rails,
+        agent_name=VERIFICATION_REPAIR.agent_name,
     )
+    try:
+        return create_member_optimizer_agent(
+            profile=VERIFICATION_REPAIR,
+            model_config_ref=model_config_ref,
+            workspace=workspace,
+            agent_skills_dirs=agent_skills_dirs,
+            extra_rails=extra_rails,
+            tools=tools,
+            sys_operation=sys_operation,
+        )
+    except Exception:
+        Runner.resource_mgr.remove_sys_operation(sys_operation.id)
+        raise
 
 
 def _expand_env_vars(value: Any) -> Any:

@@ -46,6 +46,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
     MemberOptimizationPlan,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
+    _check_prompt_sections_manifest,
     _validate_package_python_source,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.worktree_coordinator import (
@@ -1740,6 +1741,14 @@ def _validate_generated_action_resources(
 ) -> list[str]:
     """Run cheap action-local checks before merging generated resources."""
     errors: list[str] = []
+    if action.action_group == "prompt" and any(
+        _normalize_rel_path(path).startswith("prompt_sections/") for path in changed_files
+    ):
+        return [
+            f"{check.name}: {check.error}"
+            for check in _check_prompt_sections_manifest(action.role, worktree_dir)
+            if check.status == "failed"
+        ]
     if action.action_group == "skill":
         for rel_path in changed_files:
             normalized = _normalize_rel_path(rel_path)

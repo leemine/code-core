@@ -59,6 +59,14 @@ loading before applying the candidate.
   and then parenthesize the expression being checked.
 - `prompt_sections/files/*.md` should state the requested runtime instruction
   once, with no duplicated wrapper text.
+- A sidecar `prompt_sections/sections.yaml` uses `sections` entries with
+  `name`, `file`, and optional `priority` / `render_params`. For example:
+  `{"sections": [{"name": "readback", "file": "prompt_sections/files/readback.md", "priority": 30}]}`.
+  Use the package-root-relative file path shown above, never `files/readback.md`.
+  Do not use `id`, `type`, `path`, `phase`, `activation_phase`, or `scope` in an entry.
+  For prompt/add, the executor registers the new Markdown file; return its
+  content without rewriting the manifest unless that edit is explicitly needed.
+  For prompt/modify, preserve existing valid registration and unrelated entries.
 - `tools/*.py` must contain a loadable
   `openjiuwen.core.foundation.tool.Tool` subclass with a valid `ToolCard`. A
   generated Tool must perform the evidence-backed deterministic operation and
