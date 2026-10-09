@@ -5,14 +5,14 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/personal_context/`（17 文件） |
-| 最近一次修订日期 | 2026-08-23 |
+| 关联模块 | `openjiuwen/harness/personal_context/` |
+| 最近一次修订日期 | 2026-10-09 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
 
 本规约定义 harness 的 PersonalContext 子系统：设备授权、上下文图、获取服务、
-运行时激活。`personal_context/` 17 文件是嵌入式的个人上下文核心（从
+运行时激活。`personal_context/` 是嵌入式的个人上下文核心（从
 `openjiuwen/core` 相关能力独立而来），DeepAgent 经 rail / prompt 消费。
 
 具体覆盖：
@@ -43,7 +43,7 @@
 1. **公开面唯一**:`personal_context/__init__.py` 只导出 `PersonalContext`；一切
    配置 / 状态 / 图访问都经这个门面。
 2. **配置唯一入口**:`set_configuration(config: PersonalContextConfig)` 幂等设置；
-   `PersonalContextConfig` 字段：`enabled` / `fetching_enabled` / `strategy_profile`
+   `PersonalContextConfig` 字段：`collection_enabled` / `agent_use_enabled` / `strategy_profile`
    （`"rules" | "balanced" | "agent"`）/ `model_client` / `model_request` /
    `fetch_services: tuple[PersonalContextFetchServiceConfig, ...]`。
 3. **获取服务声明**:`PersonalContextFetchServiceConfig`：`service_id` / `provider`
@@ -89,8 +89,8 @@ class PersonalContext:
     async def deactivate_runtime(self, *, timeout_seconds: float = 30.0) -> None
 
 class PersonalContextConfig(BaseModel):
-    enabled: bool
-    fetching_enabled: bool
+    collection_enabled: bool = False
+    agent_use_enabled: bool = False
     strategy_profile: Literal["rules", "balanced", "agent"]
     model_client: ModelClientConfig | None = Field(default=None, repr=False)
     model_request: ModelRequestConfig | None = None
@@ -128,3 +128,13 @@ RawChangeItem/FetchBatch → pipeline → context graph → search_graph/get_gra
   `rails/personal_context.py`）。
 - 状态 / 错误码与 `StatusC 语义` 同族（`StatusCode` 体系归 core exception 规约）。
 - 与 `agent_teams` / `dev_tools` 的个人上下文实现是不同宿主面，各自独立。
+
+## 宿主执行授权与来源隔离（2026-10-09）
+
+`PersonalContext(home=..., model_request_authority=None, fetch_environment=None, execution_check=None)` 接收仅内存的宿主装配参数；不写入配置文件，不引入账户或 IAM。缺省保持单实例旧行为。宿主负责主体、资源范围、模型选择及活动撤权停止。
+
+模型授权复用 Core `Model` 的 `request_authority`：Agent、重试、balanced 摘要和原 RoundLevel 压缩模型全部接收同一宿主授权对象，每次实际 HTTP 请求及重试由原消费者重验。授权拒绝不降级为 rules 成功。模型配置中不需要保留真实密钥。
+
+`fetch_environment` 由可信宿主提供，复制后仅在该实例飞书 CLI 子进程调用中使用；不改全局 `os.environ`，不改变另一实例的授权状态与后台任务。隔离 HOME/XDG 及来源路径范围由宿主明确提供，Core 不从远程入参推断可信身份。
+
+`execution_check` 是宿主提供的同步存活检查，在原采集准备、批次接收、游标提交和最终 Context 发布前重验；拒绝即沿原失败/清理路径退出。最终发布的重验在原提交线程内执行。宿主仍负责活动撤权调用原停止接口；该检查不是第二套生命周期。私有飞书 CLI 取消/超时会等待本次子进程退出，最多 5 秒，超时不声称清理成功。
