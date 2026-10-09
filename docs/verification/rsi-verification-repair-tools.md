@@ -96,3 +96,10 @@ ASYNC240 and one ASYNC230); the two verification diagnostics and pylint legacy
 diagnostics described above remain. No suppression or gate relaxation was added.
 Earlier test-proxy quotas were superseded by user authorization; they do not
 enter product code.
+
+PR CI run 37900528991 passed the stable step but failed RSI test collection:
+the clean CLI/test environment lacked the existing optional OpenTelemetry
+exporter dependency imported by RSI. CI now installs the existing locked
+observability extra and runs the iterative/checkpoint/plugin tests as well.
+No test is skipped and no dependency version or timeout is relaxed. The failed
+run remains evidence; the corrected clean run must pass before merge.
