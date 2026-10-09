@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`、最终强制授权） |
-| 最近一次修订日期 | 2026-10-05 |
+| 最近一次修订日期 | 2026-10-09 |
 | 关联 feature | `F_40_goal-tool-consumer-authority.md`、`F_04_tool-result-llm-rendering.md`、`F_05_provider-neutral-subagent-execution.md` |
 
 ## 范围 / 边界
@@ -72,6 +72,12 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块，但每类�
    - worktree：`WorktreeManager` / `WorktreeConfig` / `WorktreeLifecyclePolicy` +
      `EnterWorktreeTool` / `ExitWorktreeTool`（`tools/worktree/`）。
    - shell：`BashTool` / `PowerShellTool` / `CodeTool`（`tools/shell/` + `code.py`）。
+     `BashTool` 构造可注入同步 `environment_provider`，普通、流式、后台执行在实际启动前
+     取得新的字符串映射副本并传给原 Shell 的 `environment` 参数。不注入时保持原调用；
+     回调失败或无效映射返回不含回调异常详情的失败结果，不启动 Shell。环境不进入模型
+     schema、全局 `os.environ` 或工具持久配置；Core 不解释身份/组织/资源授权。
+     Shell 的底层语义仍是合并父环境与显式变量，宿主不得先把私有凭据放入父环境；
+     活动执行取消和撤权由原宿主生命周期负责，该回调只决定本次启动参数。
    - cron：`create_cron_tools()` + `CronToolContext` / `CronToolBackend`(Protocol)。
    - memory：`MemorySearchTool` / `MemoryGetTool` / `ReadMemoryTool` / `WriteMemoryTool` /
      `EditMemoryTool` + `CompressionRecallTool` + `CodingMemory{Read,Write,Edit}Tool`。

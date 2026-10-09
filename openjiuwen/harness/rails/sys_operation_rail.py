@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from collections.abc import Mapping
+from typing import Any, Callable, Optional
 
-from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails._multimodal import (
     build_read_image_multimodal_resolver,
 )
+from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import BashTool, PowerShellTool
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.filesystem import (
@@ -41,6 +42,7 @@ class SysOperationRail(DeepAgentRail):
         read_only: bool = False,
         enable_read_image_multimodal: Optional[bool] = None,
         bash_deny_patterns: list[str] | None = None,
+        bash_environment_provider: Callable[[], Mapping[str, str]] | None = None,
     ) -> None:
         super().__init__()
         self.tools: list[Any] | None = None
@@ -48,6 +50,7 @@ class SysOperationRail(DeepAgentRail):
         self._read_only = read_only
         self._enable_read_image_multimodal = enable_read_image_multimodal
         self._bash_deny_patterns = list(bash_deny_patterns or [])
+        self._bash_environment_provider = bash_environment_provider
 
     def init(self, agent) -> None:
         lang = agent.system_prompt_builder.language
@@ -72,6 +75,7 @@ class SysOperationRail(DeepAgentRail):
             lang,
             agent_id=agent_id,
             deny_patterns=self._bash_deny_patterns,
+            environment_provider=self._bash_environment_provider,
         )
         powershell_tool = PowerShellTool(self.sys_operation, lang, agent_id=agent_id) if os.name == "nt" else None
 

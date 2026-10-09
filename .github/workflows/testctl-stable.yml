@@ -66,6 +66,19 @@ jobs:
             "$GITHUB_WORKSPACE/tests/unit_tests/rsi/test_single_harness_iterative.py" \
             "$GITHUB_WORKSPACE/tests/unit_tests/rsi/test_checkpoint_plugin_manifest.py" \
             "$GITHUB_WORKSPACE/tests/unit_tests/rsi/test_plugin_manifest.py"
+      - name: Verify host Shell environments
+        env:
+          HOME: ${{ runner.temp }}/shell-environment-home
+          TMPDIR: ${{ runner.temp }}/shell-environment-tmp
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          mkdir -p "$HOME" "$TMPDIR"
+          cd "$TMPDIR"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest --override-ini addopts='' --timeout=30 -q \
+            "$GITHUB_WORKSPACE/tests/unit_tests/harness/tools/test_bash" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/harness/tools/test_shell_tools.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/harness/rails/test_shell_environment.py" \
+            "$GITHUB_WORKSPACE/tests/unit_tests/harness/test_builtin_subagent_sys_operation.py"
       - name: Upload test archive
         if: always()
         uses: actions/upload-artifact@v7.0.1

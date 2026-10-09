@@ -6,10 +6,13 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/`（61 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-09-26 |
+| 最近一次修订日期 | 2026-10-09 |
 | 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_10_provider-neutral-goal-driver.md` |
 
 ## 范围 / 边界
+
+`SysOperationRail` 可接收宿主 `bash_environment_provider` 回调并原样传给 BashTool，
+不在 rail 初始化时解析凭据，不新增生命周期事件；环境解析与失败处理遵循 S_05。
 
 本规约定义 `DeepAgent` 的 rail（行为约束层）的**跨子模块契约**：三层基类、
 事件命名空间路由、priority 梯队、挂载生命周期、两套平行拦截体系、rail 的编写清单。

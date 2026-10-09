@@ -6,10 +6,12 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import (
     Any,
     AsyncIterator,
+    Callable,
     Dict,
     Optional,
 )
@@ -17,30 +19,30 @@ from typing import (
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import sys_operation_logger
 from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.session import get_current_session
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.filesystem import (
+    _detect_and_record_deletions,
+    _parse_rm_targets,
+    _record_rm_targets_before_deletion,
+)
 from openjiuwen.harness.tools.shell.bash._output import (
     CommandOutput,
     render_partial_on_failure,
     render_tool_content,
 )
 from openjiuwen.harness.tools.shell.bash._permission import (
-    check_permission,
     PermissionConfig,
     PermissionMode,
+    check_permission,
 )
 from openjiuwen.harness.tools.shell.bash._security import (
     check_injection,
     get_destructive_warning,
 )
 from openjiuwen.harness.tools.shell.bash._semantics import interpret_exit_code
-from openjiuwen.core.session import get_current_session
-from openjiuwen.harness.tools.filesystem import (
-    _detect_and_record_deletions,
-    _parse_rm_targets,
-    _record_rm_targets_before_deletion,
-)
 
 # Matches sudo not already followed by -n / -En / --non-interactive
 _SUDO_NEEDS_N_RE = re.compile(
@@ -82,10 +84,14 @@ class BashTool(Tool):
             deny_patterns: list[str] | None = None,
             allow_patterns: list[str] | None = None,
             agent_id: Optional[str] = None,
+            environment_provider: Callable[[], Mapping[str, str]] | None = None,
             **_kwargs: Any,
     ) -> None:
         super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self._operation = operation
+        if environment_provider is not None and not callable(environment_provider):
+            raise TypeError("environment_provider must be callable")
+        self._environment_provider = environment_provider
         self._permission = PermissionConfig(
             mode=PermissionMode(permission_mode),
             deny_patterns=PermissionConfig.compile_patterns(deny_patterns),
@@ -93,6 +99,29 @@ class BashTool(Tool):
         )
 
     # ── input parsing ─────────────────────────────────────────
+
+    def _environment_kwargs(self) -> dict[str, Any] | None:
+        """Resolve a fresh child environment; never expose provider errors."""
+        if self._environment_provider is None:
+            return {}
+        try:
+            supplied = self._environment_provider()
+            if not isinstance(supplied, Mapping):
+                return None
+            environment = dict(supplied)
+            if any(
+                not isinstance(key, str)
+                or not key
+                or "=" in key
+                or "\0" in key
+                or not isinstance(value, str)
+                or "\0" in value
+                for key, value in environment.items()
+            ):
+                return None
+            return {"environment": environment}
+        except Exception:  # Callback errors can contain credential values.
+            return None
 
     @staticmethod
     def _resolve_timeout(raw_value: Any, default: int = 300) -> int:
@@ -186,8 +215,12 @@ class BashTool(Tool):
 
         # ── background execution ──────────────────────────────
         if p.run_in_background:
+            environment = self._environment_kwargs()
+            if environment is None:
+                return ToolOutput(success=False, error="Shell environment unavailable.")
             res = await self._operation.shell().execute_cmd_background(
                 p.command, cwd=resolved_cwd, shell_type=p.shell_type,
+                **environment,
             )
             if res.code != StatusCode.SUCCESS.code:
                 return ToolOutput(success=False, error=res.message)
@@ -203,8 +236,12 @@ class BashTool(Tool):
                 await _record_rm_targets_before_deletion(_history_path, rm_targets, self._operation)
 
         # ── normal execution ──────────────────────────────────
+        environment = self._environment_kwargs()
+        if environment is None:
+            return ToolOutput(success=False, error="Shell environment unavailable.")
         res = await self._operation.shell().execute_cmd(
             p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
+            **environment,
         )
         if res.code != StatusCode.SUCCESS.code:
             # A post-launch failure (e.g. timeout) still carries output collected
@@ -298,8 +335,13 @@ class BashTool(Tool):
         accumulated_stderr = ""
         final_exit_code: int = -1
 
+        environment = self._environment_kwargs()
+        if environment is None:
+            yield ToolOutput(success=False, error="Shell environment unavailable.")
+            return
         async for chunk in self._operation.shell().execute_cmd_stream(
                 p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
+                **environment,
         ):
             if chunk.code != StatusCode.SUCCESS.code:
                 yield ToolOutput(success=False, error=chunk.message)
