@@ -694,6 +694,7 @@ def _make_sys_operation(sandbox: Path) -> SysOperation:
 def _make_context_processor_rail(
     model_client: ModelClientConfig,
     model_request: ModelRequestConfig,
+    model_request_authority=None,
 ) -> ContextProcessorRail:
     # ContextProcessorRail's forked preset may replace the shared official key.
     # Keep a stable PersonalContext-only alias to the existing core class without mutating
@@ -715,6 +716,7 @@ def _make_context_processor_rail(
         compression_call_max_tokens=4_096,
         model=model_request,
         model_client=model_client,
+        request_authority=model_request_authority,
     )
     return ContextProcessorRail(
         processors=(_PERSONAL_CONTEXT_ROUND_LEVEL_PROCESSOR_KEY, config),
@@ -1172,6 +1174,7 @@ async def run_personal_context_agent(
     max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
     recluster_plan: _ReclusterPlan | None = None,
     recluster_apply: _ReclusterApply | None = None,
+    model_request_authority=None,
 ) -> str:
     """Run a real DeepAgent with one in-place repair and one clean redo."""
 
@@ -1193,8 +1196,16 @@ async def run_personal_context_agent(
     callbacks: list[tuple[AgentCallbackEvent, object]] = []
     callback_state: dict[str, Any] | None = None
     try:
-        model = Model(model_client_config=model_client, model_config=model_request)
-        context_processor_rail = _make_context_processor_rail(model_client, model_request)
+        model = Model(
+            model_client_config=model_client,
+            model_config=model_request,
+            **({"request_authority": model_request_authority} if model_request_authority is not None else {}),
+        )
+        context_processor_rail = (
+            _make_context_processor_rail(model_client, model_request)
+            if model_request_authority is None
+            else _make_context_processor_rail(model_client, model_request, model_request_authority)
+        )
         agent, rails = _make_agent(
             model,
             sandbox,
@@ -1284,8 +1295,16 @@ async def run_personal_context_agent(
             raise _agent_error("agent sandbox restore failed", fallback_allowed=False) from exc
         messages[:] = original_messages
 
-        model = Model(model_client_config=model_client, model_config=model_request)
-        context_processor_rail = _make_context_processor_rail(model_client, model_request)
+        model = Model(
+            model_client_config=model_client,
+            model_config=model_request,
+            **({"request_authority": model_request_authority} if model_request_authority is not None else {}),
+        )
+        context_processor_rail = (
+            _make_context_processor_rail(model_client, model_request)
+            if model_request_authority is None
+            else _make_context_processor_rail(model_client, model_request, model_request_authority)
+        )
         agent, rails = _make_agent(
             model,
             sandbox,

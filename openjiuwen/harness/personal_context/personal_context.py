@@ -9,7 +9,6 @@ database, transport, child process, or additional runtime class here.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import functools
 import hashlib
@@ -19,6 +18,7 @@ import re
 import stat
 import tempfile
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -311,6 +311,20 @@ def _authorization_result(
     }
 
 
+def _with_fetch_environment(method):
+    @functools.wraps(method)
+    async def scoped(self, *args, **kwargs):
+        from .fetch.feishu import _cli_environment
+
+        token = _cli_environment.set(self._fetch_environment)
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            _cli_environment.reset(token)
+
+    return scoped
+
+
 class PersonalContext:
     """Core aggregate for the embedded personal-context runtime."""
 
@@ -325,7 +339,12 @@ class PersonalContext:
 
         return getattr(StatusCode, name, StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID)
 
-    def __init__(self, *, home: str | Path) -> None:
+    def __init__(
+        self, *, home: str | Path, model_request_authority=None, fetch_environment=None, execution_check=None
+    ) -> None:
+        self._execution_check = execution_check
+        self._model_request_authority = model_request_authority
+        self._fetch_environment = dict(fetch_environment) if fetch_environment is not None else None
         self._home = Path(home).expanduser().resolve()
         self._state = "CREATED"
         self._state_lock = asyncio.Lock()
@@ -485,6 +504,7 @@ class PersonalContext:
             if config.agent_use_enabled:
                 self._config = config.model_copy(update={"agent_use_enabled": False})
 
+    @_with_fetch_environment
     async def get_authorization_status(self, provider: str) -> dict[str, object]:
         """Read shared provider authorization state without starting authorization."""
 
@@ -528,6 +548,7 @@ class PersonalContext:
                     error=authorization_error,
                 )
 
+    @_with_fetch_environment
     async def authorize_provider(
         self,
         provider: str,
@@ -611,6 +632,7 @@ class PersonalContext:
                     error=None,
                 )
 
+    @_with_fetch_environment
     async def _finish_authorization(self, device_code: str, *, timeout_seconds: float) -> None:
         current_task = asyncio.current_task()
         update_error = False
@@ -733,6 +755,12 @@ class PersonalContext:
                 config=config,
                 input_queue=self._pipeline_queue,
                 embedding_config=self._embedding_config,
+                **(
+                    {"model_request_authority": self._model_request_authority}
+                    if self._model_request_authority is not None
+                    else {}
+                ),
+                **({"execution_check": self._execution_check} if self._execution_check is not None else {}),
                 progress_callback=report_pipeline_phase,
                 profile_callback=report_pipeline_profile,
             )
@@ -1798,6 +1826,7 @@ class PersonalContext:
         finally:
             self._fetch_run_identity.pop(service_id, None)
 
+    @_with_fetch_environment
     async def _execute_fetch_once(
         self,
         service_id: str,
@@ -1822,6 +1851,8 @@ class PersonalContext:
         self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="running")
 
         def ensure_run_active() -> None:
+            if self._execution_check is not None:
+                self._execution_check()
             if (service_id, run_id) in self._invalidated_fetch_runs:
                 raise asyncio.CancelledError
 
@@ -1867,6 +1898,7 @@ class PersonalContext:
             return cancellation_seen
 
         try:
+            ensure_run_active()
             prepared = await provider.prepare_run(
                 run_id=run_id,
                 run_started_at=run_started_at,

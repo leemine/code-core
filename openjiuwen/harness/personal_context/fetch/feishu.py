@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 from collections.abc import AsyncIterator, Mapping
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -43,6 +44,7 @@ from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 _LOGGER = logging.getLogger(__name__)
+_cli_environment: ContextVar[dict[str, str] | None] = ContextVar("personal_context_cli_environment", default=None)
 
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 100
@@ -348,6 +350,8 @@ async def _run_lark_cli_once(
 ) -> tuple[str, str]:
     binary = shutil.which("lark-cli")
     if binary is None:
+        if _cli_environment.get() is not None:
+            raise FileNotFoundError("lark-cli must be installed by the deployment owner")
         await _ensure_lark_cli_installed()
         binary = shutil.which("lark-cli")
         if binary is None:
@@ -356,6 +360,9 @@ async def _run_lark_cli_once(
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
     }
+    environment = _cli_environment.get()
+    if environment is not None:
+        kwargs["env"] = dict(environment)
     if cwd is not None:
         kwargs["cwd"] = str(cwd)
     if sys.platform == "win32":
@@ -368,11 +375,15 @@ async def _run_lark_cli_once(
         if process is not None:
             with contextlib.suppress(Exception):
                 process.kill()
+            if environment is not None:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
         raise
     except asyncio.TimeoutError as exc:
         if process is not None:
             with contextlib.suppress(Exception):
                 process.kill()
+            if environment is not None:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
         raise TimeoutError("lark-cli command timed out") from exc
     stdout_text = bytes(stdout or b"").decode("utf-8", errors="replace")
     stderr_text = bytes(stderr or b"").decode("utf-8", errors="replace")

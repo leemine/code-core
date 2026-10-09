@@ -7563,9 +7563,13 @@ class ContextPipelineService:
         config: PersonalContextConfig,
         input_queue: asyncio.Queue[object],
         embedding_config: EmbeddingConfig | None = None,
+        model_request_authority=None,
+        execution_check=None,
         progress_callback: Callable[[str, str, str, int], None] | None = None,
         profile_callback: Callable[[str, str, str], None] | None = None,
     ) -> None:
+        self._execution_check = execution_check
+        self._model_request_authority = model_request_authority
         self._home = home.expanduser().resolve()
         self._config = config
         self._input_queue = input_queue
@@ -9037,6 +9041,11 @@ class ContextPipelineService:
                     output = await run_personal_context_agent(
                         model_client=self._config.model_client,
                         model_request=self._config.model_request,
+                        **(
+                            {"model_request_authority": self._model_request_authority}
+                            if self._model_request_authority is not None
+                            else {}
+                        ),
                         sandbox_path=sandbox,
                         messages=[message],
                         validate_result=lambda text, candidate_path: _validate_filesystem_agent_result(
@@ -9186,7 +9195,15 @@ class ContextPipelineService:
         """Summarize run inputs, let Rules own structure, then describe the final tree."""
         if self._config.model_client is None or self._config.model_request is None:
             raise build_error(StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID, error_msg="model configuration is missing")
-        model = Model(model_client_config=self._config.model_client, model_config=self._config.model_request)
+        model = Model(
+            model_client_config=self._config.model_client,
+            model_config=self._config.model_request,
+            **(
+                {"request_authority": self._model_request_authority}
+                if self._model_request_authority is not None
+                else {}
+            ),
+        )
         context_root = sandbox / "context"
         documents = _processed_documents(processed)
         changed_ids = processed.get("changed_source_ids")
@@ -9260,7 +9277,9 @@ class ContextPipelineService:
                         _model_result_text(result),
                         allowed_indices=set(range(start, start + len(items))),
                     )
-                except Exception:
+                except Exception as error:
+                    if getattr(error, "status", None) == StatusCode.MODEL_REQUEST_AUTHORIZATION_INVALID:
+                        raise
                     accepted = {}
                 return start, items, accepted
 
@@ -9332,7 +9351,9 @@ class ContextPipelineService:
                     directory_id=directory_id,
                 )
                 return {directory_id: single} if single is not None else {}
-            except Exception:
+            except Exception as error:
+                if getattr(error, "status", None) == StatusCode.MODEL_REQUEST_AUTHORIZATION_INVALID:
+                    raise
                 return {}
 
         depths = sorted(
@@ -9578,7 +9599,16 @@ class ContextPipelineService:
             actual_profile = processed.get("actual_profile")
             if self._profile_callback is not None and isinstance(actual_profile, str):
                 self._profile_callback(service_id, run_id, actual_profile)
-            await _cancel_safe_to_thread(_commit_context_tree, candidate_context, self._context_root)
+
+            def commit_authorized_tree():
+                if self._execution_check is not None:
+                    self._execution_check()
+                _commit_context_tree(candidate_context, self._context_root)
+
+            if self._execution_check is None:
+                await _cancel_safe_to_thread(_commit_context_tree, candidate_context, self._context_root)
+            else:
+                await _cancel_safe_to_thread(commit_authorized_tree)
 
     def _fail_active(self, error: BaseError) -> None:
         if self._active_completion is not None and not self._active_completion.done():
@@ -9651,6 +9681,7 @@ def _profile_fallback_allowed(error: BaseException) -> bool:
         StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR,
         StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR,
         StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT,
+        StatusCode.MODEL_REQUEST_AUTHORIZATION_INVALID,
         StatusCode.MODEL_PROVIDER_INVALID,
         StatusCode.MODEL_SERVICE_CONFIG_ERROR,
         StatusCode.MODEL_CONFIG_ERROR,
