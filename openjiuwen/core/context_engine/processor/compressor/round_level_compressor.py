@@ -135,6 +135,9 @@ class RoundLevelCompressorConfig(BaseModel):
     )
     """Selects/configures the model client used by the compressor."""
 
+    # In-memory host callback. Never serialize authority into saved context.
+    request_authority: Any = Field(default=None, exclude=True, repr=False)
+
     # ------------------------------------------------------------------
     # Advanced compression settings
     # ------------------------------------------------------------------
@@ -1285,7 +1288,15 @@ class RoundLevelCompressor(ContextProcessor):
 
     def _get_model(self) -> Model:
         if self._model is None:
-            self._model = Model(self._round_config.model_client, self._round_config.model)
+            self._model = Model(
+                self._round_config.model_client,
+                self._round_config.model,
+                **(
+                    {"request_authority": self._round_config.request_authority}
+                    if self._round_config.request_authority is not None
+                    else {}
+                ),
+            )
         return self._model
 
     def load_state(self, state: Dict[str, Any]) -> None:
