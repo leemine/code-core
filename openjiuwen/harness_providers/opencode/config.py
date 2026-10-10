@@ -77,8 +77,13 @@ class OpenCodeHarnessConfig:
     max_frame_bytes: int = 1024 * 1024
     max_response_bytes: int = 8 * 1024 * 1024
     max_turn_bytes: int = 8 * 1024 * 1024
+    # Explicit opt-in for an externally isolated runtime. This mode owns the
+    # server process only; it does not promise crash recovery of tool children.
+    server_mode: str = "systemd"
 
     def __post_init__(self):
+        if self.server_mode not in ("systemd", "direct"):
+            raise ValueError("OpenCode server_mode must be systemd or direct")
         object.__setattr__(self, "model", OpenCodeModelConfig.from_mapping(self.model))
         object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
         plugins = self.native_plugins
@@ -86,9 +91,7 @@ class OpenCodeHarnessConfig:
             if not isinstance(plugins, (list, tuple)) or any(
                 not isinstance(plugin, OpenCodeNativePluginConfig) for plugin in plugins
             ):
-                raise TypeError(
-                    "OpenCode native_plugins must be an array of OpenCodeNativePluginConfig values or null"
-                )
+                raise TypeError("OpenCode native_plugins must be an array of OpenCodeNativePluginConfig values or null")
             object.__setattr__(self, "native_plugins", tuple(plugins))
         for name in ("cli_path", "runtime_root"):
             value = getattr(self, name)

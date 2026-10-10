@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
+from openjiuwen.core.common.logging import agent_logger as logger
 from openjiuwen.harness_protocol import (
     AbortMode,
     BeforeToolContext,
@@ -73,6 +74,7 @@ class OpenCodeHarness(SerializedTurnHarness):
         self._runtime_permissions = None
         self._poisoned = False
         self._native_plugin_fingerprint = None
+        self._close_lock = asyncio.Lock()
         self._preflight = None
         self._preflight_bind_closed = False
         self._preflight_used = False
@@ -384,14 +386,45 @@ class OpenCodeHarness(SerializedTurnHarness):
                 raise HarnessProtocolError("OpenCode runtime permissions changed")
 
     async def _close_session(self) -> None:
-        self._poisoned = True
-        if self._preflight is not None:
-            self._preflight.close()
-        if self._transport:
-            await self._transport.close()
-        if self._server:
-            await self._server.stop()
-        self._transport = self._server = None
+        # stop() and an in-flight reader failure can both reach this method.
+        # Keep one owner until the existing supervisor confirms resource exit.
+        async with self._close_lock:
+            self._poisoned = True
+            if self._preflight is not None:
+                self._preflight.close()
+            transport, server = self._transport, self._server
+            if transport and self._session_id and not transport.closed.is_set():
+                try:
+                    async with asyncio.timeout(self._config.shutdown_timeout_s):
+                        await self._cancel_native_session(transport)
+                except Exception as exc:
+                    # A crashed or unresponsive native service still requires
+                    # owned cleanup. Never log native responses or credentials.
+                    logger.debug("[opencode] native shutdown incomplete: %s", type(exc).__name__)
+            try:
+                if transport:
+                    await transport.close()
+            finally:
+                if server:
+                    await server.stop()
+            self._transport = self._server = None
+
+    async def _cancel_native_session(self, transport) -> None:
+        result = await transport.request("POST", f"/session/{self._session_id}/abort")
+        if result is not True:
+            raise OpenCodeError("invalid_abort_response")
+        # Poll status without creating a second SSE consumer. Native idle is
+        # only the graceful-close barrier, never proof that every child exited.
+        while True:
+            statuses = await transport.request("GET", "/session/status")
+            if not isinstance(statuses, dict):
+                raise OpenCodeError("invalid_native_status")
+            status = statuses.get(self._session_id)
+            if self._session_id not in statuses or isinstance(status, dict) and status.get("type") == "idle":
+                return
+            if not isinstance(status, dict) or status.get("type") not in {"busy", "retry"}:
+                raise OpenCodeError("invalid_native_status")
+            await asyncio.sleep(0.05)
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
