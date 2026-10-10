@@ -1423,10 +1423,10 @@ async def test_write_file_overlong_path_returns_tool_error(sys_op) -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_empty_file_requires_read_then_allows_overwrite(sys_op, temp_dir):
-    file_path = os.path.join(temp_dir, "empty.py")
-    with open(file_path, "w", encoding="utf-8"):
-        pass
+async def test_write_empty_file_requires_read_then_allows_overwrite(sys_op, tmp_path):
+    path = tmp_path / "empty.py"
+    file_path = str(path)
+    await asyncio.to_thread(path.write_text, "", encoding="utf-8")
     write_tool = WriteFileTool(sys_op)
     denied = await write_tool.invoke({"file_path": file_path, "content": "value = 1\n"})
     assert denied.success is False
@@ -1435,34 +1435,31 @@ async def test_write_empty_file_requires_read_then_allows_overwrite(sys_op, temp
     assert read.success is True
     result = await write_tool.invoke({"file_path": file_path, "content": "value = 1\n"})
     assert result.success is True
-    with open(file_path, encoding="utf-8") as handle:
-        assert handle.read() == "value = 1\n"
+    assert await asyncio.to_thread(path.read_text, encoding="utf-8") == "value = 1\n"
 
 
 @pytest.mark.asyncio
-async def test_write_empty_file_rejects_change_after_read(sys_op, temp_dir):
-    file_path = os.path.join(temp_dir, "changed-empty.py")
-    with open(file_path, "w", encoding="utf-8"):
-        pass
+async def test_write_empty_file_rejects_change_after_read(sys_op, tmp_path):
+    path = tmp_path / "changed-empty.py"
+    file_path = str(path)
+    await asyncio.to_thread(path.write_text, "", encoding="utf-8")
     assert (await ReadFileTool(sys_op).invoke({"file_path": file_path})).success
-    with open(file_path, "w", encoding="utf-8") as handle:
-        handle.write("external content\n")
+    await asyncio.to_thread(path.write_text, "external content\n", encoding="utf-8")
     result = await WriteFileTool(sys_op).invoke({"file_path": file_path, "content": "replacement"})
     assert result.success is False
     assert "modified since read" in result.error
-    with open(file_path, encoding="utf-8") as handle:
-        assert handle.read() == "external content\n"
+    assert await asyncio.to_thread(path.read_text, encoding="utf-8") == "external content\n"
 
 
 @pytest.mark.asyncio
-async def test_write_empty_file_does_not_treat_unknown_snapshot_as_empty(sys_op, temp_dir):
-    file_path = os.path.join(temp_dir, "unknown-empty.py")
-    with open(file_path, "w", encoding="utf-8"):
-        pass
+async def test_write_empty_file_does_not_treat_unknown_snapshot_as_empty(sys_op, tmp_path):
+    path = tmp_path / "unknown-empty.py"
+    file_path = str(path)
+    await asyncio.to_thread(path.write_text, "", encoding="utf-8")
     read_tool = ReadFileTool(sys_op)
     with patch.object(read_tool, "_read_raw_text_for_edit_state", return_value=None):
         assert (await read_tool.invoke({"file_path": file_path})).success
     result = await WriteFileTool(sys_op).invoke({"file_path": file_path, "content": "replacement"})
     assert result.success is False
     assert "not been fully read" in result.error
-    assert os.path.getsize(file_path) == 0
+    assert (await asyncio.to_thread(path.stat)).st_size == 0
