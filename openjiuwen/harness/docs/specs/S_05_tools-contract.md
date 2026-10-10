@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`、最终强制授权） |
-| 最近一次修订日期 | 2026-10-09 |
+| 最近一次修订日期 | 2026-10-10 |
 | 关联 feature | `F_40_goal-tool-consumer-authority.md`、`F_04_tool-result-llm-rendering.md`、`F_05_provider-neutral-subagent-execution.md` |
 
 ## 范围 / 边界
@@ -302,3 +302,7 @@ checker；声明只增不减，callback 链结束时缺 checker 拒绝本次 inv
 再次检查。宿主 checker 负责原 Goal/Session/来源/当前资源权限，core 固定原工具及
 Manager/store/锁/backing Session 引用（首 callback 前固定）。拒绝作为原 AbilityManager 错误结果可观察，不吞成无 Goal。
 旧未声明 consumer 的直接调用、策略回调与无 Goal 返回保持原行为。
+
+## 文件覆盖前置条件
+
+`WriteFileTool` 覆盖已有文本文件前要求原 `ReadFileTool` 读取记录：非空文件必须累计覆盖所有行；已确认内容为空且原尺寸为零的记录也算完整读取。未知内容不能按空文件处理。修改时间或尺寸变化时继续校验内容快照，外部新增内容仍要求重读。文件工具描述、权限审批及结构化结果不变。
