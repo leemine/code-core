@@ -11,7 +11,7 @@ import pytest
 
 from openjiuwen.harness_protocol import HarnessInput, ResumePolicy, TurnEventKind
 from openjiuwen.harness_providers.base import ProviderStartupError
-from openjiuwen.harness_providers.opencode import OpenCodeHarness
+from openjiuwen.harness_providers.opencode import OpenCodeHarness, OpenCodeHarnessConfig
 
 from . import test_opencode_e2e as managed
 from ._contract import assert_turn_invariants, collect_turn, make_context, terminal_of
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("RUN_OPENCODE_DIRECT") != "1", re
 @pytest.mark.asyncio
 async def test_direct_text_tool_stop_and_resume(runtime):
     config, model, work, create = runtime
-    cfg = replace(config, server_mode="direct")
+    cfg = replace(config, server_mode=OpenCodeHarnessConfig().server_mode)
     h = create(cfg)
     context = make_context(cwd=str(work))
     await h.start(context)
@@ -52,7 +52,7 @@ async def test_direct_text_tool_stop_and_resume(runtime):
 @pytest.mark.parametrize("control", ["abort", "stop"])
 async def test_direct_normal_running_tool_control(runtime, control):
     config, model, work, create = runtime
-    h = create(replace(config, server_mode="direct"))
+    h = create(replace(config, server_mode=OpenCodeHarnessConfig().server_mode))
     await h.start(make_context(cwd=str(work)))
     marker = work / "pid"
     model.actions = [
@@ -84,7 +84,7 @@ async def test_direct_normal_running_tool_control(runtime, control):
 @pytest.mark.asyncio
 async def test_direct_stale_owner_is_not_adopted(runtime):
     config, _, work, create = runtime
-    cfg = replace(config, server_mode="direct")
+    cfg = replace(config, server_mode=OpenCodeHarnessConfig().server_mode)
     context = make_context(cwd=str(work))
     h = create(cfg)
     await h.start(context)

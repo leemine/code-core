@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Direct mode is explicit, owns only its child and never claims stale PIDs."""
+"""Default direct mode owns only its child and never claims stale PIDs."""
 
 import asyncio
 from pathlib import Path
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from openjiuwen.harness_providers.opencode import OpenCodeHarnessConfig
+from openjiuwen.harness_providers.opencode import OpenCodeHarnessConfig, OpenCodeHarnessProvider
 from openjiuwen.harness_providers.opencode.errors import OpenCodeError
 from openjiuwen.harness_providers.opencode.server import ManagedServer, _config_identity
 
@@ -23,9 +23,14 @@ def server():
 
 
 def test_mode_default_and_legacy_identity():
-    assert OpenCodeHarnessConfig().server_mode == "systemd"
-    assert "server_mode" not in _config_identity(OpenCodeHarnessConfig())
-    assert _config_identity(OpenCodeHarnessConfig(server_mode="direct"))["server_mode"] == "direct"
+    assert OpenCodeHarnessConfig().server_mode == "direct"
+    assert OpenCodeHarnessConfig.from_mapping({}).server_mode == "direct"
+    assert OpenCodeHarnessProvider.create({})._config.server_mode == "direct"
+    assert _config_identity(OpenCodeHarnessConfig())["server_mode"] == "direct"
+    legacy = OpenCodeHarnessConfig.from_mapping({"server_mode": "systemd"})
+    assert legacy.server_mode == "systemd"
+    assert "server_mode" not in _config_identity(legacy)
+    assert _config_identity(legacy) != _config_identity(OpenCodeHarnessConfig())
 
 
 @pytest.mark.parametrize("mode", ["auto", "", None, True, []])
