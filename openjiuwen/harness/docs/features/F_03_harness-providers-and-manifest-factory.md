@@ -241,3 +241,9 @@ await `tool.execute.before`。因此仅拒绝晚期 permission 不能代表未�
 修正后 Provider 确定性回归为 521 passed、1 个既有 DSH timing skip；新增 25 项首次迟到、
 原生记录缺失/重复/错配、查询中途范围变化及 permission assistant 关联用例。实际 CLI 的
 消息落库先于 hook 查询的可用性、真实读取阻断和最终配对仍待独立验收；本次没有新增真实探针。
+
+
+## 2026-10-10 OpenCode 默认直接启动
+
+OpenCode未指定server_mode时统一采用direct，宿主与外部实例复用同一服务生命周期。
+显式systemd及其旧存储身份保留；默认变更、升级边界与验证见[F_46](F_46_opencode-default-direct.md)。
