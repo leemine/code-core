@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
-| 最近一次修订日期 | 2026-10-08 |
-| 关联 feature | `F_42_runtime-authorization.md`、 `F_41_opencode-abort-event-reconciliation.md`、 `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
+| 最近一次修订日期 | 2026-10-10 |
+| 关联 feature | `F_45_opencode-direct-lifecycle.md`、 `F_42_runtime-authorization.md`、 `F_41_opencode-abort-event-reconciliation.md`、 `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
 
 ## 范围 / 边界
 
@@ -271,12 +271,20 @@ Codex 编译对应 bypass/MCP 参数，Swarm 不再解释这些字段；原运�
 
 OpenCode 首批固定 1.18.18 的 `/session` + `/event` HTTP/SSE 代际，复用
 SerializedTurnHarness 的输入队列、事件信封与唯一终态。配置与工厂导入不启动进程；
-运行要求受信非 root Linux、用户级 systemd/cgroup v2、明确授权的私有 runtime_root 和 cwd。
-每个宿主/agent/workspace scope 独占锁与随机 service；资源描述先于启动落盘，重试先核验并
+运行要求受信非 root Linux、明确授权的私有 runtime_root 和 cwd。默认
+`server_mode="systemd"` 另要求用户级 systemd/cgroup v2。
+默认模式下，每个宿主/agent/workspace scope 独占锁与随机 service；资源描述先于启动落盘，重试先核验并
 回收该描述所属的孤儿 unit。service 内 wrapper 持有原生启动锁，禁止旧排队启动跨 generation。
 不能确认退出则保留所有权和描述，禁止新建/attach；数据不自动删除。
 
-新 Provider 配置仅接受模型、显式 full_access、portable skills、CLI/私有运行根与有界传输参数；不接收任意
+显式 `server_mode="direct"` 供外部已隔离的 Linux 环境使用，直接启动同一固定原生服务，
+不要求沙箱内 systemd/cgroup，不自动降级。关闭先走原生 abort/idle，再等待自有服务子进程退出；
+这不证明全部工具后代退出，不承诺宿主／服务异常后的后代回收。无 subreaper 或进程树扫描。
+两模式使用不同 scope；默认模式保留旧配置身份。direct 遇到遗留 owner 描述拒绝自动接管
+（`direct_owner_recovery_required`），不能凭 PID 猜测回收。普通权限、来源、插件库存和每轮检查不变。
+Windows/macOS 尚未由此模式支持或验证。
+
+Provider 配置接受模型、显式 full_access、portable skills、CLI/私有运行根、server_mode 与有界传输参数；不接收任意
 原生 JSON、环境、插件或可执行覆盖。公共授权在 Provider 编译到私有 full_access；旧工厂
 未声明授权时保留默认普通策略，模型配置不能扩权。HOME/config 封存、managed/auth 来源拒绝、
 固定二进制与有效配置回读在启动完成前执行，每轮前复检。cgroup 用于资源回收，非 OS 沙箱。
@@ -472,6 +480,14 @@ slot，clear 清 slot。无新 Turn/模型/attach/输出 lease；idle 仅原调�
 goal_updated 事件保持。调用者取消不丢原操作 Task，同对象同行为重试等待同一结果。
 
 ### OpenCode requested-abort reconciliation
+
+Normal OpenCode session teardown first attempts the native session abort while
+the HTTP transport is still open, then waits for native idle within the existing
+shutdown timeout. This uses status requests, not another event consumer. Native
+failure or timeout proceeds to the existing owned-service cleanup. Concurrent
+reader failure and stop share one close operation; unconfirmed service exit
+retains handles for retry. Native idle is not a substitute for the supervisor's
+process-exit proof, and transport close failure cannot skip service cleanup.
 
 For the current Session with `abort_requested`, a native `session.error` whose
 name is exactly `MessageAbortedError` is nonterminal. It cannot select an

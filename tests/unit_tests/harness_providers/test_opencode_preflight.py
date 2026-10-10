@@ -87,13 +87,17 @@ def prepared(callback=None):
     harness._active_turn = SimpleNamespace(turn_id="turn-one", abort_requested=False, stop_requested=False)
 
     async def request(method, path):
+        if (method, path) == ("POST", "/session/ses_one/abort"):
+            return True
+        if (method, path) == ("GET", "/session/status"):
+            return {}
         assert (method, path) == ("GET", "/session/ses_one/message")
         return native_messages()
 
     async def close():
         pass
 
-    harness._transport = SimpleNamespace(request=request, close=close)
+    harness._transport = SimpleNamespace(request=request, close=close, closed=asyncio.Event())
     harness._preflight.begin(harness._active_turn, "msg_root")
     return harness
 

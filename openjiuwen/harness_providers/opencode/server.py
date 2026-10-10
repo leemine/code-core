@@ -1,7 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""One private server and recoverable systemd cgroup lease per host scope.
+"""One private server per host scope, with explicit resource ownership mode.
 
-This is resource ownership on a trusted Linux host, not a tool sandbox.
+The default systemd mode owns a recoverable cgroup; direct owns only its child
+server. Neither supplies a tool sandbox. Direct requires external isolation.
 No attach, global kill, native retry or automatic dependency installation.
 """
 
@@ -55,6 +56,8 @@ def lease(path):
 
 def _config_identity(config):
     identity = asdict(config)
+    if identity.get("server_mode") == "systemd":
+        identity.pop("server_mode")  # Preserve existing default storage identity.
     if identity.get("native_plugins") is None:
         identity.pop("native_plugins")
     model = identity.get("model")
@@ -124,6 +127,18 @@ class ManagedServer:
             return not root.exists()
 
     async def reap(self, owner):
+        if self.config.server_mode == "direct":
+            if owner != self.owner or self.read_owner() != owner:
+                raise OpenCodeError("direct_owner_recovery_required", category="process_start_failed")
+            if self.process is not None:
+                if self.process.returncode is None:
+                    self.process.terminate()
+                    try:
+                        await asyncio.wait_for(self.process.wait(), min(2, self.config.shutdown_timeout_s))
+                    except TimeoutError:
+                        self.process.kill()
+                await asyncio.wait_for(self.process.wait(), self.config.shutdown_timeout_s)
+            return
         values = await self.properties(owner)
         group = values.get("ControlGroup", "")
         if values.get("LoadState") != "not-found":
@@ -179,7 +194,9 @@ class ManagedServer:
             raise OpenCodeError("unadmitted_preflight_sources", category="process_start_failed")
         # These local admission checks precede service submission; keep lease
         # mutations synchronous so cancellation cannot race a worker thread.
-        if sys.platform != "linux" or os.geteuid() == 0 or not Path("/sys/fs/cgroup/cgroup.controllers").is_file():  # noqa: ASYNC240
+        if sys.platform != "linux" or os.geteuid() == 0:
+            raise OpenCodeError("unsupported_supervisor_platform", category="process_start_failed")
+        if self.config.server_mode == "systemd" and not Path("/sys/fs/cgroup/cgroup.controllers").is_file():  # noqa: ASYNC240
             raise OpenCodeError("unsupported_supervisor_platform", category="process_start_failed")
         if not self.config.runtime_root or not self.context.cwd:
             raise OpenCodeError("explicit_runtime_and_cwd_required", category="process_start_failed")
@@ -193,7 +210,10 @@ class ManagedServer:
         if not cli:
             raise OpenCodeError("cli_unavailable", category="process_start_failed")
         self.cli = Path(cli).resolve(strict=True)  # noqa: ASYNC240
-        identity = json.dumps([self.context.agent_id, self.context.host_session_id, self.cwd], sort_keys=True)
+        scope_identity = [self.context.agent_id, self.context.host_session_id, self.cwd]
+        if self.config.server_mode == "direct":
+            scope_identity.append("direct")
+        identity = json.dumps(scope_identity, sort_keys=True)
         self.scope = root / hashlib.sha256(identity.encode()).hexdigest()[:32]
         self.scope.mkdir(mode=0o700, exist_ok=True)
         private_directory(self.scope)
@@ -237,6 +257,10 @@ class ManagedServer:
             write_private(identity_file, fingerprint)
         previous = self.read_owner()
         if previous:
+            if self.config.server_mode == "direct":
+                # No PID guessing or takeover after host loss. The default
+                # managed mode's crash recovery is deliberately not emulated.
+                raise OpenCodeError("direct_owner_recovery_required", category="process_start_failed")
             # Reap only the exact described service. Unknown ownership fails closed.
             await self.reap(previous)
         native_lock = lease(self.scope / "native.lock")
@@ -284,6 +308,13 @@ class ManagedServer:
             self.log_path = self.root / "server.log"
             self.log = os.fdopen(os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb")
             launch_file = self.root / "launch.json"
+            launch_env = environment(
+                self.root,
+                self.native_config,
+                self.password,
+                persistent_root=self.persistent_root,
+                allow_native_plugins=bool(self.plugin_stage.specs),
+            )
             write_private(
                 launch_file,
                 {
@@ -291,19 +322,16 @@ class ManagedServer:
                     "cli": str(self.cli),
                     "cwd": self.cwd,
                     "port": port,
-                    "env": environment(
-                        self.root,
-                        self.native_config,
-                        self.password,
-                        persistent_root=self.persistent_root,
-                        allow_native_plugins=bool(self.plugin_stage.specs),
-                    ),
+                    "env": launch_env,
                 },
             )
             write_private(self.scope / "owner.json", owner)
             self.owner = owner
         finally:
             os.close(native_lock)
+        if self.config.server_mode == "direct":
+            await self._start_direct(port, launch_env)
+            return
         self.process = await asyncio.create_subprocess_exec(
             "/usr/bin/systemd-run",
             "--user",
@@ -330,17 +358,44 @@ class ManagedServer:
             start_new_session=True,
         )
 
+    async def _start_direct(self, port, launch_env):
+        spawning = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                str(self.cli),
+                "serve",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                cwd=self.cwd,
+                env=launch_env,
+                stdout=self.log,
+                stderr=self.log,
+                start_new_session=True,
+            )
+        )
+        try:
+            self.process = await asyncio.shield(spawning)
+        except asyncio.CancelledError:
+            # Keep the exact handle so startup rollback can close the
+            # server even if cancellation raced subprocess creation.
+            self.process = await spawning
+            raise
+
     async def verify_running(self):
         if self.process is None or self.process.returncode is not None:
             raise OpenCodeError("server_exited", category="process_start_failed")
-        values = await self.properties(self.owner)
-        if (
-            values.get("ActiveState") != "active"
-            or values.get("KillMode") != "control-group"
-            or not values.get("ControlGroup")
-            or int(values.get("MainPID", 0)) <= 0
-        ):
-            raise OpenCodeError("supervisor_ownership_unverified", category="process_start_failed")
+        if self.config.server_mode == "systemd":
+            values = await self.properties(self.owner)
+            if (
+                values.get("ActiveState") != "active"
+                or values.get("KillMode") != "control-group"
+                or not values.get("ControlGroup")
+                or int(values.get("MainPID", 0)) <= 0
+            ):
+                raise OpenCodeError("supervisor_ownership_unverified", category="process_start_failed")
+        elif self.read_owner() != self.owner:
+            raise OpenCodeError("direct_owner_recovery_required", category="process_start_failed")
         await asyncio.to_thread(self.sources.verify)
         if self.plugin_stage is not None:
             await asyncio.to_thread(self.plugin_stage.verify_files)

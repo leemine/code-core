@@ -1135,6 +1135,7 @@ def test_model_limits_compile_and_preserve_default_storage_identity():
     original = config()
     legacy = asdict(original)
     legacy.pop("native_plugins")
+    legacy.pop("server_mode")
     legacy["model"].pop("context_window")
     legacy["model"].pop("max_output_tokens")
     assert _config_identity(original) == legacy
