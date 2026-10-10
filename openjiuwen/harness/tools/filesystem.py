@@ -1326,9 +1326,16 @@ class WriteFileTool(Tool):
                     ranges = read_state.read_ranges if read_state else None
                     is_logically_complete = (
                         read_state is not None
-                        and read_state.total_lines > 0
-                        and ranges is not None
-                        and _ranges_cover(ranges, 1, read_state.total_lines)
+                        and (
+                            # An observed empty file has no line range to cover.
+                            # Unknown snapshots must not qualify as empty.
+                            (read_state.size_bytes == 0 and read_state.content == "")
+                            or (
+                                read_state.total_lines > 0
+                                and ranges is not None
+                                and _ranges_cover(ranges, 1, read_state.total_lines)
+                            )
+                        )
                     )
                     if read_state is None or not is_logically_complete:
                         if read_state is None:
