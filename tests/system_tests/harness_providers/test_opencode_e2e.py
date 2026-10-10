@@ -143,6 +143,7 @@ async def runtime(tmp_path):
     work.mkdir()
     (work / "opencode.json").write_text('{"model":"unadmitted/canary"}')
     config = OpenCodeHarnessConfig(
+        server_mode="systemd",
         cli_path=os.environ.get("OPENCODE_OC1_CLI", os.path.expanduser("~/.opencode/bin/opencode")),  # noqa: ASYNC240
         runtime_root=str(root),
         model=OpenCodeModelConfig("fixture", f"http://127.0.0.1:{port}/v1", "fixture-only"),

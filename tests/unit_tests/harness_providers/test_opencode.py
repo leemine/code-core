@@ -56,6 +56,7 @@ def context(**kwargs):
 
 
 def config(**kwargs):
+    kwargs.setdefault("server_mode", "systemd")  # These cases retain the legacy managed-service contract.
     return OpenCodeHarnessConfig(model=OpenCodeModelConfig("fixture", "http://127.0.0.1:1/v1", "test-secret"), **kwargs)
 
 

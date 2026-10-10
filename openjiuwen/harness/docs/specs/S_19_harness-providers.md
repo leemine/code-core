@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/` / `opencode/`） |
 | 最近一次修订日期 | 2026-10-10 |
-| 关联 feature | `F_45_opencode-direct-lifecycle.md`、 `F_42_runtime-authorization.md`、 `F_41_opencode-abort-event-reconciliation.md`、 `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
+| 关联 feature | `F_46_opencode-default-direct.md`、 `F_45_opencode-direct-lifecycle.md`、 `F_42_runtime-authorization.md`、 `F_41_opencode-abort-event-reconciliation.md`、 `F_39_goal-idle-control.md`、 `F_38_goal-idle-readmission.md`、 F_03_harness-providers-and-manifest-factory.md、F_07_opencode-provider-foundation.md、F_08_opencode-interaction-and-resume.md、F_09_opencode-managed-product-mcp.md、F_17_surface-runtime-policy.md、F_27_owned-turn-queue-interactions.md、F_31_opencode-model-gateway-source.md、F_32_native-exact-turn-exit.md |
 
 ## 范围 / 边界
 
@@ -272,15 +272,16 @@ Codex 编译对应 bypass/MCP 参数，Swarm 不再解释这些字段；原运�
 OpenCode 首批固定 1.18.18 的 `/session` + `/event` HTTP/SSE 代际，复用
 SerializedTurnHarness 的输入队列、事件信封与唯一终态。配置与工厂导入不启动进程；
 运行要求受信非 root Linux、明确授权的私有 runtime_root 和 cwd。默认
-`server_mode="systemd"` 另要求用户级 systemd/cgroup v2。
-默认模式下，每个宿主/agent/workspace scope 独占锁与随机 service；资源描述先于启动落盘，重试先核验并
+`server_mode="direct"`，适用于宿主和外部实例。显式 `server_mode="systemd"` 另要求用户级 systemd/cgroup v2。
+systemd模式下，每个宿主/agent/workspace scope 独占锁与随机 service；资源描述先于启动落盘，重试先核验并
 回收该描述所属的孤儿 unit。service 内 wrapper 持有原生启动锁，禁止旧排队启动跨 generation。
 不能确认退出则保留所有权和描述，禁止新建/attach；数据不自动删除。
 
-显式 `server_mode="direct"` 供外部已隔离的 Linux 环境使用，直接启动同一固定原生服务，
+默认 `server_mode="direct"` 供 Linux 宿主及外部已隔离环境使用，直接启动同一固定原生服务，
 不要求沙箱内 systemd/cgroup，不自动降级。关闭先走原生 abort/idle，再等待自有服务子进程退出；
 这不证明全部工具后代退出，不承诺宿主／服务异常后的后代回收。无 subreaper 或进程树扫描。
-两模式使用不同 scope；默认模式保留旧配置身份。direct 遇到遗留 owner 描述拒绝自动接管
+两模式使用不同 scope；显式systemd保留旧systemd配置身份，direct身份与此前显式direct一致。
+升级前需将依赖旧默认值的systemd部署明确配置为systemd，以继续原会话；不自动迁移旧服务或历史。direct 遇到遗留 owner 描述拒绝自动接管
 （`direct_owner_recovery_required`），不能凭 PID 猜测回收。普通权限、来源、插件库存和每轮检查不变。
 Windows/macOS 尚未由此模式支持或验证。
 

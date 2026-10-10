@@ -20,7 +20,7 @@ harness_providers/
 ├── claudecode/     # ClaudeCodeHarness over claude-agent-sdk (config / options / mapping / failure_classifier)
 ├── codex/          # CodexHarness over openai-codex (+ private runtime-policy/source compiler)
 ├── dsh/            # DshHarness over deepseek-harness (moved from agent_teams.external.dsh; see dsh/AGENTS.md)
-└── opencode/       # fixed HTTP/SSE CLI, interactions, checkpoints, runtime-policy mapping and owned systemd cgroup
+└── opencode/       # fixed HTTP/SSE CLI, interactions, checkpoints, runtime-policy mapping and direct/explicit systemd service ownership
 ```
 
 Provider names accepted by the factory: `native`, `native_v2`, `claudecode`, `codex`, `dsh`, `opencode`.
@@ -114,9 +114,9 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
     a private explicit runtime root and working directory, and the pinned
     binary digest. Never attach to user services, retry ambiguous inputs, approve unsupported
     interactions, or release a lease before exact owned exit confirmation. Persistent owner
-    descriptors and the service-side generation lease cover host hard crashes in the default
-    `server_mode="systemd"`, which requires user systemd/cgroup v2. Explicit `direct` mode
-    uses the native server child in externally isolated environments, confirms only that child
+    descriptors and the service-side generation lease cover host hard crashes in explicit
+    `server_mode="systemd"`, which requires user systemd/cgroup v2. Default `direct` mode
+    uses the native server child on hosts and in externally isolated environments, confirms only that child
     exit, and refuses stale-owner takeover. It does not promise abnormal descendant cleanup
     or provide a subreaper. No automatic fallback between modes. Text/tool/usage
     mapping shares the base lifecycle. OC2 routes approvals/questions through the base interaction ledger,
