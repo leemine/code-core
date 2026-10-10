@@ -111,10 +111,14 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    C1, and plugin controls cannot be supplied through arbitrary config overrides.
 
 11. **OpenCode owns one service per scope.** Runtime admission requires non-root Linux,
-    user systemd/cgroup v2, a private explicit runtime root and working directory, and the pinned
+    a private explicit runtime root and working directory, and the pinned
     binary digest. Never attach to user services, retry ambiguous inputs, approve unsupported
     interactions, or release a lease before exact owned exit confirmation. Persistent owner
-    descriptors and the service-side generation lease cover host hard crashes. Text/tool/usage
+    descriptors and the service-side generation lease cover host hard crashes in the default
+    `server_mode="systemd"`, which requires user systemd/cgroup v2. Explicit `direct` mode
+    uses the native server child in externally isolated environments, confirms only that child
+    exit, and refuses stale-owner takeover. It does not promise abnormal descendant cleanup
+    or provide a subreaper. No automatic fallback between modes. Text/tool/usage
     mapping shares the base lifecycle. OC2 routes approvals/questions through the base interaction ledger,
     publishes an unsafe checkpoint before prompt submission and only marks a session resumable after an
     authoritative idle terminal. OC4's reserved product MCP accepts only authenticated loopback HTTP,
@@ -136,8 +140,9 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
     undeclared tools fail startup. Every admitted custom tool is wrapped so its
     native `context.ask` request reaches the existing host permission ledger
     before plugin code executes. Source and staged bytes are rechecked before
-    each Turn, the snapshot fingerprint is checkpoint-bound, and cgroup
-    emptiness—not the optional plugin `dispose` callback—is the cleanup authority.
+    each Turn, and the snapshot fingerprint is checkpoint-bound. In systemd mode, cgroup
+    emptiness is the cleanup authority; direct mode confirms only its owned server exit.
+    The optional plugin `dispose` callback never proves descendant cleanup.
 13. **Runtime policy is compiled privately and only narrows authorization.**
     Codex requires an isolated process environment plus explicit startup source
     roots, maps read-only/workspace-write to native sandbox and host approval,
