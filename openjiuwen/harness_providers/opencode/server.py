@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """One private server per host scope, with explicit resource ownership mode.
 
-The default systemd mode owns a recoverable cgroup; direct owns only its child
+Explicit systemd mode owns a recoverable cgroup; default direct owns only its child
 server. Neither supplies a tool sandbox. Direct requires external isolation.
 No attach, global kill, native retry or automatic dependency installation.
 """
@@ -57,7 +57,7 @@ def lease(path):
 def _config_identity(config):
     identity = asdict(config)
     if identity.get("server_mode") == "systemd":
-        identity.pop("server_mode")  # Preserve existing default storage identity.
+        identity.pop("server_mode")  # Preserve legacy systemd storage identity.
     if identity.get("native_plugins") is None:
         identity.pop("native_plugins")
     model = identity.get("model")

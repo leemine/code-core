@@ -77,9 +77,9 @@ class OpenCodeHarnessConfig:
     max_frame_bytes: int = 1024 * 1024
     max_response_bytes: int = 8 * 1024 * 1024
     max_turn_bytes: int = 8 * 1024 * 1024
-    # Explicit opt-in for an externally isolated runtime. This mode owns the
-    # server process only; it does not promise crash recovery of tool children.
-    server_mode: str = "systemd"
+    # The common host/sandbox default owns only its server process. Select
+    # systemd explicitly for cgroup-based recovery of tool descendants.
+    server_mode: str = "direct"
 
     def __post_init__(self):
         if self.server_mode not in ("systemd", "direct"):
