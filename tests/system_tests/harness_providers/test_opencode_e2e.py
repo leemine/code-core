@@ -784,9 +784,15 @@ asyncio.run(main())
             await cleanup.reap(old["owner"])
 
 
-@pytest.mark.parametrize("crash", [False, True])
+@pytest.mark.parametrize("crash,exec_shell", [(False, False), (False, True), (True, False)])
 @pytest.mark.asyncio
-async def test_stubborn_native_tool_reaped_on_stop_or_server_crash(runtime, crash):
+async def test_stubborn_native_tool_reaped_on_stop_or_server_crash(
+    runtime,
+    crash,
+    exec_shell,
+    monkeypatch,
+    record_property,
+):
     _, model, work, create = runtime
     import shlex
 
@@ -797,7 +803,13 @@ async def test_stubborn_native_tool_reaped_on_stop_or_server_crash(runtime, cras
     script = "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
     script += f"Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(60)"
     model.actions = [
-        {"tool": "bash", "args": {"command": "python3 -c " + shlex.quote(script), "description": "owned fixture"}}
+        {
+            "tool": "bash",
+            "args": {
+                "command": ("exec " if exec_shell else "") + "python3 -c " + shlex.quote(script),
+                "description": "owned fixture",
+            },
+        }
     ]
     receipt = await h.send(HarnessInput("run owned stubborn tool"))
     collecting = asyncio.create_task(collect_turn(h, receipt.turn_id))
@@ -805,6 +817,39 @@ async def test_stubborn_native_tool_reaped_on_stop_or_server_crash(runtime, cras
         while not marker.exists():  # noqa: ASYNC110 - cross-process file, no in-process Event
             await asyncio.sleep(0.05)
     pid = int(marker.read_text())
+    if not crash:
+        original_stop = server.stop
+        original_request = h._transport.request
+        shutdown_responses = []
+
+        async def observe_native_request(method, path, *args, **kwargs):
+            result = await original_request(method, path, *args, **kwargs)
+            if (method, path) in {("POST", f"/session/{h._session_id}/abort"), ("GET", "/session/status")}:
+                shutdown_responses.append((method, result))
+            return result
+
+        monkeypatch.setattr(h._transport, "request", observe_native_request)
+
+        async def observe_native_cleanup_before_service_stop():
+            # The supervisor still runs even if this assertion would fail, so
+            # a regression cannot strand the fixture's TERM-resistant tool.
+            stat = Path(f"/proc/{pid}/stat")
+            try:
+                fields = stat.read_text().rsplit(")", 1)[1].split()  # noqa: ASYNC240 - local procfs observation
+                native_exited = fields[0] == "Z"
+            except FileNotFoundError:
+                native_exited = True
+            record_property("native_exited_before_service_stop", native_exited)
+            await original_stop()
+            # Native idle can precede forced process exit, even for exec shell.
+            # Assert the native protocol barrier and final owned cleanup, not
+            # an unsupported guarantee that idle proves every child has exited.
+            assert shutdown_responses[0] == ("POST", True)
+            method, statuses = shutdown_responses[-1]
+            assert method == "GET"
+            assert h._session_id not in statuses or statuses[h._session_id]["type"] == "idle"
+
+        monkeypatch.setattr(server, "stop", observe_native_cleanup_before_service_stop)
     if crash:
         # MainPID is our lease wrapper. Kill its exact native CLI child so the
         # test exercises Server death, not only the supervisor's own death.
